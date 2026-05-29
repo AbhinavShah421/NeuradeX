@@ -1,0 +1,30 @@
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+pydantic-settings==2.1.0
+
+# RabbitMQ (async)
+aio-pika==9.4.1
+
+# PostgreSQL / TimescaleDB
+asyncpg==0.29.0
+
+# MongoDB
+motor==3.3.2
+
+# Redis
+redis==5.0.1
+
+# HTTP client (Groww API)
+httpx==0.27.0
+
+# Yahoo Finance (fallback)
+yfinance==0.2.37
+
+# News
+requests==2.31.0
+
+# Timezone support
+tzdata==2024.1
+
+python-dotenv==1.0.0

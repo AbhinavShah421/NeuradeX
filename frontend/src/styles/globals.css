@@ -1,0 +1,498 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Design Tokens ─────────────────────────────────────────────────────────── */
+:root {
+  --nd-green:    #00b386;
+  --nd-green-50: #e8f7f3;
+  --nd-red:      #e74c3c;
+  --nd-red-50:   #fef2f2;
+  --nd-orange:   #f5a623;
+  --nd-purple:   #7c3aed;
+  --nd-blue:     #1976d2;
+
+  /* Light mode */
+  --nd-bg:        #ffffff;
+  --nd-surface:   #f8f8f8;
+  --nd-surface-2: #f0f0f0;
+  --nd-border:    #e8e8e8;
+  --nd-text-1:    #1a1a1a;
+  --nd-text-2:    #767676;
+  --nd-text-3:    #b0b0b0;
+  --nd-shadow:    0 1px 4px rgba(0,0,0,0.08);
+  --nd-shadow-md: 0 2px 12px rgba(0,0,0,0.10);
+}
+
+.dark-mode {
+  --nd-bg:        #0d1117;
+  --nd-surface:   #161b22;
+  --nd-surface-2: #21262d;
+  --nd-border:    #30363d;
+  --nd-text-1:    #e6edf3;
+  --nd-text-2:    #8b949e;
+  --nd-text-3:    #484f58;
+  --nd-shadow:    0 1px 4px rgba(0,0,0,0.4);
+  --nd-shadow-md: 0 2px 12px rgba(0,0,0,0.5);
+}
+
+/* ── Reset ─────────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  font-family: 'Roboto', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: var(--nd-bg);
+  color: var(--nd-text-1);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+#root { min-height: 100vh; display: flex; flex-direction: column; }
+
+/* ── Header / Nav ──────────────────────────────────────────────────────────── */
+.nd-header {
+  background: var(--nd-bg);
+  border-bottom: 1px solid var(--nd-border);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  box-shadow: var(--nd-shadow);
+}
+
+.nd-header-inner {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 0 24px;
+  height: 58px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.nd-logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+  color: var(--nd-text-1);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  white-space: nowrap;
+  margin-right: 16px;
+}
+
+.nd-logo-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: linear-gradient(135deg, #00b386 0%, #0070f3 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  flex-shrink: 0;
+}
+
+.nd-logo-icon .material-icons { font-size: 18px; }
+
+.nd-nav {
+  display: flex;
+  align-items: stretch;
+  height: 58px;
+  flex: 1;
+  gap: 0;
+}
+
+.nd-nav-link {
+  padding: 0 14px;
+  height: 58px;
+  display: flex;
+  align-items: center;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--nd-text-2);
+  text-decoration: none;
+  border-bottom: 3px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+  white-space: nowrap;
+}
+
+.nd-nav-link:hover { color: var(--nd-text-1); }
+
+.nd-nav-link.active {
+  color: var(--nd-text-1);
+  border-bottom-color: var(--nd-green);
+  font-weight: 600;
+}
+
+.nd-header-right {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.nd-connection {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--nd-text-2);
+}
+
+.nd-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.nd-dot.green { background: var(--nd-green); }
+.nd-dot.red   { background: var(--nd-red); }
+
+.nd-theme-btn {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1px solid var(--nd-border);
+  background: var(--nd-surface);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: var(--nd-text-2);
+  transition: background 0.15s, color 0.15s;
+}
+
+.nd-theme-btn:hover { background: var(--nd-surface-2); color: var(--nd-text-1); }
+.nd-theme-btn .material-icons { font-size: 17px; }
+
+/* ── Market ticker strip ────────────────────────────────────────────────────── */
+.nd-ticker {
+  border-top: 1px solid var(--nd-border);
+  background: var(--nd-surface);
+  padding: 5px 24px;
+  display: flex;
+  justify-content: center;
+  gap: 36px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.nd-ticker::-webkit-scrollbar { display: none; }
+
+.nd-ticker-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+  font-size: 12.5px;
+}
+
+.nd-ticker-name  { font-weight: 700; color: var(--nd-text-1); }
+.nd-ticker-val   { color: var(--nd-text-2); }
+.nd-ticker-up    { color: var(--nd-green); font-size: 12px; }
+.nd-ticker-dn    { color: var(--nd-red);   font-size: 12px; }
+
+/* ── Main / Footer ─────────────────────────────────────────────────────────── */
+.nd-main {
+  flex: 1;
+  max-width: 1280px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 28px 24px;
+}
+
+.nd-footer {
+  border-top: 1px solid var(--nd-border);
+  padding: 14px 24px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--nd-text-3);
+  background: var(--nd-surface);
+}
+
+/* ── Cards ─────────────────────────────────────────────────────────────────── */
+.nd-card {
+  background: var(--nd-bg);
+  border: 1px solid var(--nd-border);
+  border-radius: 10px;
+  padding: 20px;
+  box-shadow: var(--nd-shadow);
+}
+
+.nd-surface {
+  background: var(--nd-surface);
+  border-radius: 10px;
+  padding: 20px;
+}
+
+/* ── Typography ────────────────────────────────────────────────────────────── */
+.nd-page-title { font-size: 20px; font-weight: 600; color: var(--nd-text-1); margin-bottom: 2px; }
+.nd-page-sub   { font-size: 13px; color: var(--nd-text-2); margin-bottom: 20px; }
+.nd-section-title { font-size: 15px; font-weight: 600; color: var(--nd-text-1); margin-bottom: 14px; }
+
+/* ── Stat labels ────────────────────────────────────────────────────────────── */
+.nd-label    { font-size: 11.5px; color: var(--nd-text-2); margin-bottom: 4px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.3px; }
+.nd-value-xl { font-size: 28px; font-weight: 700; color: var(--nd-text-1); }
+.nd-value-lg { font-size: 22px; font-weight: 700; color: var(--nd-text-1); }
+.nd-value-md { font-size: 17px; font-weight: 700; color: var(--nd-text-1); }
+
+/* ── Color utils ────────────────────────────────────────────────────────────── */
+.nd-green  { color: var(--nd-green) !important; }
+.nd-red    { color: var(--nd-red)   !important; }
+.nd-muted  { color: var(--nd-text-2); }
+
+/* ── Badges ─────────────────────────────────────────────────────────────────── */
+.nd-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 10px;
+  border-radius: 100px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.nd-badge-green  { background: var(--nd-green-50); color: var(--nd-green); }
+.nd-badge-red    { background: var(--nd-red-50);   color: var(--nd-red); }
+.nd-badge-gray   { background: var(--nd-surface-2); color: var(--nd-text-2); }
+.nd-badge-orange { background: #fff7ed; color: #c2410c; }
+.nd-badge-purple { background: #f5f3ff; color: var(--nd-purple); }
+
+/* ── Table ──────────────────────────────────────────────────────────────────── */
+.nd-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+
+.nd-table th {
+  padding: 10px 14px;
+  text-align: left;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--nd-text-2);
+  border-bottom: 1px solid var(--nd-border);
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+
+.nd-table th:hover { color: var(--nd-text-1); }
+.nd-table th.active-sort { color: var(--nd-green); }
+
+.nd-table td {
+  padding: 13px 14px;
+  border-bottom: 1px solid var(--nd-border);
+  color: var(--nd-text-1);
+}
+
+.nd-table tbody tr:last-child td { border-bottom: none; }
+.nd-table tbody tr:hover { background: var(--nd-surface); }
+.nd-table .text-right { text-align: right; }
+
+/* ── Tabs ───────────────────────────────────────────────────────────────────── */
+.nd-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--nd-border);
+  margin-bottom: 24px;
+  gap: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.nd-tabs::-webkit-scrollbar { display: none; }
+
+.nd-tab {
+  padding: 10px 18px;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--nd-text-2);
+  border: none;
+  background: none;
+  cursor: pointer;
+  border-bottom: 3px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+  white-space: nowrap;
+  font-family: 'Roboto', sans-serif;
+}
+
+.nd-tab:hover { color: var(--nd-text-1); }
+.nd-tab.active { color: var(--nd-text-1); border-bottom-color: var(--nd-green); font-weight: 600; }
+
+/* ── Buttons ────────────────────────────────────────────────────────────────── */
+.nd-btn {
+  border: none;
+  padding: 9px 18px;
+  border-radius: 6px;
+  font-size: 13.5px;
+  font-weight: 500;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  transition: opacity 0.15s, background 0.15s;
+  font-family: 'Roboto', sans-serif;
+  white-space: nowrap;
+}
+
+.nd-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.nd-btn-primary { background: var(--nd-green); color: #fff; }
+.nd-btn-primary:hover:not(:disabled) { opacity: 0.88; }
+
+.nd-btn-outline {
+  background: transparent;
+  color: var(--nd-text-1);
+  border: 1px solid var(--nd-border);
+}
+.nd-btn-outline:hover:not(:disabled) { background: var(--nd-surface); }
+
+.nd-btn-ghost {
+  background: transparent;
+  color: var(--nd-text-2);
+  border: none;
+}
+.nd-btn-ghost:hover { background: var(--nd-surface-2); color: var(--nd-text-1); }
+
+/* ── Inputs ─────────────────────────────────────────────────────────────────── */
+.nd-input, .nd-select {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid var(--nd-border);
+  border-radius: 6px;
+  font-size: 13.5px;
+  color: var(--nd-text-1);
+  background: var(--nd-bg);
+  font-family: 'Roboto', sans-serif;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.nd-input:focus, .nd-select:focus { border-color: var(--nd-green); }
+
+/* ── Metric chip ─────────────────────────────────────────────────────────────── */
+.nd-metric {
+  background: var(--nd-surface);
+  border: 1px solid var(--nd-border);
+  border-radius: 10px;
+  padding: 16px;
+}
+.nd-metric-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--nd-text-2); margin-bottom: 8px; }
+.nd-metric-value { font-size: 20px; font-weight: 700; color: var(--nd-text-1); }
+.nd-metric-sub   { font-size: 12px; color: var(--nd-text-2); margin-top: 4px; }
+
+/* ── Icon chip ──────────────────────────────────────────────────────────────── */
+.nd-icon-chip {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.nd-icon-chip .material-icons { font-size: 20px; }
+
+/* ── Loading ────────────────────────────────────────────────────────────────── */
+.nd-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 80px 24px;
+  color: var(--nd-text-2);
+  gap: 14px;
+}
+
+.nd-spin {
+  animation: nd-spin 0.9s linear infinite;
+  color: var(--nd-green);
+  font-size: 36px !important;
+}
+
+@keyframes nd-spin  { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+/* GPU-safe pulse: only opacity + scale — no box-shadow, no color changes */
+@keyframes nd-pulse {
+  0%, 100% { opacity: 1;    transform: translateZ(0) scale(1);    }
+  50%       { opacity: 0.4;  transform: translateZ(0) scale(0.78); }
+}
+
+@keyframes nd-slide-in {
+  from { opacity: 0; transform: translateZ(0) translateY(-6px); }
+  to   { opacity: 1; transform: translateZ(0) translateY(0);    }
+}
+
+/*
+ * Chart GPU isolation — applied via className, NEVER via inline style.
+ * Inline styles get re-applied by React on every render, briefly demoting
+ * the element from its GPU compositing layer and causing flicker/blur.
+ * CSS classes are set once at paint time and remain stable.
+ *
+ * nd-chart-col  : left 60% chart column — stable content, pre-promote layer
+ * nd-info-col   : right 40% info column — changes on every step, so NO will-change
+ *                 (will-change on changing content forces expensive GPU texture uploads)
+ * nd-chart-gpu  : innermost chart wrapper — forces canvas onto own compositing layer
+ */
+.nd-chart-col {
+  transform: translateZ(0);
+  -webkit-transform: translateZ(0);
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  will-change: transform;
+}
+
+.nd-info-col {
+  transform: translateZ(0);
+  -webkit-transform: translateZ(0);
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  /* deliberately no will-change: content updates every step */
+}
+
+.nd-chart-gpu {
+  transform: translateZ(0);
+  -webkit-transform: translateZ(0);
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  will-change: transform;
+}
+
+/* ── Alert banners ──────────────────────────────────────────────────────────── */
+.nd-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 16px;
+  border-radius: 8px;
+  font-size: 13.5px;
+  margin-bottom: 16px;
+}
+.nd-alert .material-icons { font-size: 18px; flex-shrink: 0; margin-top: 1px; }
+
+.nd-alert-error  { background: var(--nd-red-50); color: var(--nd-red); border: 1px solid #fca5a5; }
+.nd-alert-green  { background: var(--nd-green-50); color: #065f46; border: 1px solid #6ee7b7; }
+.nd-alert-orange { background: #fff7ed; color: #9a3412; border: 1px solid #fdba74; }
+
+/* ── Label input group ──────────────────────────────────────────────────────── */
+.nd-field-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--nd-text-2);
+  margin-bottom: 5px;
+}
+
+/* ── Divider ────────────────────────────────────────────────────────────────── */
+.nd-divider { border: none; border-top: 1px solid var(--nd-border); }
+
+/* ── Scrollbar ──────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--nd-border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--nd-text-3); }
+
+/* ── Range input ────────────────────────────────────────────────────────────── */
+input[type=range] { accent-color: var(--nd-green); }

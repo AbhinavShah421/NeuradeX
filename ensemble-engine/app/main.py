@@ -1,0 +1,224 @@
+import asyncio
+import json
+import logging
+import uuid
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+
+import aio_pika
+import redis.asyncio as redis_async
+import asyncpg
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic_settings import BaseSettings
+from pydantic import model_validator
+
+from app.aggregator import aggregate_signals, DEFAULT_WEIGHTS
+from app.agent_collector import AgentSignalCollector
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
+
+
+class Settings(BaseSettings):
+    SERVICE_PORT: int = 8007
+    SERVICE_NAME: str = "ensemble-engine"
+    POSTGRES_HOST: str = "postgres"
+    POSTGRES_PORT: int = 5432
+    POSTGRES_USER: str = "stock_user"
+    POSTGRES_PASSWORD: str = "stock_password"
+    POSTGRES_DB: str = "stock_prediction_db"
+    POSTGRES_URL: str = ""
+    REDIS_HOST: str = "redis"
+    REDIS_PORT: int = 6379
+    REDIS_DB: int = 0
+    REDIS_PASSWORD: str = ""
+    REDIS_URL: str = ""
+    RABBITMQ_HOST: str = "rabbitmq"
+    RABBITMQ_PORT: int = 5672
+    RABBITMQ_USER: str = "guest"
+    RABBITMQ_PASSWORD: str = "guest"
+    RABBITMQ_URL: str = ""
+    AGENT_SIGNAL_TIMEOUT_SECONDS: float = 5.0
+    MIN_CONFIDENCE_TO_TRADE: float = 0.60
+
+    @model_validator(mode="after")
+    def build_urls(self) -> "Settings":
+        if not self.POSTGRES_URL:
+            self.POSTGRES_URL = f"postgresql://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+        if not self.REDIS_URL:
+            auth = f":{self.REDIS_PASSWORD}@" if self.REDIS_PASSWORD else ""
+            self.REDIS_URL = f"redis://{auth}{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
+        if not self.RABBITMQ_URL:
+            self.RABBITMQ_URL = f"amqp://{self.RABBITMQ_USER}:{self.RABBITMQ_PASSWORD}@{self.RABBITMQ_HOST}:{self.RABBITMQ_PORT}/"
+        return self
+
+    class Config:
+        env_file = ".env"
+        case_sensitive = True
+
+
+settings = Settings()
+_pool: asyncpg.Pool | None = None
+_redis: redis_async.Redis | None = None
+_publisher: aio_pika.RobustConnection | None = None
+_pub_channel: aio_pika.Channel | None = None
+_tasks: list[asyncio.Task] = []
+_recent_decisions: list[dict] = []
+
+
+async def _load_weights_from_db() -> dict[str, float]:
+    if not _pool:
+        return dict(DEFAULT_WEIGHTS)
+    try:
+        rows = await _pool.fetch("SELECT agent, weight FROM agent_weights")
+        if rows:
+            return {r["agent"]: float(r["weight"]) for r in rows}
+    except Exception as exc:
+        logger.warning("Could not load weights from DB: %s — using defaults", exc)
+    return dict(DEFAULT_WEIGHTS)
+
+
+async def on_all_signals_received(symbol: str, agent_signals: dict) -> None:
+    weights = await _load_weights_from_db()
+    result = aggregate_signals(agent_signals, weights)
+
+    # Gate: below minimum confidence → downgrade to HOLD
+    if result["weighted_confidence"] < settings.MIN_CONFIDENCE_TO_TRADE:
+        result["final_action"] = "HOLD"
+
+    # Extract price and ATR from technical agent indicators (used by risk-engine)
+    current_price = 0.0
+    atr = 0.0
+    for agent_data in agent_signals.values():
+        indicators = agent_data.get("indicators", {})
+        if isinstance(indicators, dict):
+            if not current_price and indicators.get("close"):
+                current_price = float(indicators["close"])
+            if not atr and indicators.get("atr"):
+                atr = float(indicators["atr"])
+            if current_price and atr:
+                break
+
+    decision = {
+        "event_id": str(uuid.uuid4()),
+        "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+        "service": settings.SERVICE_NAME,
+        "version": "1.0",
+        "payload": {
+            "symbol": symbol,
+            "exchange": "NSE",
+            "final_action": result["final_action"],
+            "weighted_confidence": result["weighted_confidence"],
+            "agent_votes": result["agent_votes"],
+            "agreement_score": result["agreement_score"],
+            "uncertainty": result["uncertainty"],
+            "scores": result["scores"],
+            "weights_used": weights,
+            "current_price": current_price,
+            "atr": atr,
+        },
+    }
+
+    logger.info(
+        "ENSEMBLE DECISION: %s → %s (conf=%.2f, agreement=%.2f)",
+        symbol,
+        result["final_action"],
+        result["weighted_confidence"],
+        result["agreement_score"],
+    )
+
+    # Store in Redis for API access
+    if _redis:
+        try:
+            await _redis.setex(
+                f"ensemble:{symbol}",
+                300,
+                json.dumps(decision, default=str),
+            )
+        except Exception as exc:
+            logger.error("Redis decision store failed: %s", exc)
+
+    # Publish to ensemble.decision exchange
+    if _pub_channel:
+        try:
+            exchange = await _pub_channel.get_exchange("ensemble.decision")
+            await exchange.publish(
+                aio_pika.Message(
+                    body=json.dumps(decision, default=str).encode(),
+                    delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                    content_type="application/json",
+                ),
+                routing_key="decision",
+            )
+        except Exception as exc:
+            logger.error("Ensemble publish failed: %s", exc)
+
+    _recent_decisions.insert(0, decision)
+    if len(_recent_decisions) > 50:
+        _recent_decisions.pop()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _pool, _redis, _publisher, _pub_channel
+
+    for attempt in range(1, 11):
+        try:
+            _pool = await asyncpg.create_pool(settings.POSTGRES_URL, min_size=2, max_size=6)
+            break
+        except Exception:
+            await asyncio.sleep(min(2 ** attempt, 30))
+
+    _redis = redis_async.from_url(settings.REDIS_URL, decode_responses=True)
+    _publisher = await aio_pika.connect_robust(settings.RABBITMQ_URL)
+    _pub_channel = await _publisher.channel()
+
+    collector = AgentSignalCollector(timeout_seconds=settings.AGENT_SIGNAL_TIMEOUT_SECONDS)
+    collector.on_decision_ready(on_all_signals_received)
+
+    _tasks.append(asyncio.create_task(collector.start(settings.RABBITMQ_URL), name="ensemble-collector"))
+
+    logger.info("ensemble-engine ready — timeout=%.1fs min_confidence=%.2f",
+                settings.AGENT_SIGNAL_TIMEOUT_SECONDS, settings.MIN_CONFIDENCE_TO_TRADE)
+    yield
+
+    for t in _tasks:
+        t.cancel()
+    await asyncio.gather(*_tasks, return_exceptions=True)
+    if _publisher:
+        await _publisher.close()
+    if _redis:
+        await _redis.aclose()
+    if _pool:
+        await _pool.close()
+
+
+app = FastAPI(title="NeuradeX — Ensemble Engine", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "service": settings.SERVICE_NAME}
+
+
+@app.get("/decision/{symbol}")
+async def get_decision(symbol: str):
+    if not _redis:
+        return {"error": "not ready"}
+    raw = await _redis.get(f"ensemble:{symbol.upper()}")
+    if not raw:
+        return {"error": f"no recent decision for {symbol}"}
+    return json.loads(raw)
+
+
+@app.get("/decisions/recent")
+async def get_recent_decisions(limit: int = 20):
+    return {"decisions": _recent_decisions[:limit]}
+
+
+@app.get("/weights")
+async def get_weights():
+    weights = await _load_weights_from_db()
+    return {"weights": weights}

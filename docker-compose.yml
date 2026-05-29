@@ -1,0 +1,522 @@
+
+services:
+  # ── Infrastructure ────────────────────────────────────────────────────────────
+
+  postgres:
+    image: timescale/timescaledb:latest-pg15
+    container_name: stock-prediction-postgres
+    environment:
+      POSTGRES_USER: stock_user
+      POSTGRES_PASSWORD: stock_password
+      POSTGRES_DB: stock_prediction_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_timescale.sql:/docker-entrypoint-initdb.d/init_timescale.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stock_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - stock-prediction-network
+
+  mongodb:
+    image: mongo:6
+    container_name: stock-prediction-mongodb
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: stock_admin
+      MONGO_INITDB_ROOT_PASSWORD: stock_password
+      MONGO_INITDB_DATABASE: stock_prediction
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - stock-prediction-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: stock-prediction-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - stock-prediction-network
+
+  rabbitmq:
+    image: rabbitmq:3.12-management-alpine
+    container_name: stock-prediction-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - stock-prediction-network
+
+  influxdb:
+    image: influxdb:2-alpine
+    container_name: stock-prediction-influxdb
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: stock_user
+      DOCKER_INFLUXDB_INIT_PASSWORD: stock_password
+      DOCKER_INFLUXDB_INIT_ORG: stock-org
+      DOCKER_INFLUXDB_INIT_BUCKET: stock-metrics
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: stock-token
+    ports:
+      - "8086:8086"
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - stock-prediction-network
+
+  elasticsearch:
+    image: elasticsearch:8.11.0
+    container_name: stock-prediction-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health | grep -q '\"status\":\"green\"\\|\"status\":\"yellow\"'"]
+      interval: 15s
+      timeout: 10s
+      retries: 12
+    networks:
+      - stock-prediction-network
+
+  kibana:
+    image: kibana:8.11.0
+    container_name: stock-prediction-kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - xpack.security.enabled=false
+    ports:
+      - "5601:5601"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      - stock-prediction-network
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.10.0
+    container_name: stock-prediction-mlflow
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow_data:/mlflow
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --default-artifact-root /mlflow/artifacts
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 6
+    networks:
+      - stock-prediction-network
+
+  # ── Existing Backend (monolith, remains during transition) ────────────────────
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: ../docker/Dockerfile.backend
+    container_name: stock-prediction-backend
+    env_file:
+      - ./backend/.env
+    environment:
+      POSTGRES_HOST: postgres
+      MONGODB_HOST: mongodb
+      REDIS_HOST: redis
+      RABBITMQ_HOST: rabbitmq
+      INFLUXDB_HOST: influxdb
+      LLM_API_URL: http://host.docker.internal:11434
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/app:/app/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      influxdb:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      - stock-prediction-network
+    command: python -m uvicorn app.main:app_sio --host 0.0.0.0 --port 8000 --reload
+
+  # ── Phase 1: Market Data Service ──────────────────────────────────────────────
+
+  market-data-service:
+    build:
+      context: ./market-data-service
+      dockerfile: Dockerfile
+    container_name: stock-prediction-market-data
+    env_file:
+      - ./backend/.env
+    environment:
+      POSTGRES_HOST: postgres
+      MONGODB_HOST: mongodb
+      REDIS_HOST: redis
+      RABBITMQ_HOST: rabbitmq
+      SERVICE_PORT: "8001"
+      WATCHLIST: "RELIANCE,TCS,INFY,HDFCBANK,ICICIBANK,KOTAKBANK,BAJFINANCE,SBIN,WIPRO,AXISBANK,HINDUNILVR,MARUTI,NESTLEIND,TITAN,TECHM"
+      TICK_INTERVAL_SECONDS: "60"
+      NEWS_INTERVAL_SECONDS: "300"
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    ports:
+      - "8001:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - stock-prediction-network
+
+  # ── Phase 2: Agent Services ───────────────────────────────────────────────────
+
+  technical-agent:
+    build:
+      context: ./technical-agent
+      dockerfile: Dockerfile
+    container_name: stock-prediction-technical-agent
+    env_file:
+      - ./backend/.env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+      RABBITMQ_HOST: rabbitmq
+      SERVICE_PORT: "8002"
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      CANDLE_HISTORY_LIMIT: "200"
+    ports:
+      - "8002:8002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - stock-prediction-network
+
+  sentiment-agent:
+    build:
+      context: ./sentiment-agent
+      dockerfile: Dockerfile
+    container_name: stock-prediction-sentiment-agent
+    env_file:
+      - ./backend/.env
+    environment:
+      MONGODB_HOST: mongodb
+      RABBITMQ_HOST: rabbitmq
+      SERVICE_PORT: "8003"
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      FINBERT_MODEL: "ProsusAI/finbert"
+      SENTIMENT_WINDOW_MINUTES: "60"
+    ports:
+      - "8003:8003"
+    volumes:
+      - finbert_cache:/root/.cache/huggingface
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - stock-prediction-network
+
+  macro-agent:
+    build:
+      context: ./macro-agent
+      dockerfile: Dockerfile
+    container_name: stock-prediction-macro-agent
+    env_file:
+      - ./backend/.env
+    environment:
+      REDIS_HOST: redis
+      RABBITMQ_HOST: rabbitmq
+      SERVICE_PORT: "8004"
+      MACRO_REFRESH_SECONDS: "3600"
+    ports:
+      - "8004:8004"
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - stock-prediction-network
+
+  pattern-agent:
+    build:
+      context: ./pattern-agent
+      dockerfile: Dockerfile
+    container_name: stock-prediction-pattern-agent
+    env_file:
+      - ./backend/.env
+    environment:
+      POSTGRES_HOST: postgres
+      RABBITMQ_HOST: rabbitmq
+      SERVICE_PORT: "8005"
+      CANDLE_HISTORY_LIMIT: "100"
+    ports:
+      - "8005:8005"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - stock-prediction-network
+
+  rl-agent:
+    build:
+      context: ./rl-agent
+      dockerfile: Dockerfile
+    container_name: stock-prediction-rl-agent
+    env_file:
+      - ./backend/.env
+    environment:
+      POSTGRES_HOST: postgres
+      RABBITMQ_HOST: rabbitmq
+      REDIS_HOST: redis
+      SERVICE_PORT: "8006"
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      POLICY_MODEL_NAME: "rl-trading-policy"
+    ports:
+      - "8006:8006"
+    volumes:
+      - rl_models:/app/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - stock-prediction-network
+
+  # ── Phase 3: Ensemble Decision Engine ────────────────────────────────────────
+
+  ensemble-engine:
+    build:
+      context: ./ensemble-engine
+      dockerfile: Dockerfile
+    container_name: stock-prediction-ensemble-engine
+    env_file:
+      - ./backend/.env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+      RABBITMQ_HOST: rabbitmq
+      SERVICE_PORT: "8007"
+      AGENT_SIGNAL_TIMEOUT_SECONDS: "5"
+      MIN_CONFIDENCE_TO_TRADE: "0.60"
+    ports:
+      - "8007:8007"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - stock-prediction-network
+
+  # ── Phase 4: Feedback Learning Service ───────────────────────────────────────
+
+  feedback-service:
+    build:
+      context: ./feedback-service
+      dockerfile: Dockerfile
+    container_name: stock-prediction-feedback-service
+    env_file:
+      - ./backend/.env
+    environment:
+      POSTGRES_HOST: postgres
+      RABBITMQ_HOST: rabbitmq
+      REDIS_HOST: redis
+      SERVICE_PORT: "8012"
+      RETRAIN_THRESHOLD: "500"
+      WEIGHT_LEARNING_RATE: "0.05"
+    ports:
+      - "8012:8012"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - stock-prediction-network
+
+  # ── Phase 2 (cont): Model Trainer ────────────────────────────────────────────
+
+  model-trainer:
+    build:
+      context: ./model-trainer
+      dockerfile: Dockerfile
+    container_name: stock-prediction-model-trainer
+    env_file:
+      - ./backend/.env
+    environment:
+      POSTGRES_HOST: postgres
+      RABBITMQ_HOST: rabbitmq
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      SERVICE_PORT: "8013"
+      TRAIN_DAYS: "365"
+      RL_TIMESTEPS: "200000"
+      RETRAIN_SCHEDULE_HOURS: "24"
+    ports:
+      - "8013:8013"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
+    networks:
+      - stock-prediction-network
+
+  # ── Phase 3: Risk Engine (Java Spring Boot) ───────────────────────────────────
+
+  risk-engine:
+    build:
+      context: ./risk-engine
+      dockerfile: Dockerfile
+    container_name: stock-prediction-risk-engine
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: guest
+      RABBITMQ_PASSWORD: guest
+      MIN_CONFIDENCE: "0.60"
+      MAX_POSITION_PCT: "0.05"
+      MAX_RISK_PCT: "0.02"
+      ATR_STOP_MULT: "2.0"
+      ATR_PROFIT_MULT: "3.0"
+      DEFAULT_PORTFOLIO_VALUE: "100000.0"
+    ports:
+      - "8010:8010"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - stock-prediction-network
+
+  # ── Phase 4: Trade Executor (Java Spring Boot) ────────────────────────────────
+
+  trade-executor:
+    build:
+      context: ./trade-executor
+      dockerfile: Dockerfile
+    container_name: stock-prediction-trade-executor
+    env_file:
+      - ./backend/.env
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: guest
+      RABBITMQ_PASSWORD: guest
+      PAPER_TRADING_MODE: "true"
+    ports:
+      - "8011:8011"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - stock-prediction-network
+
+  # ── Frontend & Proxy ──────────────────────────────────────────────────────────
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: ../docker/Dockerfile.frontend
+    container_name: stock-prediction-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      VITE_API_URL: http://localhost:8000
+      VITE_SOCKET_URL: http://localhost:8000
+    depends_on:
+      - backend
+    networks:
+      - stock-prediction-network
+
+  nginx:
+    image: nginx:alpine
+    container_name: stock-prediction-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./config/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - stock-prediction-network
+
+volumes:
+  postgres_data:
+  mongodb_data:
+  redis_data:
+  rabbitmq_data:
+  influxdb_data:
+  elasticsearch_data:
+  mlflow_data:
+  finbert_cache:
+  rl_models:
+
+networks:
+  stock-prediction-network:
+    driver: bridge

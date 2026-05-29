@@ -1,0 +1,655 @@
+import axios, { AxiosInstance } from 'axios';
+import { Stock, Prediction, Portfolio, ApiResponse, RiskMetrics, StressTestResult, FactorAnalysis, OptimizationResult, OrderRequest, OrderResponse, AIAnalysis, AgentStock, BacktestResult, LiveSignal, LoginRequest, AuthResponse, SignupSendOtpRequest, SignupVerifyOtpRequest, SignupCompleteRequest } from '../types';
+
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
+function snakeToCamel(str: string): string {
+  return str.replace(/_([a-z0-9])/g, (_, char) => char.toUpperCase());
+}
+
+function convertKeys(obj: unknown): unknown {
+  if (Array.isArray(obj)) return obj.map(convertKeys);
+  if (obj !== null && typeof obj === 'object') {
+    return Object.fromEntries(
+      Object.entries(obj).map(([k, v]) => [snakeToCamel(k), convertKeys(v)])
+    );
+  }
+  return obj;
+}
+
+class ApiService {
+  private api: AxiosInstance;
+
+  constructor() {
+    this.api = axios.create({
+      baseURL: API_BASE_URL,
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    // Attach JWT from localStorage on every request
+    this.api.interceptors.request.use(config => {
+      try {
+        const raw = localStorage.getItem('neuradex-auth');
+        if (raw) {
+          const stored = JSON.parse(raw);
+          const token = stored?.state?.token;
+          if (token) config.headers['Authorization'] = `Bearer ${token}`;
+        }
+      } catch {}
+      return config;
+    });
+
+    this.api.interceptors.response.use(response => {
+      response.data = convertKeys(response.data);
+      return response;
+    });
+  }
+
+  // Auth API
+  async login(req: LoginRequest): Promise<ApiResponse<AuthResponse>> {
+    const response = await this.api.post('/api/auth/login', req);
+    return response.data;
+  }
+
+  async signupSendOtp(req: SignupSendOtpRequest): Promise<ApiResponse<null>> {
+    const response = await this.api.post('/api/auth/signup/send-otp', req);
+    return response.data;
+  }
+
+  async signupVerifyOtp(req: SignupVerifyOtpRequest): Promise<ApiResponse<null>> {
+    const response = await this.api.post('/api/auth/signup/verify-otp', req);
+    return response.data;
+  }
+
+  async signupComplete(req: SignupCompleteRequest): Promise<ApiResponse<AuthResponse>> {
+    const response = await this.api.post('/api/auth/signup/complete', req);
+    return response.data;
+  }
+
+  async getMe(): Promise<ApiResponse<{ broker: string; email: string; authenticated: boolean }>> {
+    const response = await this.api.get('/api/auth/me');
+    return response.data;
+  }
+
+  async getProfile(): Promise<ApiResponse<{ name: string; email: string; initials: string; accountId: string; broker: string }>> {
+    const response = await this.api.get('/api/auth/profile');
+    return response.data;
+  }
+
+  async getGrowwStatus(): Promise<ApiResponse<{
+    status: string; tokenExpiry: string | null; timeRemainingSeconds: number | null;
+    failureCount: number; failureReason: string; lastAttempt: string | null; hasToken: boolean;
+  }>> {
+    const response = await this.api.get('/api/auth/groww/status');
+    return response.data;
+  }
+
+  async refreshGrowwToken(): Promise<ApiResponse<{ success: boolean; expires: string | null; error?: string }>> {
+    const response = await this.api.post('/api/auth/groww/refresh');
+    return response.data;
+  }
+
+  async updateGrowwCredentials(apiKey: string, apiSecret: string): Promise<ApiResponse<{ success: boolean; expires: string | null; error?: string }>> {
+    const response = await this.api.put('/api/auth/groww/credentials', { api_key: apiKey, api_secret: apiSecret });
+    return response.data;
+  }
+
+  // Stocks API
+  async getStocks(): Promise<ApiResponse<Stock[]>> {
+    try {
+      const response = await this.api.get('/api/stocks/');
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching stocks:', error);
+      throw error;
+    }
+  }
+
+  async getStock(symbol: string): Promise<ApiResponse<Stock>> {
+    try {
+      const response = await this.api.get(`/api/stocks/${symbol}`);
+      return response.data;
+    } catch (error) {
+      console.error(`Error fetching stock ${symbol}:`, error);
+      throw error;
+    }
+  }
+
+  async getCandlesticks(
+    symbol: string,
+    period: string = '1h',
+    limit: number = 100
+  ): Promise<ApiResponse<any>> {
+    try {
+      const response = await this.api.get(
+        `/api/stocks/${symbol}/candlesticks`,
+        {
+          params: { period, limit },
+        }
+      );
+      return response.data;
+    } catch (error) {
+      console.error(`Error fetching candlesticks for ${symbol}:`, error);
+      throw error;
+    }
+  }
+
+  async getSentiment(symbol: string): Promise<ApiResponse<any>> {
+    try {
+      const response = await this.api.get(`/api/stocks/${symbol}/sentiment`);
+      return response.data;
+    } catch (error) {
+      console.error(`Error fetching sentiment for ${symbol}:`, error);
+      throw error;
+    }
+  }
+
+  // Predictions API
+  async getPrediction(symbol: string): Promise<ApiResponse<Prediction>> {
+    try {
+      const response = await this.api.get(`/api/predictions/${symbol}`);
+      return response.data;
+    } catch (error) {
+      console.error(`Error fetching prediction for ${symbol}:`, error);
+      throw error;
+    }
+  }
+
+  async getCustomAnalysis(
+    symbol: string,
+    timeframe?: string
+  ): Promise<ApiResponse<any>> {
+    try {
+      const response = await this.api.post(
+        `/api/predictions/${symbol}/custom-analysis`,
+        { timeframe }
+      );
+      return response.data;
+    } catch (error) {
+      console.error(`Error getting custom analysis for ${symbol}:`, error);
+      throw error;
+    }
+  }
+
+  async getPredictionHistory(
+    symbol: string,
+    limit: number = 10
+  ): Promise<ApiResponse<any>> {
+    try {
+      const response = await this.api.get(
+        `/api/predictions/${symbol}/history`,
+        { params: { limit } }
+      );
+      return response.data;
+    } catch (error) {
+      console.error(`Error fetching prediction history for ${symbol}:`, error);
+      throw error;
+    }
+  }
+
+  async getAccuracyStats(): Promise<ApiResponse<any>> {
+    try {
+      const response = await this.api.get('/api/predictions/accuracy/stats');
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching accuracy stats:', error);
+      throw error;
+    }
+  }
+
+  // Portfolio API
+  async getPortfolio(): Promise<ApiResponse<Portfolio>> {
+    try {
+      const response = await this.api.get('/api/portfolio/');
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching portfolio:', error);
+      throw error;
+    }
+  }
+
+  async addToPortfolio(
+    symbol: string,
+    quantity: number,
+    purchasePrice: number
+  ): Promise<ApiResponse<any>> {
+    try {
+      const response = await this.api.post('/api/portfolio/add', {
+        symbol,
+        quantity,
+        purchase_price: purchasePrice,
+      });
+      return response.data;
+    } catch (error) {
+      console.error('Error adding to portfolio:', error);
+      throw error;
+    }
+  }
+
+  async getPerformance(): Promise<ApiResponse<any>> {
+    try {
+      const response = await this.api.get('/api/portfolio/performance');
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching performance:', error);
+      throw error;
+    }
+  }
+
+  async getAlerts(): Promise<ApiResponse<any>> {
+    try {
+      const response = await this.api.get('/api/portfolio/alerts');
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching alerts:', error);
+      throw error;
+    }
+  }
+
+  async createAlert(
+    symbol: string,
+    alertType: string,
+    condition: string
+  ): Promise<ApiResponse<any>> {
+    try {
+      const response = await this.api.post('/api/portfolio/alerts', {
+        symbol,
+        alert_type: alertType,
+        condition,
+        enabled: true,
+      });
+      return response.data;
+    } catch (error) {
+      console.error('Error creating alert:', error);
+      throw error;
+    }
+  }
+
+  // Risk Analytics API
+  async getRiskVar(): Promise<ApiResponse<RiskMetrics>> {
+    try {
+      const response = await this.api.get('/api/risk/var');
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching risk metrics:', error);
+      throw error;
+    }
+  }
+
+  async getStressTest(): Promise<ApiResponse<StressTestResult>> {
+    try {
+      const response = await this.api.get('/api/risk/stress-test');
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching stress test:', error);
+      throw error;
+    }
+  }
+
+  async getFactorAnalysis(): Promise<ApiResponse<FactorAnalysis>> {
+    try {
+      const response = await this.api.get('/api/risk/factors');
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching factor analysis:', error);
+      throw error;
+    }
+  }
+
+  async getOptimization(): Promise<ApiResponse<OptimizationResult>> {
+    try {
+      const response = await this.api.get('/api/risk/optimization');
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching optimization:', error);
+      throw error;
+    }
+  }
+
+  async getOptimizationAnalysis(model?: string): Promise<ApiResponse<{ analysis: string; modelUsed: string; generatedAt: string }>> {
+    try {
+      const params = model ? { model } : {};
+      const response = await this.api.get('/api/risk/optimization/analyze', { params });
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching optimization analysis:', error);
+      throw error;
+    }
+  }
+
+  // Orders API
+  async placeOrder(order: OrderRequest): Promise<ApiResponse<OrderResponse>> {
+    try {
+      const response = await this.api.post('/api/orders/', {
+        symbol: order.symbol,
+        quantity: order.quantity,
+        transaction_type: order.transactionType,
+        order_type: order.orderType,
+        price: order.price,
+        product: order.product ?? 'CNC',
+        exchange: order.exchange ?? 'NSE',
+      });
+      return response.data;
+    } catch (error) {
+      console.error('Error placing order:', error);
+      throw error;
+    }
+  }
+
+  // AI Agent API
+  async getAgentStocks(): Promise<ApiResponse<AgentStock[]>> {
+    try {
+      const response = await this.api.get('/api/agent/stocks');
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching agent stocks:', error);
+      throw error;
+    }
+  }
+
+  async getOllamaModels(): Promise<{ status: string; data: string[]; current: string; error?: string }> {
+    try {
+      const response = await this.api.get('/api/agent/models');
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching Ollama models:', error);
+      return { status: 'error', data: [], current: 'llama3.2' };
+    }
+  }
+
+  async analyzeStock(symbol: string, model?: string): Promise<ApiResponse<AIAnalysis>> {
+    try {
+      const params = model ? { model } : {};
+      const response = await this.api.post(`/api/agent/analyze/${symbol}`, null, { params });
+      return response.data;
+    } catch (error) {
+      console.error(`Error analyzing ${symbol}:`, error);
+      throw error;
+    }
+  }
+
+  // Backtest API
+  async getStrategies(): Promise<ApiResponse<any>> {
+    try {
+      const response = await this.api.get('/api/backtest/strategies');
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching strategies:', error);
+      throw error;
+    }
+  }
+
+  async runBacktest(payload: {
+    symbol: string;
+    strategy: string;
+    start_date: string;
+    end_date: string;
+    initial_capital: number;
+    commission: number;
+    params: Record<string, number>;
+  }): Promise<ApiResponse<BacktestResult>> {
+    try {
+      const response = await this.api.post('/api/backtest/run', payload);
+      return response.data;
+    } catch (error) {
+      console.error('Error running backtest:', error);
+      throw error;
+    }
+  }
+
+  async getLiveSignal(
+    symbol: string,
+    strategy: string,
+    params: Record<string, number>
+  ): Promise<ApiResponse<LiveSignal>> {
+    try {
+      const response = await this.api.get(`/api/backtest/live-signal/${symbol}`, {
+        params: { strategy, ...params },
+      });
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching live signal:', error);
+      throw error;
+    }
+  }
+
+  async runDayAutopilot(payload: {
+    symbol: string;
+    date: string;
+    capital: number;
+    model?: string;
+  }): Promise<ApiResponse<any>> {
+    try {
+      const response = await this.api.post('/api/backtest/day-autopilot', payload);
+      return response.data;
+    } catch (error) {
+      console.error('Error running day autopilot:', error);
+      throw error;
+    }
+  }
+
+  async getIntradayCandles(symbol: string, date: string): Promise<ApiResponse<any>> {
+    try {
+      const response = await this.api.get(`/api/backtest/intraday-candles/${symbol}`, { params: { date } });
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching intraday candles:', error);
+      throw error;
+    }
+  }
+
+  async agentStep(payload: {
+    symbol: string;
+    date: string;
+    candles: any[];
+    position: 'NONE' | 'LONG';
+    entryPrice: number;
+    entryTime: string;
+    entryQty: number;
+    capital: number;
+    model?: string;
+  }): Promise<ApiResponse<any>> {
+    try {
+      const response = await this.api.post('/api/backtest/agent-step', {
+        symbol:      payload.symbol,
+        date:        payload.date,
+        candles:     payload.candles,
+        position:    payload.position,
+        entry_price: payload.entryPrice,
+        entry_time:  payload.entryTime,
+        entry_qty:   payload.entryQty,
+        capital:     payload.capital,
+        model:       payload.model,
+      });
+      return response.data;
+    } catch (error) {
+      console.error('Error calling agent step:', error);
+      throw error;
+    }
+  }
+
+  async progressiveStart(payload: {
+    symbol: string; date: string; start_time: string;
+    capital: number; model?: string;
+  }): Promise<ApiResponse<any>> {
+    try {
+      const response = await this.api.post('/api/backtest/progressive/start', payload);
+      return response.data;
+    } catch (error) {
+      console.error('Error starting progressive session:', error);
+      throw error;
+    }
+  }
+
+  async progressiveStep(payload: {
+    symbol: string; date: string; current_time: string;
+    capital: number; cash: number;
+    position: 'NONE' | 'LONG'; quantity: number;
+    entry_price: number; entry_time: string | null;
+    trades: any[]; model?: string;
+  }): Promise<ApiResponse<any>> {
+    try {
+      const response = await this.api.post('/api/backtest/progressive/step', payload);
+      return response.data;
+    } catch (error) {
+      console.error('Error running progressive step:', error);
+      throw error;
+    }
+  }
+
+  async paperTradingStatus(): Promise<ApiResponse<any>> {
+    try {
+      const response = await this.api.get('/api/paper-trading/status');
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching paper trading status:', error);
+      throw error;
+    }
+  }
+
+  async paperTradingStart(payload: {
+    symbol: string;
+    capital: number;
+    model?: string;
+  }): Promise<ApiResponse<any>> {
+    try {
+      const response = await this.api.post('/api/paper-trading/start', payload);
+      return response.data;
+    } catch (error) {
+      console.error('Error starting paper trading session:', error);
+      throw error;
+    }
+  }
+
+  async paperTradingTick(symbol: string, params?: {
+    position?: string; entry_price?: number; quantity?: number;
+  }): Promise<ApiResponse<any>> {
+    try {
+      const response = await this.api.get(`/api/paper-trading/tick/${symbol}`, { params });
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching live tick:', error);
+      throw error;
+    }
+  }
+
+  async paperTradingPlaceOrder(payload: {
+    symbol: string; action: string; quantity: number;
+    order_type?: string; price?: number; product?: string; exchange?: string;
+  }): Promise<ApiResponse<any>> {
+    try {
+      const response = await this.api.post('/api/paper-trading/place-order', payload);
+      return response.data;
+    } catch (error) {
+      console.error('Error placing order:', error);
+      throw error;
+    }
+  }
+
+  async paperTradingStep(payload: {
+    symbol: string;
+    capital: number;
+    cash: number;
+    position: 'NONE' | 'LONG';
+    quantity: number;
+    entry_price: number;
+    entry_time: string | null;
+    trades: any[];
+    model?: string;
+  }): Promise<ApiResponse<any>> {
+    try {
+      const response = await this.api.post('/api/paper-trading/step', payload);
+      return response.data;
+    } catch (error) {
+      console.error('Error running paper trading step:', error);
+      throw error;
+    }
+  }
+
+  // ── AI Engine ──────────────────────────────────────────────────────────────
+
+  async aiEngineAnalyze(payload: {
+    symbol: string;
+    candles: any[];
+    context?: Record<string, any>;
+    capital?: number;
+    position?: 'NONE' | 'LONG';
+  }): Promise<ApiResponse<any>> {
+    try {
+      const response = await this.api.post('/api/ai-engine/analyze', payload);
+      return response.data;
+    } catch (error) {
+      console.error('Error calling AI engine analyze:', error);
+      throw error;
+    }
+  }
+
+  async aiEngineOutcome(payload: {
+    predictionId: string;
+    symbol: string;
+    entryPrice: number;
+    exitPrice: number;
+    pnl: number;
+    pnlPct: number;
+  }): Promise<ApiResponse<any>> {
+    try {
+      const response = await this.api.post('/api/ai-engine/outcome', {
+        prediction_id: payload.predictionId,
+        symbol:        payload.symbol,
+        entry_price:   payload.entryPrice,
+        exit_price:    payload.exitPrice,
+        pnl:           payload.pnl,
+        pnl_pct:       payload.pnlPct,
+      });
+      return response.data;
+    } catch (error) {
+      console.error('Error recording AI engine outcome:', error);
+      throw error;
+    }
+  }
+
+  async aiEnginePerformance(): Promise<ApiResponse<any>> {
+    try {
+      const response = await this.api.get('/api/ai-engine/performance');
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching AI engine performance:', error);
+      throw error;
+    }
+  }
+
+  async aiEngineHistory(symbol?: string, limit = 20): Promise<ApiResponse<any>> {
+    try {
+      const response = await this.api.get('/api/ai-engine/history', {
+        params: { symbol, limit },
+      });
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching AI engine history:', error);
+      throw error;
+    }
+  }
+
+  async aiEngineWeights(): Promise<ApiResponse<any>> {
+    try {
+      const response = await this.api.get('/api/ai-engine/weights');
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching AI engine weights:', error);
+      throw error;
+    }
+  }
+
+  // Health check
+  async healthCheck(): Promise<ApiResponse<any>> {
+    try {
+      const response = await this.api.get('/health');
+      return response.data;
+    } catch (error) {
+      console.error('Health check failed:', error);
+      throw error;
+    }
+  }
+}
+
+export default new ApiService();
