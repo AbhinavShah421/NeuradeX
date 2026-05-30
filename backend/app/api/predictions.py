@@ -4,7 +4,7 @@ Predictions API Routes
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional
 import random
 from datetime import datetime
 
@@ -105,7 +105,7 @@ async def get_prediction(symbol: str = "AAPL"):
 
 
 @router.post("/{symbol}/custom-analysis")
-async def custom_analysis(symbol: str, request: PredictionRequest):
+async def custom_analysis(symbol: str):
     """Get custom AI analysis for a stock"""
     try:
         analysis_data = {

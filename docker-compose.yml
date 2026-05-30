@@ -123,6 +123,8 @@ services:
     environment:
       - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
       - xpack.security.enabled=false
+      - SERVER_BASEPATH=/neuradex/dev/logs
+      - SERVER_REWRITEBASEPATH=true
     ports:
       - "5601:5601"
     depends_on:
@@ -188,7 +190,7 @@ services:
         condition: service_healthy
     networks:
       - stock-prediction-network
-    command: python -m uvicorn app.main:app_sio --host 0.0.0.0 --port 8000 --reload
+    command: python -m uvicorn app.main:app_sio --host 0.0.0.0 --port 8000 --reload --root-path /neuradex/backend
 
   # ── Phase 1: Market Data Service ──────────────────────────────────────────────
 
@@ -492,6 +494,30 @@ services:
     networks:
       - stock-prediction-network
 
+  docs:
+    build:
+      context: ./docs-site
+      dockerfile: Dockerfile
+    container_name: stock-prediction-docs
+    ports:
+      - "3001:3001"
+    networks:
+      - stock-prediction-network
+
+  ngrok:
+    image: ngrok/ngrok:latest
+    restart: unless-stopped
+    container_name: stock-prediction-ngrok
+    env_file:
+      - ./backend/.env
+    command: http nginx:80 --log stdout
+    ports:
+      - "4040:4040"
+    depends_on:
+      - nginx
+    networks:
+      - stock-prediction-network
+
   nginx:
     image: nginx:alpine
     container_name: stock-prediction-nginx
@@ -500,6 +526,7 @@ services:
       - "443:443"
     volumes:
       - ./config/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./config/landing.html:/usr/share/nginx/html/index.html:ro
     depends_on:
       - backend
       - frontend

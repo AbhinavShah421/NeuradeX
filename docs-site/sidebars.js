@@ -1,0 +1,75 @@
+// @ts-check
+
+/** @type {import('@docusaurus/plugin-content-docs').SidebarsConfig} */
+const sidebars = {
+  docsSidebar: [
+    {
+      type: 'doc',
+      id: 'intro',
+      label: '🏠 Introduction',
+    },
+    {
+      type: 'category',
+      label: '🖥️ Frontend',
+      collapsed: false,
+      items: [
+        'frontend/overview',
+        'frontend/auth-flow',
+        'frontend/dashboard',
+        'frontend/stock-detail',
+        'frontend/portfolio-predictions',
+        'frontend/ai-engine',
+        'frontend/orders-models',
+        'frontend/api-reference',
+      ],
+    },
+    {
+      type: 'category',
+      label: '🏗️ Architecture',
+      collapsed: false,
+      items: ['architecture/data-flow', 'architecture/dependency-matrix'],
+    },
+    {
+      type: 'category',
+      label: '🔌 Backend API (Port 8000)',
+      collapsed: false,
+      items: [
+        'api/auth',
+        'api/stocks',
+        'api/predictions',
+        'api/portfolio',
+        'api/orders',
+        'api/risk',
+        'api/agent',
+        'api/backtest',
+        'api/paper-trading',
+        'api/ai-engine',
+      ],
+    },
+    {
+      type: 'category',
+      label: '⚙️ Microservices',
+      collapsed: false,
+      items: [
+        'microservices/market-data',
+        'microservices/agents',
+        'microservices/ensemble-engine',
+        'microservices/risk-trade',
+        'microservices/feedback-trainer',
+      ],
+    },
+    {
+      type: 'category',
+      label: '🛠️ Infrastructure',
+      collapsed: false,
+      items: [
+        'infrastructure/rabbitmq',
+        'infrastructure/redis',
+        'infrastructure/database',
+        'infrastructure/inter-service-calls',
+      ],
+    },
+  ],
+};
+
+module.exports = sidebars;

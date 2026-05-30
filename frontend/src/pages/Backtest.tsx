@@ -184,7 +184,11 @@ const LiveReplayView: React.FC<{
   const isMarketClosedRef  = useRef<boolean>(initialData.isMarketClosed);
   const sessionPositionRef = useRef<any>(initialData.position);
   const historyLoadingRef  = useRef(false);
-  const earliestDateRef    = useRef<string>(date);
+  // Initialize to the date of the oldest candles already in candlesRef so that
+  // loadMoreHistory fetches the day BEFORE what's already loaded, not a duplicate.
+  const earliestDateRef    = useRef<string>(
+    (initialData.prevDayCandles?.length ?? 0) > 0 ? prevTradingDay(date) : date
+  );
   const historyLoaderElRef = useRef<HTMLDivElement>(null);
 
   // ── React state (UI only) ──────────────────────────────────────────────────

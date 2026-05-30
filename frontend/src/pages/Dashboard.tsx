@@ -3,8 +3,6 @@ import { Link } from 'react-router-dom';
 import apiService from '../services/api';
 import { Stock, Prediction } from '../types';
 
-const BASE = 'http://localhost:8000/api';
-
 const inr = (v: number) =>
   `₹${v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
@@ -19,7 +17,7 @@ interface StockEntry {
 
 interface PriceInfo {
   price: number;
-  change_pct: number;
+  changePct: number;
 }
 
 // ── Shared Tab Bar ─────────────────────────────────────────────────────────────
@@ -150,12 +148,12 @@ const DirectoryTab: React.FC = () => {
   const fetchDirectory = useCallback(async (q: string, sec: string, ex: string, pg: number) => {
     setLoading(true);
     try {
-      const params = new URLSearchParams({ page: String(pg), limit: '50' });
-      if (q)   params.set('q', q);
-      if (sec) params.set('sector', sec);
-      if (ex && ex !== EX_ALL) params.set('exchange', ex);
-      const res  = await fetch(`${BASE}/stocks/directory/list?${params}`);
-      const json = await res.json();
+      const json = await apiService.getDirectoryList({
+        page: pg, limit: 50,
+        ...(q   ? { q }        : {}),
+        ...(sec ? { sector: sec } : {}),
+        ...(ex && ex !== EX_ALL ? { exchange: ex } : {}),
+      });
       setStocks(json.data ?? []);
       setTotal(json.total ?? 0);
       setPages(json.pages ?? 1);
@@ -163,12 +161,7 @@ const DirectoryTab: React.FC = () => {
       if (json.data?.length) {
         setPriceLoading(true);
         const syms = json.data.map((s: StockEntry) => s.symbol);
-        const pr   = await fetch(`${BASE}/stocks/directory/prices`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ symbols: syms }),
-        });
-        const prJson = await pr.json();
+        const prJson = await apiService.getDirectoryPrices(syms);
         setPrices(prJson.data ?? {});
         setPriceLoading(false);
       }
@@ -289,8 +282,8 @@ const DirectoryTab: React.FC = () => {
                   <td style={{ textAlign: 'right', fontWeight: 600, fontSize: 13 }}>
                     {priceLoading ? <span style={{ color: 'var(--nd-text-3)', fontSize: 11 }}>…</span> : pi ? inr(pi.price) : '—'}
                   </td>
-                  <td style={{ textAlign: 'right', fontWeight: 600, fontSize: 13, color: chgColor(pi?.change_pct) }}>
-                    {pi != null ? `${pi.change_pct >= 0 ? '+' : ''}${pi.change_pct.toFixed(2)}%` : '—'}
+                  <td style={{ textAlign: 'right', fontWeight: 600, fontSize: 13, color: chgColor(pi?.changePct) }}>
+                    {pi != null ? `${pi.changePct >= 0 ? '+' : ''}${pi.changePct.toFixed(2)}%` : '—'}
                   </td>
                   <td style={{ textAlign: 'center' }}>
                     <Link to={`/stocks/${s.symbol}`} style={{

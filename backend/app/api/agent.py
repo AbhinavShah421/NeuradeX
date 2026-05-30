@@ -2,7 +2,6 @@
 AI Agent API — fetches 1-year daily candles from Groww, computes technical indicators
 using the `ta` library, then calls the local Ollama LLM for structured analysis.
 """
-import random
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -12,6 +11,7 @@ import ollama as ollama_lib
 from fastapi import APIRouter, HTTPException, Query
 
 from app.config import settings
+from app.utils.candle_utils import parse_candles, simulate_daily_candles
 from app.utils.groww_client import get_groww_client
 from app.utils.elk_logger import get_logger
 
@@ -52,62 +52,6 @@ KNOWN_STOCKS = {
     "SUNPHARMA":   "Sun Pharmaceutical",
     "TITAN":       "Titan Company",
 }
-
-
-# ── Candle helpers ─────────────────────────────────────────────────────────────
-
-def _parse_candles(raw: list) -> list[dict]:
-    candles = []
-    for c in raw:
-        if isinstance(c, list) and len(c) >= 6:
-            ts = c[0]
-            candles.append({
-                "timestamp": datetime.fromtimestamp(ts).strftime("%Y-%m-%d") if isinstance(ts, (int, float)) else str(ts)[:10],
-                "open":   float(c[1]),
-                "high":   float(c[2]),
-                "low":    float(c[3]),
-                "close":  float(c[4]),
-                "volume": int(c[5]),
-            })
-        elif isinstance(c, dict):
-            candles.append({
-                "timestamp": str(c.get("timestamp", c.get("time", "")))[:10],
-                "open":   float(c.get("open", 0)),
-                "high":   float(c.get("high", 0)),
-                "low":    float(c.get("low", 0)),
-                "close":  float(c.get("close", 0)),
-                "volume": int(c.get("volume", 0)),
-            })
-    return [c for c in candles if c["close"] > 0]
-
-
-def _simulate_candles(symbol: str, days: int = 365) -> list[dict]:
-    base_prices = {
-        "SBIN": 820, "IDBI": 72, "SUZLON": 58, "INDUSINDBK": 870,
-        "TMPV": 356, "PNB": 102, "FEDERALBNK": 182, "TMCV": 378,
-        "IREDA": 178, "ZEEL": 135, "IOB": 54, "JKTYRE": 395,
-        "RELIANCE": 2850, "TCS": 3450, "INFY": 1720, "HDFCBANK": 1530,
-        "ICICIBANK": 1220, "BAJFINANCE": 6900, "WIPRO": 505, "KOTAKBANK": 1820,
-    }
-    base = base_prices.get(symbol, 500.0)
-    candles = []
-    end = datetime.now()
-    for i in range(days):
-        date = end - timedelta(days=days - i)
-        if date.weekday() >= 5:
-            continue
-        o = round(base * random.uniform(0.991, 1.009), 2)
-        c = round(o * random.uniform(0.993, 1.007), 2)
-        candles.append({
-            "timestamp": date.strftime("%Y-%m-%d"),
-            "open":   o,
-            "high":   round(max(o, c) * random.uniform(1.001, 1.012), 2),
-            "low":    round(min(o, c) * random.uniform(0.988, 0.999), 2),
-            "close":  c,
-            "volume": random.randint(300_000, 12_000_000),
-        })
-        base = c
-    return candles
 
 
 # ── Technical indicators ───────────────────────────────────────────────────────
@@ -435,7 +379,7 @@ async def analyze_stock(
             )
             raw   = await groww.get_historical(symbol, 1440, start, end)
             if raw and len(raw) > 30:
-                candles = _parse_candles(raw)
+                candles = parse_candles(raw, date_key="timestamp")
                 data_source = "groww"
                 logger.info(
                     "Fetched daily candles from Groww",
@@ -448,7 +392,8 @@ async def analyze_stock(
             )
 
     if not candles:
-        candles = _simulate_candles(symbol, days=365)
+        end = datetime.now()
+        candles = simulate_daily_candles(symbol, end - timedelta(days=365), end, date_key="timestamp")
 
     if len(candles) < 20:
         raise HTTPException(status_code=400, detail=f"Insufficient candle data for {symbol}")

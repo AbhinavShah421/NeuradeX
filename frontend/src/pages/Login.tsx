@@ -1,4 +1,14 @@
 import React, { useState } from 'react';
+
+function extractApiError(err: unknown, fallback: string): string {
+  const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail) && detail.length > 0) {
+    const msg: string = (detail[0] as { msg?: string })?.msg || fallback;
+    return msg.replace(/^Value error,\s*/i, '');
+  }
+  return fallback;
+}
 import NeuradeXLogo from '../components/NeuradeXLogo';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
@@ -40,10 +50,7 @@ const Login: React.FC = () => {
         setError(res.message || 'Login failed');
       }
     } catch (err: unknown) {
-      setError(
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
-        'Invalid credentials — check your email/phone and password'
-      );
+      setError(extractApiError(err, 'Invalid credentials — check your email/phone and password'));
     } finally {
       setLoading(false);
     }

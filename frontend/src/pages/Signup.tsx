@@ -6,6 +6,16 @@ import { BrokerInfo, BrokerType } from '../types';
 import apiService from '../services/api';
 import NeuradeXLogo from '../components/NeuradeXLogo';
 
+function extractApiError(err: unknown, fallback: string): string {
+  const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail) && detail.length > 0) {
+    const msg: string = (detail[0] as { msg?: string })?.msg || fallback;
+    return msg.replace(/^Value error,\s*/i, '');
+  }
+  return fallback;
+}
+
 const BROKERS: BrokerInfo[] = [
   { id: 'groww',    name: 'Groww',     logo: 'G', color: '#00b386', available: true,  tagline: 'NSE · BSE · F&O' },
   { id: 'zerodha',  name: 'Zerodha',   logo: 'Z', color: '#387ed1', available: false, tagline: 'Coming Soon' },
@@ -84,10 +94,7 @@ const Signup: React.FC = () => {
         setError(res.message || 'Failed to send OTP');
       }
     } catch (err: unknown) {
-      setError(
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
-        'Failed to send verification code'
-      );
+      setError(extractApiError(err, 'Failed to send verification code'));
     } finally {
       setLoading(false);
     }
@@ -108,10 +115,7 @@ const Signup: React.FC = () => {
         setError(res.message || 'Invalid code');
       }
     } catch (err: unknown) {
-      setError(
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
-        'Verification failed'
-      );
+      setError(extractApiError(err, 'Verification failed'));
     } finally {
       setLoading(false);
     }
@@ -162,10 +166,7 @@ const Signup: React.FC = () => {
         setError(res.message || 'Signup failed');
       }
     } catch (err: unknown) {
-      setError(
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
-        'Failed to complete signup'
-      );
+      setError(extractApiError(err, 'Failed to complete signup'));
     } finally {
       setLoading(false);
     }
@@ -264,7 +265,7 @@ const Signup: React.FC = () => {
 
                 <div style={{ marginBottom: 14 }}>
                   <label style={labelStyle}>Phone Number</label>
-                  <input style={inputStyle} type="tel" placeholder="+91 98765 43210" value={phone} onChange={e => setPhone(e.target.value)} autoComplete="tel" />
+                  <input style={inputStyle} type="tel" placeholder="+91 98765 43210" value={phone} onChange={e => setPhone(e.target.value)} autoComplete="tel" name="phone" />
                 </div>
 
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 20 }}>

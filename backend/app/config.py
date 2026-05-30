@@ -4,7 +4,6 @@ Configuration settings for the application
 
 from pydantic_settings import BaseSettings
 from pydantic import model_validator
-from typing import List
 
 
 class Settings(BaseSettings):
@@ -17,7 +16,7 @@ class Settings(BaseSettings):
     API_PORT: int = 8000
 
     # CORS settings
-    ALLOWED_ORIGINS: List[str] = [
+    ALLOWED_ORIGINS: list[str] = [
         "http://localhost:3000",
         "http://localhost:8000",
         "http://127.0.0.1:3000",
@@ -100,7 +99,10 @@ class Settings(BaseSettings):
 
     # Socket.IO settings
     SOCKETIO_ASYNC_MODE: str = "asgi"
-    SOCKETIO_CORS_ALLOWED_ORIGINS: List[str] = ["*"]
+    SOCKETIO_CORS_ALLOWED_ORIGINS: list[str] = ["*"]
+
+    # Internal service URLs
+    FEEDBACK_SERVICE_URL: str = "http://feedback-service:8012"
 
     @model_validator(mode='after')
     def compute_urls(self) -> 'Settings':

@@ -1,0 +1,32 @@
+{
+  "name": "neuradex-docs",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "docusaurus start --host 0.0.0.0 --port 3001",
+    "build": "docusaurus build",
+    "serve": "docusaurus serve --host 0.0.0.0 --port 3001",
+    "clear": "docusaurus clear"
+  },
+  "dependencies": {
+    "@docusaurus/core": "3.5.2",
+    "@docusaurus/preset-classic": "3.5.2",
+    "@mdx-js/react": "^3.0.0",
+    "clsx": "^2.0.0",
+    "prism-react-renderer": "^2.3.0",
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0"
+  },
+  "devDependencies": {
+    "@docusaurus/module-type-aliases": "3.5.2",
+    "@docusaurus/types": "3.5.2",
+    "webpack-dev-server": "4.15.2",
+    "webpack": "5.88.2"
+  },
+  "engines": {
+    "node": ">=18.0"
+  },
+  "overrides": {
+    "webpack-dev-server": "4.15.2"
+  }
+}

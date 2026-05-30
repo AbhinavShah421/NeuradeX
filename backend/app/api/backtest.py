@@ -21,10 +21,9 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.config import settings
+from app.utils.candle_utils import parse_candles, simulate_daily_candles
 from app.utils.groww_client import get_groww_client
 from app.utils.elk_logger import get_logger
-
-FEEDBACK_SERVICE_URL = "http://feedback-service:8012"
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -38,7 +37,7 @@ async def _save_backtest_trades(records: list[dict]) -> None:
         return
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            await client.post(f"{FEEDBACK_SERVICE_URL}/trades", json=records)
+            await client.post(f"{settings.FEEDBACK_SERVICE_URL}/trades", json=records)
     except Exception as exc:
         logger.warning("Could not save backtest trades to feedback-service: %s", exc)
 
@@ -181,61 +180,6 @@ class BacktestRequest(BaseModel):
     params: dict = {}
 
 
-# ── Candle helpers ─────────────────────────────────────────────────────────────
-
-def _parse_candles(raw: list) -> list[dict]:
-    result = []
-    for c in raw:
-        if isinstance(c, list) and len(c) >= 6:
-            ts = c[0]
-            result.append({
-                "date":   datetime.fromtimestamp(ts).strftime("%Y-%m-%d") if isinstance(ts, (int, float)) else str(ts)[:10],
-                "open":   float(c[1]),
-                "high":   float(c[2]),
-                "low":    float(c[3]),
-                "close":  float(c[4]),
-                "volume": int(c[5]),
-            })
-        elif isinstance(c, dict):
-            result.append({
-                "date":   str(c.get("timestamp", c.get("time", "")))[:10],
-                "open":   float(c.get("open", 0)),
-                "high":   float(c.get("high", 0)),
-                "low":    float(c.get("low", 0)),
-                "close":  float(c.get("close", 0)),
-                "volume": int(c.get("volume", 0)),
-            })
-    return [c for c in result if c["close"] > 0]
-
-
-def _simulate_candles(symbol: str, start: datetime, end: datetime) -> list[dict]:
-    BASE = {
-        "SBIN": 820, "IDBI": 72, "SUZLON": 58, "INDUSINDBK": 870,
-        "TMPV": 356, "PNB": 102, "FEDERALBNK": 182, "TMCV": 378,
-        "IREDA": 178, "ZEEL": 135, "IOB": 54, "JKTYRE": 395,
-        "RELIANCE": 2850, "TCS": 3450, "INFY": 1720, "HDFCBANK": 1530,
-        "ICICIBANK": 1220, "BAJFINANCE": 6900, "WIPRO": 505, "KOTAKBANK": 1820,
-    }
-    base = BASE.get(symbol, 500.0) * random.uniform(0.60, 0.80)
-    result = []
-    cur = start
-    while cur <= end:
-        if cur.weekday() < 5:
-            o = round(base * random.uniform(0.991, 1.009), 2)
-            c = round(o * random.uniform(0.993, 1.007), 2)
-            result.append({
-                "date":   cur.strftime("%Y-%m-%d"),
-                "open":   o,
-                "high":   round(max(o, c) * random.uniform(1.001, 1.012), 2),
-                "low":    round(min(o, c) * random.uniform(0.988, 0.999), 2),
-                "close":  c,
-                "volume": random.randint(300_000, 12_000_000),
-            })
-            base = c
-        cur += timedelta(days=1)
-    return result
-
-
 async def _fetch_candles(symbol: str, start: datetime, end: datetime) -> tuple[list[dict], str]:
     groww = get_groww_client()
     if groww:
@@ -246,7 +190,7 @@ async def _fetch_candles(symbol: str, start: datetime, end: datetime) -> tuple[l
             )
             raw = await groww.get_historical(symbol, 1440, start, end)
             if raw and len(raw) > 10:
-                candles = _parse_candles(raw)
+                candles = parse_candles(raw)
                 if candles:
                     return candles, "groww"
         except Exception as exc:
@@ -254,7 +198,7 @@ async def _fetch_candles(symbol: str, start: datetime, end: datetime) -> tuple[l
                 "Groww candles fetch failed, using simulation",
                 extra={"log_type": "backtest_event", "event": "candles_fallback", "symbol": symbol, "error": str(exc)},
             )
-    return _simulate_candles(symbol, start, end), "simulated"
+    return simulate_daily_candles(symbol, start, end, initial_factor=random.uniform(0.60, 0.80)), "simulated"
 
 
 # ── Signal generators ──────────────────────────────────────────────────────────

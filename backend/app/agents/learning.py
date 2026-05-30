@@ -182,8 +182,8 @@ class LearningSystem:
             raw = await cache_get(_WEIGHTS_KEY)
             if raw:
                 return json.loads(raw)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Redis weights cache miss: %s", exc)
         return await self._weights_from_db()
 
     async def _weights_from_db(self) -> dict[str, float]:
@@ -203,8 +203,8 @@ class LearningSystem:
             weights = await self._weights_from_db()
             from app.utils.redis_client import cache_set
             await cache_set(_WEIGHTS_KEY, json.dumps(weights), expire=3600)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Could not sync weights to Redis: %s", exc)
 
     # ── Performance stats ─────────────────────────────────────────────────────
 

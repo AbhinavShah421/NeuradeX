@@ -302,8 +302,8 @@ async def profile(user: dict = Depends(get_current_user), db: AsyncSession = Dep
                 sub_raw = json.loads(payload_bytes).get("sub", "{}")
                 sub = json.loads(sub_raw) if isinstance(sub_raw, str) else sub_raw
                 account_id = sub.get("userAccountId", "")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Could not decode broker JWT for account_id: %s", exc)
 
         short_id = account_id[:8].upper() if account_id else "——"
 
@@ -329,8 +329,8 @@ async def profile(user: dict = Depends(get_current_user), db: AsyncSession = Dep
             sub_raw = json.loads(payload_bytes).get("sub", "{}")
             sub = json.loads(sub_raw) if isinstance(sub_raw, str) else sub_raw
             account_id = sub.get("userAccountId", "")
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Could not decode legacy Groww JWT for account_id: %s", exc)
 
     name = "Groww User"
     groww = get_groww_client()
