@@ -153,10 +153,66 @@ async def predict_xgboost(features: dict) -> float:
     return 0.60
 
 
+# Lightweight finance-oriented sentiment lexicon. Keeps `analyze_sentiment`
+# dependency-free until a real BERT model is wired in via load_sentiment_model().
+_POSITIVE_WORDS = frozenset({
+    "gain", "gains", "gained", "up", "rise", "rises", "rising", "rose", "rally",
+    "rallied", "surge", "surged", "soar", "soared", "jump", "jumped", "boom",
+    "bullish", "bull", "growth", "grow", "grew", "profit", "profits", "beat",
+    "beats", "outperform", "outperformed", "strong", "strength", "upgrade",
+    "upgraded", "buy", "positive", "optimistic", "record", "high", "highs",
+    "win", "wins", "recovery", "recover", "rebound", "boost", "boosted",
+    "good", "great", "excellent", "robust", "expand", "expansion",
+})
+_NEGATIVE_WORDS = frozenset({
+    "loss", "losses", "lost", "down", "fall", "falls", "falling", "fell",
+    "drop", "drops", "dropped", "plunge", "plunged", "slump", "slumped",
+    "crash", "crashed", "bearish", "bear", "decline", "declined", "weak",
+    "weakness", "miss", "missed", "downgrade", "downgraded", "sell",
+    "negative", "pessimistic", "low", "lows", "loss-making", "risk", "risks",
+    "fear", "fears", "concern", "concerns", "warn", "warning", "warned",
+    "cut", "cuts", "slowdown", "recession", "default", "bankrupt", "bad",
+    "poor", "weakening", "underperform", "underperformed", "tumble", "tumbled",
+})
+_NEGATION_WORDS = frozenset({"not", "no", "never", "without", "n't", "neither", "nor"})
+
+
 async def analyze_sentiment(text: str) -> float:
-    """Analyze sentiment of text"""
-    # Placeholder - returns sentiment score (-1 to 1)
-    return 0.5
+    """Analyze sentiment of text, returning a score in [-1.0, 1.0].
+
+    Lexicon-based scorer with simple negation handling: a positive/negative
+    word preceded (within two tokens) by a negation flips its polarity.
+    Returns 0.0 for empty or neutral text.
+    """
+    if not text or not text.strip():
+        return 0.0
+
+    import re
+
+    tokens = re.findall(r"[a-zA-Z']+", text.lower())
+    if not tokens:
+        return 0.0
+
+    score = 0
+    for i, token in enumerate(tokens):
+        if token in _POSITIVE_WORDS:
+            polarity = 1
+        elif token in _NEGATIVE_WORDS:
+            polarity = -1
+        else:
+            continue
+        # Flip polarity if a negation appears in the preceding two tokens.
+        if any(prev in _NEGATION_WORDS for prev in tokens[max(0, i - 2):i]):
+            polarity = -polarity
+        score += polarity
+
+    if score == 0:
+        return 0.0
+
+    # Normalize by token count so longer texts aren't unboundedly large,
+    # then clamp to the [-1, 1] contract.
+    normalized = score / (len(tokens) ** 0.5)
+    return max(-1.0, min(1.0, round(normalized, 4)))
 
 
 async def generate_analysis(prompt: str) -> str:
