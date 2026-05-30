@@ -19,7 +19,7 @@ import './styles/globals.css';
 
 const App: React.FC = () => {
   return (
-    <Router>
+    <Router basename="/neuradex">
       <Routes>
         {/* Public routes — no Layout */}
         <Route path="/login" element={<Login />} />

@@ -1,7 +1,7 @@
 import axios, { AxiosInstance } from 'axios';
 import { Stock, Prediction, Portfolio, ApiResponse, RiskMetrics, StressTestResult, FactorAnalysis, OptimizationResult, OrderRequest, OrderResponse, AIAnalysis, AgentStock, BacktestResult, LiveSignal, LoginRequest, AuthResponse, SignupSendOtpRequest, SignupVerifyOtpRequest, SignupCompleteRequest } from '../types';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const API_BASE_URL = import.meta.env.VITE_API_URL || '';
 
 function snakeToCamel(str: string): string {
   return str.replace(/_([a-z0-9])/g, (_, char) => char.toUpperCase());
@@ -132,6 +132,18 @@ class ApiService {
       console.error(`Error fetching candlesticks for ${symbol}:`, error);
       throw error;
     }
+  }
+
+  async getDirectoryList(params: {
+    page?: number; limit?: number; q?: string; sector?: string; exchange?: string;
+  }): Promise<any> {
+    const response = await this.api.get('/api/stocks/directory/list', { params });
+    return response.data;
+  }
+
+  async getDirectoryPrices(symbols: string[]): Promise<any> {
+    const response = await this.api.post('/api/stocks/directory/prices', { symbols });
+    return response.data;
   }
 
   async getSentiment(symbol: string): Promise<ApiResponse<any>> {
