@@ -162,7 +162,7 @@ const AIAgentPage: React.FC = () => {
 
       {/* Controls */}
       <div className="nd-card" style={{ marginBottom: 16 }}>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: 16, alignItems: 'end' }}>
+        <div className="nd-agent-controls">
           <div>
             <label className="nd-field-label">Stock Symbol</label>
             <input type="text" placeholder="Search by symbol or name..." value={search}
@@ -196,7 +196,7 @@ const AIAgentPage: React.FC = () => {
             </select>
           </div>
           <button onClick={handleAnalyze} disabled={loading || !selSymbol}
-            className={`nd-btn nd-btn-primary`} style={{ height: 40, padding: '0 24px', alignSelf: 'end' }}>
+            className={`nd-btn nd-btn-primary`} style={{ height: 40, padding: '0 24px', alignSelf: 'end', width: '100%' }}>
             <span className="material-icons" style={{ fontSize: 17 }}>{loading ? 'autorenew' : 'search'}</span>
             {loading ? 'Analyzing...' : 'Analyze Stock'}
           </button>
@@ -400,7 +400,7 @@ const AIAgentPage: React.FC = () => {
           {/* AI Analysis */}
           <div className="nd-card">
             <h2 className="nd-section-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span className="material-icons" style={{ fontSize: 18, color: 'var(--nd-purple)' }}>psychology</span>
+              <span className="material-icons" style={{ fontSize: 18, color: '#7c3aed' }}>psychology</span>
               AI Analysis — {analysis.symbol}
             </h2>
             <AnalysisRenderer text={analysis.analysis} theme={theme} />

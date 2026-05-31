@@ -5,6 +5,8 @@ using the `ta` library, then calls the local Ollama LLM for structured analysis.
 from datetime import datetime, timedelta
 from typing import Optional
 
+import asyncio
+import httpx
 import pandas as pd
 import ta
 import ollama as ollama_lib
@@ -419,3 +421,42 @@ async def analyze_stock(
             "generated_at":  datetime.now().isoformat(),
         },
     }
+
+
+# ── Microservice health aggregator ───────────────────────────────────────────
+# Called by the frontend AgentStatusPanel — the browser cannot reach Docker-
+# internal ports directly, so the backend proxies health checks on its behalf.
+
+_SERVICES = [
+    {"name": "Market Data",      "host": "market-data-service", "port": 8001},
+    {"name": "Technical Agent",  "host": "technical-agent",     "port": 8002},
+    {"name": "Sentiment Agent",  "host": "sentiment-agent",     "port": 8003},
+    {"name": "Macro Agent",      "host": "macro-agent",         "port": 8004},
+    {"name": "Pattern Agent",    "host": "pattern-agent",       "port": 8005},
+    {"name": "RL Agent",         "host": "rl-agent",            "port": 8006},
+    {"name": "Ensemble Engine",  "host": "ensemble-engine",     "port": 8007},
+    {"name": "Feedback Service", "host": "feedback-service",    "port": 8012},
+    {"name": "Model Trainer",    "host": "model-trainer",       "port": 8013},
+]
+
+
+async def _check_service(client: httpx.AsyncClient, svc: dict) -> dict:
+    url = f"http://{svc['host']}:{svc['port']}/health"
+    try:
+        r = await client.get(url, timeout=3.0)
+        status = "ok" if r.status_code < 400 else "error"
+    except Exception:
+        status = "error"
+    return {
+        "name":   svc["name"],
+        "port":   svc["port"],
+        "status": status,
+        "checkedAt": datetime.now().isoformat(),
+    }
+
+
+@router.get("/services/health")
+async def services_health():
+    async with httpx.AsyncClient() as client:
+        results = await asyncio.gather(*[_check_service(client, s) for s in _SERVICES])
+    return {"status": "success", "data": list(results)}

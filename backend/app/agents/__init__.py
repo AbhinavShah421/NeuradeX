@@ -8,10 +8,19 @@ from .sentiment import SentimentAgent
 from .rl_agent  import RLAgent
 from .ensemble  import EnsembleEngine
 from .learning  import LearningSystem
+from .memory    import PatternMemory, MemoryAgent
 
 _engine:   EnsembleEngine | None = None
 _learning: LearningSystem | None = None
 _rl_agent: RLAgent        | None = None
+_memory:   PatternMemory  | None = None
+
+
+def get_memory() -> PatternMemory:
+    global _memory
+    if _memory is None:
+        _memory = PatternMemory()
+    return _memory
 
 
 def get_engine() -> EnsembleEngine:
@@ -25,6 +34,7 @@ def get_engine() -> EnsembleEngine:
             VolatilityAgent(),
             SentimentAgent(),
             _rl_agent,
+            MemoryAgent(get_memory()),
         ]
         _engine = EnsembleEngine(agents)
     return _engine
@@ -42,7 +52,7 @@ def get_learning() -> LearningSystem:
     return _learning
 
 
-__all__ = ["get_engine", "get_learning", "get_rl_agent",
-           "EnsembleEngine", "LearningSystem",
+__all__ = ["get_engine", "get_learning", "get_rl_agent", "get_memory",
+           "EnsembleEngine", "LearningSystem", "PatternMemory", "MemoryAgent",
            "TechnicalAgent", "PatternAgent", "MomentumAgent",
            "VolatilityAgent", "SentimentAgent", "RLAgent"]

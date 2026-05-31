@@ -42,6 +42,44 @@ async def _save_backtest_trades(records: list[dict]) -> None:
         logger.warning("Could not save backtest trades to feedback-service: %s", exc)
 
 
+async def _feed_memory_from_backtest(symbol: str, candles: list[dict], trades: list[dict]) -> None:
+    """Turn realised backtest trades into Pattern Memory cases.
+
+    Each trade is fingerprinted from the candles available *at entry* (no
+    lookahead) and labelled with its actual P&L — so the system literally
+    remembers "this kind of setup, when I traded it, made/lost X%".
+    """
+    if not trades or not candles:
+        return
+    try:
+        from app.agents import get_memory
+        from app.agents.fingerprint import build_fingerprint, classify_regime
+
+        await get_memory().init_db()
+        # Map entry_date → candle index for a no-lookahead fingerprint window
+        date_idx = {c.get("date"): i for i, c in enumerate(candles)}
+        cases: list[dict] = []
+        for t in trades:
+            idx = date_idx.get(t.get("entry_date"))
+            if idx is None or idx < 15:
+                continue
+            window = candles[: idx + 1]
+            fp = build_fingerprint(window)
+            if fp is None:
+                continue
+            cases.append({
+                "symbol": symbol, "fingerprint": fp, "action": "BUY",
+                "entry_price": t.get("entry_price", 0.0),
+                "exit_price":  t.get("exit_price", 0.0),
+                "pnl_pct":     float(t.get("pnl_pct", 0.0)),
+                "regime":      classify_regime(window), "source": "BACKTEST",
+            })
+        if cases:
+            await get_memory().add_cases_bulk(cases)
+    except Exception as exc:
+        logger.warning("Could not feed pattern memory from backtest: %s", exc)
+
+
 def _derive_agent_signals(action: str, indicators: dict, strategy: str = "") -> dict:
     """Map available indicators to the 5 agent signal slots the Orders page expects."""
     rsi = float(indicators.get("rsi", 50) or 50)
@@ -468,6 +506,8 @@ async def run_backtest(req: BacktestRequest):
         except Exception:
             pass
     asyncio.create_task(_save_backtest_trades(records))
+    # Also teach the Pattern Memory bank from these realised trades
+    asyncio.create_task(_feed_memory_from_backtest(symbol, candles, result["trades"]))
 
     return {
         "status": "success",

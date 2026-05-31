@@ -12,6 +12,10 @@
   --nd-purple:   #7c3aed;
   --nd-blue:     #1976d2;
 
+  /* Primary / accent both map to the green brand color */
+  --nd-primary:  #00b386;
+  --nd-accent:   #00b386;
+
   /* Light mode */
   --nd-bg:        #ffffff;
   --nd-surface:   #f8f8f8;
@@ -330,6 +334,7 @@ body {
   cursor: pointer;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 7px;
   transition: opacity 0.15s, background 0.15s;
   font-family: 'Roboto', sans-serif;
@@ -358,7 +363,8 @@ body {
 /* ── Inputs ─────────────────────────────────────────────────────────────────── */
 .nd-input, .nd-select {
   width: 100%;
-  padding: 9px 12px;
+  height: 38px;
+  padding: 0 12px;
   border: 1px solid var(--nd-border);
   border-radius: 6px;
   font-size: 13.5px;
@@ -367,8 +373,20 @@ body {
   font-family: 'Roboto', sans-serif;
   outline: none;
   transition: border-color 0.15s;
+  box-sizing: border-box;
 }
 .nd-input:focus, .nd-select:focus { border-color: var(--nd-green); }
+
+/* Native date inputs: kill iOS centering & extra chrome so height + alignment
+   match the sibling select / number fields exactly. */
+.nd-input[type="date"] {
+  -webkit-appearance: none;
+  appearance: none;
+  text-align: left;
+}
+.nd-input[type="date"]::-webkit-date-and-time-value { text-align: left; }
+/* Multi-line textareas (if any) opt out of the fixed height */
+textarea.nd-input { height: auto; padding: 9px 12px; }
 
 /* ── Metric chip ─────────────────────────────────────────────────────────────── */
 .nd-metric {
@@ -496,3 +514,306 @@ body {
 
 /* ── Range input ────────────────────────────────────────────────────────────── */
 input[type=range] { accent-color: var(--nd-green); }
+
+/* ── Portfolio summary card ──────────────────────────────────────────────────── */
+.nd-portfolio-stat {
+  padding: 0 20px;
+  border-left: 1px solid var(--nd-border);
+}
+.nd-portfolio-stat:first-child { border-left: none; }
+
+@media (max-width: 768px) {
+  .nd-portfolio-stat { padding: 12px 16px; border-left: none; border-top: 1px solid var(--nd-border); }
+  .nd-portfolio-stat:first-child { border-top: none; padding-top: 0; }
+  .nd-portfolio-stat:nth-child(2) { border-top: none; border-left: 1px solid var(--nd-border); padding-top: 0; }
+  .nd-portfolio-stat:nth-child(3) { border-top: 1px solid var(--nd-border); padding-top: 12px; }
+  .nd-portfolio-stat:nth-child(4) { border-left: 1px solid var(--nd-border); border-top: 1px solid var(--nd-border); padding-top: 12px; }
+  .nd-portfolio-stat .nd-stat-value { font-size: 18px !important; }
+}
+
+/* ── Scrollable pill tab strip ───────────────────────────────────────────────── */
+.nd-pill-tabs {
+  display: flex;
+  gap: 4px;
+  background: var(--nd-surface);
+  border: 1px solid var(--nd-border);
+  border-radius: 10px;
+  padding: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  width: 100%;
+  margin-bottom: 16px;
+}
+.nd-pill-tabs::-webkit-scrollbar { display: none; }
+.nd-pill-tab {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 16px;
+  border-radius: 7px;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  transition: all 0.15s;
+  white-space: nowrap;
+  flex: 1;
+  font-family: inherit;
+}
+
+/* ── Paper Trading config card ──────────────────────────────────────────────── */
+/* Full width so the card's edges align with the Microservice Status panel
+   that the AI Engine layout renders directly below it. */
+.nd-paper-config-wrap {
+  width: 100%;
+  margin: 0 0 8px;
+}
+.nd-paper-config-card {
+  padding: 28px 32px;
+}
+@media (max-width: 768px) {
+  .nd-paper-config-card { padding: 20px 16px; }
+}
+
+/* ── Orders page ─────────────────────────────────────────────────────────────── */
+.nd-orders-page {
+  padding: 24px 32px;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+.nd-orders-stats {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+}
+@media (max-width: 768px) {
+  .nd-orders-page  { padding: 16px 12px; }
+  .nd-orders-stats { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 480px) {
+  .nd-orders-stats { grid-template-columns: 1fr 1fr; }
+}
+
+/* ── AI Agent controls layout ───────────────────────────────────────────────── */
+.nd-agent-controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 16px;
+  align-items: end;
+}
+@media (max-width: 768px) {
+  .nd-agent-controls {
+    grid-template-columns: 1fr;
+  }
+  .nd-agent-controls button {
+    width: 100%;
+    justify-content: center;
+  }
+}
+
+/* ── Chart fullscreen (applied to nd-chart-col when fullscreen) ──────────────── */
+/* The chart column becomes a fixed overlay; flex chain propagates height down */
+.nd-chart-fs-col {
+  display: flex !important;
+  flex-direction: column !important;
+  position: fixed !important;
+  z-index: 9999 !important;
+  /* No transform here — keeps the canvas on the device-pixel grid (crisp, not blurry) */
+  transform: none !important;
+  will-change: auto !important;
+}
+
+.nd-chart-fs-col .nd-chart-gpu {
+  flex: 1 !important;
+  min-height: 0 !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+
+.nd-chart-fs-col .nd-card {
+  flex: 1 !important;
+  min-height: 0 !important;
+  padding: 0 !important;
+  border-radius: 0 !important;
+  border: none !important;
+  overflow: hidden !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+
+.nd-chart-fs-col .nd-chart-h {
+  flex: 1 !important;
+  height: auto !important;
+  min-height: 0 !important;
+}
+
+body.nd-chart-fullscreen-open { overflow: hidden; }
+
+/* ── Backtest two-column layout ─────────────────────────────────────────────── */
+.nd-backtest-cols {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+.nd-backtest-cols .nd-chart-col {
+  flex: 0 0 60%;
+  min-width: 0;
+  position: relative;
+}
+.nd-backtest-cols .nd-info-col {
+  flex: 0 0 calc(40% - 16px);
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+@media (max-width: 900px) {
+  .nd-backtest-cols {
+    flex-direction: column;
+  }
+  .nd-backtest-cols .nd-chart-col,
+  .nd-backtest-cols .nd-info-col {
+    flex: none;
+    width: 100%;
+  }
+}
+
+/* Speed buttons — allow wrapping on small screens */
+.nd-speed-btns {
+  display: flex;
+  gap: 2px;
+  background: rgba(0,0,0,0.04);
+  border-radius: 8px;
+  padding: 3px;
+  flex-wrap: wrap;
+}
+.dark-mode .nd-speed-btns { background: rgba(255,255,255,0.05); }
+
+/* ── Responsive Layout Utilities ────────────────────────────────────────────── */
+.nd-grid-4    { display: grid; grid-template-columns: repeat(4, 1fr); }
+.nd-grid-3    { display: grid; grid-template-columns: repeat(3, 1fr); }
+.nd-grid-2    { display: grid; grid-template-columns: repeat(2, 1fr); }
+.nd-grid-sidebar { display: grid; grid-template-columns: 320px 1fr; gap: 20px; align-items: start; }
+
+/* Chart container with responsive height */
+.nd-chart-h { height: 480px; border-radius: 12px; overflow: hidden; }
+
+/* Hamburger — hidden on desktop */
+.nd-hamburger {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  border: 1px solid var(--nd-border);
+  background: var(--nd-surface);
+  cursor: pointer;
+  color: var(--nd-text-1);
+  flex-shrink: 0;
+  margin-left: auto;
+}
+.nd-hamburger .material-icons { font-size: 20px; }
+
+/* Mobile full-screen menu */
+.nd-mobile-menu {
+  position: fixed;
+  inset: 0;
+  background: var(--nd-bg);
+  z-index: 500;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+.nd-mobile-menu-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--nd-border);
+  flex-shrink: 0;
+}
+.nd-mobile-menu-body {
+  flex: 1;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.nd-mobile-nav-link {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  text-decoration: none;
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--nd-text-1);
+  transition: background 0.12s;
+}
+.nd-mobile-nav-link:hover  { background: var(--nd-surface); }
+.nd-mobile-nav-link.active { background: var(--nd-surface); color: var(--nd-green); font-weight: 600; }
+.nd-mobile-nav-section {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--nd-text-3);
+  padding: 10px 14px 4px;
+}
+.nd-mobile-menu-footer {
+  border-top: 1px solid var(--nd-border);
+  padding: 14px 12px;
+  flex-shrink: 0;
+}
+.nd-logo-text { white-space: nowrap; }
+
+/* ── Breakpoint: tablet (≤1024px) ───────────────────────────────────────────── */
+@media (max-width: 1024px) {
+  .nd-grid-sidebar { grid-template-columns: 280px 1fr; }
+}
+
+/* ── Breakpoint: mobile (≤768px) ────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  /* Header */
+  .nd-header-inner { padding: 0 12px; gap: 4px; }
+  .nd-logo         { margin-right: 0; }
+  .nd-logo-text    { display: none; }
+  .nd-nav          { display: none; }
+  .nd-hamburger    { display: flex; }
+  .nd-connection span:not(.nd-dot) { display: none; }
+  .nd-header-right { gap: 8px; }
+  /* Items moved into the hamburger menu */
+  .nd-hide-mobile { display: none !important; }
+
+  /* Main content */
+  .nd-main { padding: 16px 12px; }
+
+  /* Ticker */
+  .nd-ticker { justify-content: flex-start; gap: 16px; padding: 5px 12px; }
+
+  /* Responsive grids */
+  .nd-grid-4       { grid-template-columns: repeat(2, 1fr); }
+  .nd-grid-3       { grid-template-columns: repeat(2, 1fr); }
+  .nd-grid-sidebar { grid-template-columns: 1fr; }
+
+  /* Charts */
+  .nd-chart-h { height: 280px; }
+
+  /* Cards */
+  .nd-card { padding: 14px; }
+
+  /* Page title area */
+  .nd-page-title { font-size: 17px; }
+}
+
+/* ── Breakpoint: small phone (≤480px) ───────────────────────────────────────── */
+@media (max-width: 480px) {
+  .nd-grid-2    { grid-template-columns: 1fr; }
+  .nd-grid-3    { grid-template-columns: 1fr; }
+  .nd-main      { padding: 10px; }
+  .nd-ticker    { display: none; }
+  .nd-chart-h   { height: 240px; }
+}

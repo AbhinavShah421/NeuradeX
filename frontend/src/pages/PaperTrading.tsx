@@ -73,7 +73,7 @@ const StableChart = React.memo(
   ({ containerRef, isDark }: { containerRef: React.RefObject<HTMLDivElement>; isDark: boolean }) => (
     <div className="nd-chart-gpu">
       <div className="nd-card" style={{ padding: 0, overflow: 'hidden', borderRadius: 12, border: isDark ? '1px solid rgba(42,46,57,0.8)' : '1px solid rgba(0,0,0,0.1)' }}>
-        <div ref={containerRef} style={{ height: 480, borderRadius: 12, overflow: 'hidden' }} />
+        <div ref={containerRef} className="nd-chart-h" />
       </div>
     </div>
   ),
@@ -426,7 +426,7 @@ const LiveTradingView: React.FC<{
       handleScroll: { mouseWheel: false, pressedMouseMove: true, horzTouchDrag: true },
       handleScale:  { mouseWheel: true, pinch: true, axisPressedMouseMove: { time: true, price: false } },
       width:  containerRef.current.clientWidth,
-      height: 480,
+      height: containerRef.current.clientHeight || 480,
     });
     chartRef.current = chart;
 
@@ -474,7 +474,7 @@ const LiveTradingView: React.FC<{
     });
 
     const ro = new ResizeObserver(() => {
-      if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth });
+      if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth, height: containerRef.current.clientHeight || 480 });
     });
     ro.observe(containerRef.current);
 
@@ -534,10 +534,10 @@ const LiveTradingView: React.FC<{
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-    <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
+    <div className="nd-backtest-cols">
 
       {/* ══ LEFT — Chart (60%) ═══════════════════════════════════════════════ */}
-      <div className="nd-chart-col" style={{ flex: '0 0 60%', minWidth: 0, position: 'relative' }}>
+      <div className="nd-chart-col">
         <StableChart containerRef={containerRef} isDark={isDark} />
 
         {/* Scroll arrows */}
@@ -567,7 +567,7 @@ const LiveTradingView: React.FC<{
       </div>
 
       {/* ══ RIGHT — Info cards (40%) ══════════════════════════════════════════ */}
-      <div className="nd-info-col" style={{ flex: '0 0 calc(40% - 16px)', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div className="nd-info-col">
 
         {/* ── Header card ────────────────────────────────────────────────────── */}
         <div className="nd-card" style={{ padding: '14px 18px' }}>
@@ -603,7 +603,7 @@ const LiveTradingView: React.FC<{
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
             <div style={{ display: 'flex', gap: 3, background: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)', borderRadius: 8, padding: 3 }}>
               {(['candle', 'line'] as const).map(t => (
-                <button key={t} onClick={() => setChartType(t)} style={{ padding: '4px 10px', borderRadius: 6, border: 'none', fontSize: 11, fontWeight: 600, cursor: 'pointer', background: chartType === t ? 'var(--nd-primary)' : 'transparent', color: chartType === t ? '#000' : 'var(--nd-text-2)' }}>
+                <button key={t} onClick={() => setChartType(t)} style={{ padding: '4px 10px', borderRadius: 6, border: 'none', fontSize: 11, fontWeight: 600, cursor: 'pointer', background: chartType === t ? 'var(--nd-primary)' : 'transparent', color: chartType === t ? '#fff' : 'var(--nd-text-2)' }}>
                   {t === 'candle' ? '🕯' : '📈'}
                 </button>
               ))}
@@ -615,7 +615,7 @@ const LiveTradingView: React.FC<{
               <span style={{ fontSize: 10, color: 'var(--nd-text-3)', whiteSpace: 'nowrap' }}>Fetch rate:</span>
               <div style={{ display: 'flex', gap: 2, background: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)', borderRadius: 8, padding: 2 }}>
                 {([1, 2, 5, 10, 30] as const).map(s => (
-                  <button key={s} onClick={() => setTickInterval(s)} style={{ padding: '3px 7px', borderRadius: 5, border: 'none', fontSize: 10, fontWeight: 700, cursor: 'pointer', background: tickInterval === s ? 'var(--nd-primary)' : 'transparent', color: tickInterval === s ? '#000' : 'var(--nd-text-2)' }}>{s}s</button>
+                  <button key={s} onClick={() => setTickInterval(s)} style={{ padding: '3px 7px', borderRadius: 5, border: 'none', fontSize: 10, fontWeight: 700, cursor: 'pointer', background: tickInterval === s ? 'var(--nd-primary)' : 'transparent', color: tickInterval === s ? '#fff' : 'var(--nd-text-2)' }}>{s}s</button>
                 ))}
               </div>
             </div>
@@ -972,7 +972,7 @@ const PaperTrading: React.FC = () => {
 
   if (session) {
     return (
-      <div style={{ maxWidth: 1400, margin: '0 auto', padding: '0 20px' }}>
+      <div>
         <LiveTradingView
           initialData={session}
           symbol={ptSymbol}
@@ -985,8 +985,8 @@ const PaperTrading: React.FC = () => {
   }
 
   return (
-    <div style={{ maxWidth: 560, margin: '40px auto', padding: '0 20px' }}>
-      <div className="nd-card" style={{ padding: '32px 36px' }}>
+    <div className="nd-paper-config-wrap">
+      <div className="nd-card nd-paper-config-card">
 
         {/* Header */}
         <div style={{ marginBottom: 24 }}>
@@ -1026,7 +1026,7 @@ const PaperTrading: React.FC = () => {
             <select
               value={ptSymbol}
               onChange={e => setPtSymbol(e.target.value)}
-              style={{ width: '100%', padding: '10px 12px', borderRadius: 8, border: `1px solid ${isDark ? 'rgba(255,255,255,0.12)' : '#e2e8f0'}`, background: isDark ? 'rgba(255,255,255,0.05)' : '#fff', color: 'var(--nd-text-1)', fontSize: 14 }}
+              style={{ width: '100%', height: 42, padding: '0 12px', borderRadius: 8, border: `1px solid ${isDark ? 'rgba(255,255,255,0.12)' : '#e2e8f0'}`, background: isDark ? 'rgba(255,255,255,0.05)' : '#fff', color: 'var(--nd-text-1)', fontSize: 14, boxSizing: 'border-box' }}
             >
               {STOCKS.map(s => <option key={s} value={s}>{s}</option>)}
             </select>
@@ -1038,7 +1038,7 @@ const PaperTrading: React.FC = () => {
               type="number" min="5000" step="5000"
               value={ptCapital}
               onChange={e => setPtCapital(e.target.value)}
-              style={{ width: '100%', padding: '10px 12px', borderRadius: 8, border: `1px solid ${isDark ? 'rgba(255,255,255,0.12)' : '#e2e8f0'}`, background: isDark ? 'rgba(255,255,255,0.05)' : '#fff', color: 'var(--nd-text-1)', fontSize: 14, boxSizing: 'border-box' }}
+              style={{ width: '100%', height: 42, padding: '0 12px', borderRadius: 8, border: `1px solid ${isDark ? 'rgba(255,255,255,0.12)' : '#e2e8f0'}`, background: isDark ? 'rgba(255,255,255,0.05)' : '#fff', color: 'var(--nd-text-1)', fontSize: 14, boxSizing: 'border-box' }}
             />
           </div>
 
@@ -1078,10 +1078,11 @@ const PaperTrading: React.FC = () => {
             onClick={handleStart}
             disabled={loading}
             style={{
-              padding: '12px 24px', borderRadius: 10, border: 'none', cursor: loading ? 'wait' : 'pointer',
+              width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center',
+              padding: '13px 24px', borderRadius: 10, border: 'none', cursor: loading ? 'wait' : 'pointer',
               fontWeight: 700, fontSize: 14,
               background: loading ? (isDark ? 'rgba(255,255,255,0.08)' : '#e2e8f0') : 'var(--nd-primary)',
-              color: loading ? 'var(--nd-text-3)' : '#000',
+              color: loading ? 'var(--nd-text-3)' : '#fff',
               transition: 'opacity 0.15s',
             }}
           >

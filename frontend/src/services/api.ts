@@ -652,6 +652,38 @@ class ApiService {
     }
   }
 
+  // ── Pattern Memory bank ─────────────────────────────────────────────────────
+  async memoryStats(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/ai-engine/memory/stats');
+    return response.data;
+  }
+
+  async memoryQuery(payload: { symbol: string; candles: any[] }): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/ai-engine/memory/query', payload);
+    return response.data;
+  }
+
+  async memorySeed(payload: {
+    symbols?: string[];
+    lookback_days?: number;
+    horizon?: number;
+    stride?: number;
+    max_per_symbol?: number;
+  } = {}): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/ai-engine/memory/seed', payload);
+    return response.data;
+  }
+
+  async memorySweep(): Promise<any> {
+    const response = await this.api.post('/api/ai-engine/memory/sweep?background=true');
+    return response.data;
+  }
+
+  async memorySweepStatus(): Promise<any> {
+    const response = await this.api.get('/api/ai-engine/memory/sweep/status');
+    return response.data;
+  }
+
   // Health check
   async healthCheck(): Promise<ApiResponse<any>> {
     try {
@@ -661,6 +693,23 @@ class ApiService {
       console.error('Health check failed:', error);
       throw error;
     }
+  }
+
+  // Microservice health — backend proxies checks on the Docker network
+  async getServicesHealth(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/agent/services/health');
+    return response.data;
+  }
+
+  // Feedback-service proxy (browser cannot reach Docker-internal port 8012)
+  async getFeedbackStats(): Promise<any> {
+    const response = await this.api.get('/api/orders/feedback/stats');
+    return response.data;
+  }
+
+  async getFeedbackTrades(): Promise<any> {
+    const response = await this.api.get('/api/orders/feedback/trades');
+    return response.data;
   }
 }
 

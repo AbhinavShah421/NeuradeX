@@ -50,9 +50,10 @@ const BROKER_COLORS: Record<string, string> = {
 const Layout: React.FC<LayoutProps> = ({ children }) => {
   const { theme, setTheme } = useAppStore();
   const { broker, profile, clearAuth } = useAuthStore();
-  const [isConnected, setIsConnected] = useState(false);
+  const [, setIsConnected] = useState(false);
   const [userDropdownOpen, setUserDropdownOpen] = useState(false);
   const [aiDropdownOpen, setAiDropdownOpen]     = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen]     = useState(false);
   const userDropdownRef = useRef<HTMLDivElement>(null);
   const aiDropdownRef   = useRef<HTMLDivElement>(null);
   const location  = useLocation();
@@ -77,8 +78,8 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  // Close AI dropdown on route change
-  useEffect(() => { setAiDropdownOpen(false); }, [location.pathname]);
+  // Close dropdowns and mobile menu on route change
+  useEffect(() => { setAiDropdownOpen(false); setMobileMenuOpen(false); }, [location.pathname]);
 
   const isActive = (to: string, exact = false) =>
     exact ? location.pathname === to : (to === '/' ? location.pathname === '/' : location.pathname.startsWith(to));
@@ -99,7 +100,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
         <div className="nd-header-inner">
           <Link to="/" className="nd-logo">
             <NeuradeXLogo size={32} />
-            NeuradeX
+            <span className="nd-logo-text">NeuradeX</span>
           </Link>
 
           <nav className="nd-nav">
@@ -189,23 +190,22 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
           </nav>
 
           <div className="nd-header-right">
-            {/* Connection status */}
-            <div className="nd-connection">
-              <span className={`nd-dot ${isConnected ? 'green' : 'red'}`} />
-              <span>{isConnected ? 'Live' : 'Offline'}</span>
-            </div>
+            {/* Groww API token status — hidden on mobile (lives in hamburger menu) */}
+            <span className="nd-hide-mobile"><GrowwStatusBadge /></span>
 
-            {/* Groww API token status */}
-            <GrowwStatusBadge />
-
-            {/* Theme toggle */}
-            <button className="nd-theme-btn" onClick={() => setTheme(isDark ? 'light' : 'dark')}>
+            {/* Theme toggle — hidden on mobile (lives in hamburger menu) */}
+            <button className="nd-theme-btn nd-hide-mobile" onClick={() => setTheme(isDark ? 'light' : 'dark')}>
               <span className="material-icons">{isDark ? 'light_mode' : 'dark_mode'}</span>
             </button>
 
-            {/* User avatar + dropdown */}
+            {/* Hamburger — mobile only */}
+            <button className="nd-hamburger" onClick={() => setMobileMenuOpen(o => !o)} aria-label="Menu">
+              <span className="material-icons">{mobileMenuOpen ? 'close' : 'menu'}</span>
+            </button>
+
+            {/* User avatar + dropdown — hidden on mobile (lives in hamburger menu) */}
             {broker && (
-              <div ref={userDropdownRef} style={{ position: 'relative' }}>
+              <div ref={userDropdownRef} className="nd-hide-mobile" style={{ position: 'relative' }}>
                 <button
                   onClick={() => setUserDropdownOpen(o => !o)}
                   style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 24, padding: '4px 12px 4px 4px', cursor: 'pointer', transition: 'box-shadow 0.15s' }}
@@ -272,6 +272,73 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             )}
           </div>
         </div>
+
+        {/* ── Mobile full-screen menu ── */}
+        {mobileMenuOpen && (
+          <div className="nd-mobile-menu">
+            <div className="nd-mobile-menu-head">
+              <Link to="/" className="nd-logo" onClick={() => setMobileMenuOpen(false)}>
+                <NeuradeXLogo size={28} />
+                <span style={{ fontSize: 17, fontWeight: 700 }}>NeuradeX</span>
+              </Link>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto' }}>
+                {/* Groww badge */}
+                <GrowwStatusBadge />
+                {/* Theme toggle */}
+                <button className="nd-theme-btn" onClick={() => setTheme(isDark ? 'light' : 'dark')}>
+                  <span className="material-icons">{isDark ? 'light_mode' : 'dark_mode'}</span>
+                </button>
+                {/* Close */}
+                <button className="nd-theme-btn" onClick={() => setMobileMenuOpen(false)}>
+                  <span className="material-icons">close</span>
+                </button>
+              </div>
+            </div>
+            <div className="nd-mobile-menu-body">
+              {NAV_LEFT.map(n => (
+                <Link key={n.to} to={n.to} className={`nd-mobile-nav-link${isActive(n.to) ? ' active' : ''}`}>
+                  <span className="material-icons" style={{ fontSize: 20, color: 'var(--nd-text-3)' }}>
+                    {n.to === '/' ? 'dashboard' : n.to === '/predictions' ? 'psychology' : 'account_balance_wallet'}
+                  </span>
+                  {n.label}
+                </Link>
+              ))}
+              <div className="nd-mobile-nav-section">AI Engine</div>
+              {AI_ENGINE_ITEMS.map(item => (
+                <Link key={item.to} to={item.to} className={`nd-mobile-nav-link${isActive(item.to, item.to === '/ai-engine') ? ' active' : ''}`}
+                  style={{ paddingLeft: 24 }}>
+                  <span className="material-icons" style={{ fontSize: 18, color: 'var(--nd-text-3)' }}>{item.icon}</span>
+                  {item.label}
+                </Link>
+              ))}
+              {NAV_RIGHT.map(n => (
+                <Link key={n.to} to={n.to} className={`nd-mobile-nav-link${isActive(n.to) ? ' active' : ''}`}>
+                  <span className="material-icons" style={{ fontSize: 20, color: 'var(--nd-text-3)' }}>
+                    {n.to === '/models' ? 'model_training' : 'receipt_long'}
+                  </span>
+                  {n.label}
+                </Link>
+              ))}
+            </div>
+            {broker && (
+              <div className="nd-mobile-menu-footer">
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+                  <div style={{ width: 36, height: 36, borderRadius: '50%', background: brokerColor, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: 14, color: '#fff' }}>
+                    {profile?.initials || brokerLabel.charAt(0)}
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 600 }}>{profile?.name || brokerLabel}</div>
+                    <div style={{ fontSize: 11, color: 'var(--nd-green)' }}>● Connected</div>
+                  </div>
+                </div>
+                <button onClick={handleLogout} style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', borderRadius: 10, border: 'none', background: 'var(--nd-red-50)', cursor: 'pointer', color: 'var(--nd-red)', fontSize: 14, fontWeight: 500 }}>
+                  <span className="material-icons" style={{ fontSize: 18 }}>logout</span>
+                  Disconnect Broker
+                </button>
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="nd-ticker">
           {INDICES.map(idx => (

@@ -59,7 +59,9 @@ CREATE TABLE IF NOT EXISTS trade_records (
     market_context      JSONB,
     outcome             TEXT,                       -- WIN/LOSS/BREAK_EVEN/OPEN
     timestamp_open      TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
-    timestamp_close     TIMESTAMPTZ
+    timestamp_close     TIMESTAMPTZ,
+    trade_source        TEXT            DEFAULT 'LIVE',  -- LIVE/PAPER/BACKTEST
+    paper_trade         BOOLEAN         DEFAULT FALSE
 );
 
 CREATE INDEX IF NOT EXISTS idx_trade_records_symbol ON trade_records (symbol, timestamp_open DESC);

@@ -101,7 +101,7 @@ const Predictions: React.FC = () => {
 
       {/* Detailed analysis */}
       {analysis && selected && (
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16 }}>
+        <div className="nd-grid-3" style={{ gap: 16 }}>
           {/* AI Recommendation */}
           <div className="nd-card">
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>

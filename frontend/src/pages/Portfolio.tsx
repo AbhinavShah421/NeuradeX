@@ -154,8 +154,8 @@ const PortfolioPage: React.FC = () => {
       {portfolio && (
         <>
           {/* Summary strip */}
-          <div className="nd-card" style={{ padding: '20px 24px', marginBottom: 16 }}>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 0 }}>
+          <div className="nd-card" style={{ padding: '20px 16px', marginBottom: 16 }}>
+            <div className="nd-grid-4" style={{ gap: 0 }}>
               {[
                 { label: 'Current Value',   value: `₹${inr(portfolio.totalValue)}`,    color: 'var(--nd-text-1)', icon: 'account_balance_wallet' },
                 { label: 'Invested Value',  value: `₹${inr(portfolio.totalInvested)}`, color: 'var(--nd-text-2)', icon: 'savings' },
@@ -165,25 +165,26 @@ const PortfolioPage: React.FC = () => {
                 { label: 'Total Returns',
                   value: `${portfolio.gainPercent >= 0 ? '+' : ''}${portfolio.gainPercent.toFixed(2)}%`,
                   color: portfolio.gainPercent >= 0 ? 'var(--nd-green)' : 'var(--nd-red)', icon: 'trending_up' },
-              ].map((c, i) => (
-                <div key={c.label} style={{ padding: '0 20px', borderLeft: i > 0 ? '1px solid var(--nd-border)' : 'none' }}>
+              ].map((c) => (
+                <div key={c.label} className="nd-portfolio-stat">
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                    <span className="material-icons" style={{ fontSize: 14, color: 'var(--nd-text-3)' }}>{c.icon}</span>
+                    <span className="material-icons" style={{ fontSize: 13, color: 'var(--nd-text-3)' }}>{c.icon}</span>
                     <p className="nd-label" style={{ margin: 0 }}>{c.label}</p>
                   </div>
-                  <p style={{ fontSize: 22, fontWeight: 700, color: c.color, margin: 0 }}>{c.value}</p>
+                  <p className="nd-stat-value" style={{ fontSize: 22, fontWeight: 700, color: c.color, margin: 0 }}>{c.value}</p>
                 </div>
               ))}
             </div>
           </div>
 
           {/* Tab strip */}
-          <div style={{ display: 'flex', gap: 4, marginBottom: 16, background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 10, padding: 4, width: 'fit-content' }}>
+          <div className="nd-pill-tabs">
             {tabs.map(t => (
-              <button key={t.id} onClick={() => setActiveTab(t.id)}
-                style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 16px', borderRadius: 7, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500, transition: 'all 0.15s',
-                  background: activeTab === t.id ? 'var(--nd-accent)' : 'transparent',
-                  color: activeTab === t.id ? '#fff' : 'var(--nd-text-2)' }}>
+              <button key={t.id} onClick={() => setActiveTab(t.id)} className="nd-pill-tab"
+                style={{
+                  background: activeTab === t.id ? 'var(--nd-green)' : 'transparent',
+                  color: activeTab === t.id ? '#fff' : 'var(--nd-text-2)',
+                }}>
                 <span className="material-icons" style={{ fontSize: 15 }}>{t.icon}</span>
                 {t.label}
               </button>
@@ -270,7 +271,7 @@ const PortfolioPage: React.FC = () => {
           {activeTab === 'performance' && performance && (
             <div className="nd-card">
               <h2 className="nd-section-title">Performance Metrics</h2>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+              <div className="nd-grid-4" style={{ gap: 12 }}>
                 {[
                   { label: 'Daily Return',   value: `${performance.dailyReturn > 0 ? '+' : ''}${performance.dailyReturn.toFixed(2)}%`,   color: performance.dailyReturn >= 0 ? 'var(--nd-green)' : 'var(--nd-red)' },
                   { label: 'Monthly Return', value: `${performance.monthlyReturn > 0 ? '+' : ''}${performance.monthlyReturn.toFixed(2)}%`, color: performance.monthlyReturn >= 0 ? 'var(--nd-green)' : 'var(--nd-red)' },
@@ -292,7 +293,7 @@ const PortfolioPage: React.FC = () => {
               <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
 
                 {/* Risk summary cards */}
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
+                <div className="nd-grid-3" style={{ gap: 12 }}>
                   {[
                     {
                       label: '95% 1-Day VaR',
