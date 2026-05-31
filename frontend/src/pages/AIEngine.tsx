@@ -121,34 +121,46 @@ const AIEngine: React.FC = () => {
   const [outcomeLoading, setOutcomeLoading] = useState(false);
   const [outcomeResult, setOutcomeResult]   = useState<{ reward: number } | null>(null);
 
-  // ── Fetch candles via paper-trading tick (uses Yahoo/Groww) ──────────────────
+  // ── Fetch historical intraday candles (works weekends — uses last trading day) ─
 
-  const fetchCandles = useCallback(async () => {
+  const fetchCandles = useCallback(async (): Promise<any[]> => {
     setLoadingCandles(true);
     try {
-      const r = await apiService.paperTradingStart({ symbol, capital: parseFloat(capital) || 50000 });
-      if (r?.data?.candles?.length) {
-        setCandles(r.data.candles);
-      }
+      // Find the most recent weekday
+      const d = new Date();
+      while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() - 1);
+      const date = d.toISOString().slice(0, 10);
+
+      const r = await apiService.getIntradayCandles(symbol, date);
+      const loaded: any[] = (r as any)?.data?.candles ?? (r as any)?.candles ?? [];
+      if (loaded.length) setCandles(loaded);
+      return loaded;
     } catch (err) {
       console.error('fetchCandles failed:', err);
+      return [];
     } finally {
       setLoadingCandles(false);
     }
-  }, [symbol, capital]);
+  }, [symbol]);
 
   // ── Run analysis ──────────────────────────────────────────────────────────────
 
   const runAnalysis = async () => {
-    if (!candles.length) {
-      await fetchCandles();
-      return;
+    // Ensure candles are loaded — fetch if missing, then proceed immediately
+    let activeCandles = candles;
+    if (!activeCandles.length) {
+      activeCandles = await fetchCandles();
+      if (!activeCandles.length) {
+        console.error('No candle data available for analysis');
+        return;
+      }
     }
+
     setAnalyzing(true);
     setOutcomeResult(null);
     try {
       const r = await apiService.aiEngineAnalyze({
-        symbol, candles,
+        symbol, candles: activeCandles,
         capital: parseFloat(capital) || 50000,
         position,
         context: { symbol, position },
@@ -229,13 +241,13 @@ const AIEngine: React.FC = () => {
   ];
 
   return (
-    <div style={{ maxWidth: 1280, margin: '0 auto', padding: '24px 16px' }}>
+    <div>
 
       {/* ── Page Header ──────────────────────────────────────────────────────── */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24 }}>
-        <div>
-          <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0, color: 'var(--nd-text-1)' }}>
-            <span className="material-icons" style={{ verticalAlign: 'middle', marginRight: 8, color: '#8b5cf6', fontSize: 26 }}>smart_toy</span>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 20 }}>
+        <div style={{ minWidth: 0 }}>
+          <h1 style={{ fontSize: 19, fontWeight: 700, margin: 0, color: 'var(--nd-text-1)', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span className="material-icons" style={{ color: 'var(--nd-green)', fontSize: 24, flexShrink: 0 }}>smart_toy</span>
             Multi-Agent AI Engine
           </h1>
           <p style={{ fontSize: 13, color: 'var(--nd-text-3)', margin: '4px 0 0' }}>
@@ -243,19 +255,20 @@ const AIEngine: React.FC = () => {
           </p>
         </div>
         {candles.length > 0 && (
-          <div style={{ fontSize: 12, color: 'var(--nd-text-3)', background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 8, padding: '4px 10px' }}>
-            {candles.length} candles loaded
+          <div style={{ fontSize: 12, color: 'var(--nd-text-3)', background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 8, padding: '4px 10px', whiteSpace: 'nowrap', flexShrink: 0 }}>
+            {candles.length} candles
           </div>
         )}
       </div>
 
       {/* ── Tabs ────────────────────────────────────────────────────────────────── */}
-      <div style={{ display: 'flex', gap: 6, marginBottom: 20, background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 10, padding: 4, width: 'fit-content' }}>
+      <div className="nd-pill-tabs" style={{ marginBottom: 20 }}>
         {tabs.map(t => (
-          <button key={t.id} onClick={() => setActiveTab(t.id)}
-            style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 16px', borderRadius: 7, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500, transition: 'all 0.15s',
-              background: activeTab === t.id ? '#8b5cf6' : 'transparent',
-              color: activeTab === t.id ? '#fff' : 'var(--nd-text-2)' }}>
+          <button key={t.id} onClick={() => setActiveTab(t.id)} className="nd-pill-tab"
+            style={{
+              background: activeTab === t.id ? 'var(--nd-green)' : 'transparent',
+              color:      activeTab === t.id ? '#fff' : 'var(--nd-text-2)',
+            }}>
             <span className="material-icons" style={{ fontSize: 15 }}>{t.icon}</span>
             {t.label}
           </button>
@@ -266,7 +279,7 @@ const AIEngine: React.FC = () => {
           TAB: Live Analysis
       ════════════════════════════════════════════════════════════════════════ */}
       {activeTab === 'analyze' && (
-        <div style={{ display: 'grid', gridTemplateColumns: '320px 1fr', gap: 20, alignItems: 'start' }}>
+        <div className="nd-grid-sidebar">
 
           {/* ── Left column: controls ─────────────────────────────────────────── */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -302,7 +315,7 @@ const AIEngine: React.FC = () => {
             {/* Run button */}
             <button onClick={runAnalysis} disabled={analyzing || loadingCandles}
               style={{ width: '100%', padding: '13px 0', borderRadius: 10, border: 'none', cursor: 'pointer', fontSize: 14, fontWeight: 700, transition: 'all 0.2s',
-                background: analyzing || loadingCandles ? 'var(--nd-border)' : '#8b5cf6',
+                background: analyzing || loadingCandles ? 'var(--nd-border)' : 'var(--nd-green)',
                 color: analyzing || loadingCandles ? 'var(--nd-text-3)' : '#fff',
                 display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
               <span className="material-icons" style={{ fontSize: 18 }}>
@@ -415,7 +428,7 @@ const AIEngine: React.FC = () => {
                 </div>
 
                 {/* Agent Cards Grid */}
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
+                <div className="nd-grid-3" style={{ gap: 12 }}>
                   {analysis.agents.map((ag) => {
                     const color = AGENT_COLORS[ag.agentName] || '#767676';
                     const icon  = AGENT_ICONS[ag.agentName]  || 'auto_awesome';
@@ -494,34 +507,40 @@ const AIEngine: React.FC = () => {
                 const icon    = AGENT_ICONS[p.agent]  || 'auto_awesome';
                 const maxW    = Math.max(...performance.map(x => x.weight), 2.5);
                 return (
-                  <div key={p.agent} style={card({ display: 'flex', alignItems: 'center', gap: 20 })}>
-                    <div style={{ width: 40, height: 40, borderRadius: '50%', background: `${color}22`, border: `2px solid ${color}`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                      <span className="material-icons" style={{ fontSize: 20, color }}>{icon}</span>
+                  <div key={p.agent} style={card({ padding: '14px 16px' })}>
+                    {/* Top row: icon + name + stats */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                      <div style={{ width: 38, height: 38, borderRadius: '50%', background: `${color}22`, border: `2px solid ${color}`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                        <span className="material-icons" style={{ fontSize: 18, color }}>{icon}</span>
+                      </div>
+                      <div style={{ flex: '1 1 80px', minWidth: 0 }}>
+                        <div style={{ fontWeight: 700, fontSize: 13, color: 'var(--nd-text-1)', textTransform: 'capitalize' }}>{p.agent}</div>
+                        <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>{p.total} predictions</div>
+                      </div>
+                      <div style={{ display: 'flex', gap: 16, marginLeft: 'auto', flexShrink: 0 }}>
+                        <div style={{ textAlign: 'center' }}>
+                          <div style={{ fontSize: 18, fontWeight: 800, color: p.accuracy >= 0.55 ? '#22c55e' : p.accuracy >= 0.45 ? '#f59e0b' : '#ef4444' }}>
+                            {p.total > 0 ? `${(p.accuracy * 100).toFixed(0)}%` : '–'}
+                          </div>
+                          <div style={{ fontSize: 10, color: 'var(--nd-text-3)' }}>Accuracy</div>
+                        </div>
+                        <div style={{ textAlign: 'center' }}>
+                          <div style={{ fontSize: 15, fontWeight: 700, color: p.totalReward >= 0 ? '#22c55e' : '#ef4444' }}>
+                            {p.totalReward > 0 ? '+' : ''}{p.totalReward.toFixed(2)}
+                          </div>
+                          <div style={{ fontSize: 10, color: 'var(--nd-text-3)' }}>Reward</div>
+                        </div>
+                      </div>
                     </div>
-                    <div style={{ minWidth: 100 }}>
-                      <div style={{ fontWeight: 700, fontSize: 14, color: 'var(--nd-text-1)', textTransform: 'capitalize' }}>{p.agent}</div>
-                      <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>{p.total} predictions</div>
-                    </div>
-                    <div style={{ flex: 1 }}>
+                    {/* Weight bar */}
+                    <div style={{ marginTop: 10 }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--nd-text-3)', marginBottom: 4 }}>
                         <span>Weight</span>
                         <span style={{ fontWeight: 700, color: p.weight >= 1.0 ? '#22c55e' : p.weight >= 0.7 ? '#f59e0b' : '#ef4444' }}>{p.weight.toFixed(3)}×</span>
                       </div>
-                      <div style={{ height: 6, borderRadius: 3, background: 'var(--nd-border)', overflow: 'hidden' }}>
+                      <div style={{ height: 5, borderRadius: 3, background: 'var(--nd-border)', overflow: 'hidden' }}>
                         <div style={{ height: '100%', width: `${(p.weight / maxW) * 100}%`, background: color, borderRadius: 3 }} />
                       </div>
-                    </div>
-                    <div style={{ textAlign: 'center', minWidth: 70 }}>
-                      <div style={{ fontSize: 20, fontWeight: 800, color: p.accuracy >= 0.55 ? '#22c55e' : p.accuracy >= 0.45 ? '#f59e0b' : '#ef4444' }}>
-                        {p.total > 0 ? `${(p.accuracy * 100).toFixed(0)}%` : '–'}
-                      </div>
-                      <div style={{ fontSize: 10, color: 'var(--nd-text-3)' }}>Accuracy</div>
-                    </div>
-                    <div style={{ textAlign: 'center', minWidth: 70 }}>
-                      <div style={{ fontSize: 16, fontWeight: 700, color: p.totalReward >= 0 ? '#22c55e' : '#ef4444' }}>
-                        {p.totalReward > 0 ? '+' : ''}{p.totalReward.toFixed(2)}
-                      </div>
-                      <div style={{ fontSize: 10, color: 'var(--nd-text-3)' }}>Total reward</div>
                     </div>
                   </div>
                 );
@@ -550,7 +569,8 @@ const AIEngine: React.FC = () => {
             </div>
           ) : (
             <div style={{ ...card({ padding: 0, overflow: 'hidden' }) }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' as any }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, minWidth: 640 }}>
                 <thead>
                   <tr style={{ borderBottom: '1px solid var(--nd-border)', background: 'var(--nd-bg)' }}>
                     {['Time', 'Symbol', 'Action', 'Confidence', 'Agreement', 'Risk', 'Outcome', 'P&L %', 'Reward'].map(h => (
@@ -590,6 +610,7 @@ const AIEngine: React.FC = () => {
                   ))}
                 </tbody>
               </table>
+              </div>
             </div>
           )}
         </div>

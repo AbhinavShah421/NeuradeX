@@ -139,7 +139,7 @@ const StableChart = React.memo(
   ({ containerRef, isDark }: { containerRef: React.RefObject<HTMLDivElement>; isDark: boolean }) => (
     <div className="nd-chart-gpu">
       <div className="nd-card" style={{ padding: 0, overflow: 'hidden', borderRadius: 12, border: isDark ? '1px solid rgba(42,46,57,0.8)' : '1px solid rgba(0,0,0,0.1)' }}>
-        <div ref={containerRef} style={{ height: 480, borderRadius: 12, overflow: 'hidden' }} />
+        <div ref={containerRef} className="nd-chart-h" />
       </div>
     </div>
   ),
@@ -190,6 +190,53 @@ const LiveReplayView: React.FC<{
     (initialData.prevDayCandles?.length ?? 0) > 0 ? prevTradingDay(date) : date
   );
   const historyLoaderElRef = useRef<HTMLDivElement>(null);
+
+  // ── Fullscreen modal ──────────────────────────────────────────────────────
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  const closeFullscreen = () => setIsFullscreen(false);
+
+  useEffect(() => {
+    document.body.classList.toggle('nd-chart-fullscreen-open', isFullscreen);
+    return () => document.body.classList.remove('nd-chart-fullscreen-open');
+  }, [isFullscreen]);
+
+  useEffect(() => {
+    if (!chartRef.current) return;
+    const timer = setTimeout(async () => {
+      if (!chartRef.current) return;
+      if (isFullscreen) {
+        // Fill the full viewport — no rotation, just bigger chart
+        const w = window.innerWidth;
+        const h = window.innerHeight;
+        chartRef.current.applyOptions({ width: w, height: h });
+        // Keep the candle width constant: show more bars to fill the wider chart
+        // (instead of fitContent which stretches the same few candles).
+        const ts = chartRef.current.timeScale();
+        const range = ts.getVisibleLogicalRange();
+        if (range) {
+          const barsNow  = range.to - range.from;
+          // Target ~ one bar per 8px of width so candles stay a sensible size
+          const barsWant = Math.max(barsNow, Math.round(w / 8));
+          ts.setVisibleLogicalRange({ from: range.to - barsWant, to: range.to });
+        }
+        // If we don't have enough candles to the left, pull previous trading days
+        await loadMoreHistory();
+      } else if (containerRef.current) {
+        chartRef.current.applyOptions({
+          width:  containerRef.current.clientWidth,
+          height: containerRef.current.clientHeight || 480,
+        });
+      }
+    }, 80);
+    return () => clearTimeout(timer);
+  }, [isFullscreen]);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') closeFullscreen(); };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, []);
 
   // ── React state (UI only) ──────────────────────────────────────────────────
   const [currentCandle,  setCurrentCandle]  = useState<IntradayCandle | null>(candlesRef.current[currentIdxRef.current] ?? null);
@@ -411,7 +458,7 @@ const LiveReplayView: React.FC<{
       handleScroll: { mouseWheel: false, pressedMouseMove: true, horzTouchDrag: true },
       handleScale:  { mouseWheel: true, pinch: true, axisPressedMouseMove: { time: true, price: false } },
       width:  containerRef.current.clientWidth,
-      height: 480,
+      height: containerRef.current.clientHeight || 480,
     });
     chartRef.current = chart;
 
@@ -478,7 +525,7 @@ const LiveReplayView: React.FC<{
     });
 
     const ro = new ResizeObserver(() => {
-      if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth });
+      if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth, height: containerRef.current.clientHeight || 480 });
     });
     ro.observe(containerRef.current);
 
@@ -611,10 +658,17 @@ const LiveReplayView: React.FC<{
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-    <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
+    <div className="nd-backtest-cols">
 
       {/* ══ LEFT — Chart (60%) ═══════════════════════════════════════════════ */}
-      <div className="nd-chart-col" style={{ flex: '0 0 60%', minWidth: 0, position: 'relative' }}>
+      <div
+        className={isFullscreen ? 'nd-chart-fs-col' : 'nd-chart-col'}
+        style={isFullscreen ? {
+          top: 0, left: 0,
+          width: '100vw', height: '100vh',
+          background: isDark ? '#131722' : '#fff',
+        } : undefined}
+      >
         <StableChart containerRef={containerRef} isDark={isDark} />
         {/* History loading indicator — shown/hidden via DOM ref, zero React re-renders */}
         <div ref={historyLoaderElRef} style={{
@@ -651,10 +705,28 @@ const LiveReplayView: React.FC<{
             boxShadow: '0 2px 8px rgba(0,0,0,0.18)',
           }}>{arrow}</button>
         ))}
+
+        {/* Fullscreen toggle button — top-right corner of chart */}
+        <button onClick={() => setIsFullscreen(f => !f)} style={{
+          position: 'absolute', top: 8, right: 8, zIndex: 20,
+          width: 32, height: 32,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          borderRadius: 8,
+          border: `1px solid ${isDark ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.12)'}`,
+          background: isDark ? 'rgba(19,23,34,0.85)' : 'rgba(255,255,255,0.85)',
+          backdropFilter: 'blur(4px)',
+          color: isDark ? '#b2b5be' : '#444',
+          cursor: 'pointer',
+          boxShadow: '0 2px 8px rgba(0,0,0,0.18)',
+        }}>
+          <span className="material-icons" style={{ fontSize: 18 }}>
+            {isFullscreen ? 'fullscreen_exit' : 'fullscreen'}
+          </span>
+        </button>
       </div>
 
       {/* ══ RIGHT — Info cards (40%) ══════════════════════════════════════════ */}
-      <div className="nd-info-col" style={{ flex: '0 0 calc(40% - 16px)', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div className="nd-info-col">
 
       {/* ── Live Header ──────────────────────────────────────────────────────── */}
       <div className="nd-card" style={{ padding: '16px 20px' }}>
@@ -674,7 +746,7 @@ const LiveReplayView: React.FC<{
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
           <div style={{ display: 'flex', gap: 3, background: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)', borderRadius: 8, padding: 3 }}>
             {(['candle','line'] as const).map(t => (
-              <button key={t} onClick={() => setChartType(t)} style={{ padding: '4px 12px', borderRadius: 6, border: 'none', fontSize: 11, fontWeight: 600, cursor: 'pointer', background: chartType === t ? 'var(--nd-primary)' : 'transparent', color: chartType === t ? '#000' : 'var(--nd-text-2)' }}>
+              <button key={t} onClick={() => setChartType(t)} style={{ padding: '4px 12px', borderRadius: 6, border: 'none', fontSize: 11, fontWeight: 600, cursor: 'pointer', background: chartType === t ? 'var(--nd-primary)' : 'transparent', color: chartType === t ? '#fff' : 'var(--nd-text-2)' }}>
                 {t === 'candle' ? '🕯' : '📈'}
               </button>
             ))}
@@ -696,9 +768,9 @@ const LiveReplayView: React.FC<{
 
           <span style={{ fontSize: 11, fontWeight: 800, padding: '3px 8px', borderRadius: 6, background: isDark ? 'rgba(99,102,241,0.2)' : '#ede9fe', color: '#6366f1', letterSpacing: '0.05em' }}>{tfLabel(aggFactor)}</span>
 
-          <div style={{ display: 'flex', gap: 2, background: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)', borderRadius: 8, padding: 3 }}>
+          <div className="nd-speed-btns">
             {([[4_000,'½×'],[2_000,'1×'],[1_000,'2×'],[400,'5×'],[200,'10×']] as [number,string][]).map(([ms, label]) => (
-              <button key={ms} onClick={() => { setSpeed(ms); lastCandleAtRef.current = Date.now(); }} style={{ padding: '4px 8px', borderRadius: 6, border: 'none', fontSize: 11, fontWeight: 600, cursor: 'pointer', background: speed === ms ? 'var(--nd-primary)' : 'transparent', color: speed === ms ? '#000' : 'var(--nd-text-2)' }}>{label}</button>
+              <button key={ms} onClick={() => { setSpeed(ms); lastCandleAtRef.current = Date.now(); }} style={{ padding: '4px 8px', borderRadius: 6, border: 'none', fontSize: 11, fontWeight: 600, cursor: 'pointer', background: speed === ms ? 'var(--nd-primary)' : 'transparent', color: speed === ms ? '#fff' : 'var(--nd-text-2)' }}>{label}</button>
             ))}
           </div>
 
@@ -1121,10 +1193,18 @@ const BacktestPage: React.FC = () => {
 
   // Shared input style
   const inputStyle: React.CSSProperties = {
-    width: '100%', padding: '8px 12px', borderRadius: 8, fontSize: 13,
+    width: '100%', padding: '0 12px', height: 40, borderRadius: 8, fontSize: 13,
     background: isDark ? 'rgba(255,255,255,0.06)' : '#f8fafc',
     border: `1px solid ${isDark ? 'rgba(255,255,255,0.12)' : '#e2e8f0'}`,
     color: 'var(--nd-text-1)', outline: 'none',
+    boxSizing: 'border-box', fontFamily: 'inherit',
+  };
+  // Native date inputs: reset iOS centering & default chrome so the value sits left,
+  // matching the height/alignment of the sibling select & number fields.
+  const dateInputStyle: React.CSSProperties = {
+    ...inputStyle,
+    WebkitAppearance: 'none', appearance: 'none',
+    textAlign: 'left', minWidth: 0,
   };
   const labelStyle: React.CSSProperties = {
     fontSize: 11, fontWeight: 600, color: 'var(--nd-text-3)',
@@ -1145,7 +1225,7 @@ const BacktestPage: React.FC = () => {
           <button key={tab} onClick={() => setPageTab(tab)} style={{
             display: 'flex', alignItems: 'center', gap: 6, padding: '8px 20px', borderRadius: 10, border: 'none',
             background: pageTab === tab ? 'var(--nd-primary)' : 'transparent',
-            color: pageTab === tab ? '#000' : 'var(--nd-text-2)',
+            color: pageTab === tab ? '#fff' : 'var(--nd-text-2)',
             fontWeight: pageTab === tab ? 700 : 500, fontSize: 13, cursor: 'pointer',
           }}>
             <span className="material-icons" style={{ fontSize: 16 }}>{icon}</span>
@@ -1181,7 +1261,7 @@ const BacktestPage: React.FC = () => {
                 <div style={{ flex: '1 1 150px' }}>
                   <label style={labelStyle}>Trading Date</label>
                   <input type="date" value={apDate} onChange={e => setApDate(e.target.value)}
-                    style={inputStyle} max={new Date().toISOString().slice(0,10)} />
+                    style={dateInputStyle} max={new Date().toISOString().slice(0,10)} />
                 </div>
                 <div style={{ flex: '1 1 130px' }}>
                   <label style={labelStyle}>Start Watching From</label>
@@ -1196,11 +1276,11 @@ const BacktestPage: React.FC = () => {
                   <input type="number" value={apCapital} onChange={e => setApCapital(e.target.value)}
                     style={inputStyle} min={5000} step={5000} />
                 </div>
-                <div style={{ flex: '0 0 auto' }}>
+                <div style={{ flex: '1 1 100%' }}>
                   <button onClick={handleAutopilot} style={{
-                    display: 'flex', alignItems: 'center', gap: 8, padding: '10px 28px',
-                    background: 'var(--nd-primary)', color: '#000', border: 'none', borderRadius: 10,
-                    fontWeight: 700, fontSize: 14, cursor: 'pointer',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '12px 28px',
+                    background: 'var(--nd-primary)', color: '#fff', border: 'none', borderRadius: 10,
+                    fontWeight: 700, fontSize: 14, cursor: 'pointer', width: '100%',
                   }}>
                     <span className="material-icons" style={{ fontSize: 18 }}>play_arrow</span>
                     Start Live Session
@@ -1284,7 +1364,7 @@ const BacktestPage: React.FC = () => {
             </div>
             <div><label className="nd-field-label">Initial Capital (₹)</label><input type="number" value={capital} onChange={e => setCapital(e.target.value)} className="nd-input" min={10000} step={10000} /></div>
             <div><label className="nd-field-label">Commission (%)</label><input type="number" value={commission} onChange={e => setCommission(e.target.value)} className="nd-input" min={0} max={5} step={0.01} /></div>
-            <button onClick={handleRun} disabled={running} className="nd-btn nd-btn-primary" style={{ width: '100%', padding: '10px 0', fontWeight: 700, fontSize: 14 }}>
+            <button onClick={handleRun} disabled={running} className="nd-btn nd-btn-primary" style={{ width: '100%', justifyContent: 'center', padding: '11px 0', fontWeight: 700, fontSize: 14 }}>
               {running ? 'Running…' : 'Run Backtest'}
             </button>
             {error && <div style={{ padding: 12, borderRadius: 8, background: '#fef2f2', color: '#dc2626', fontSize: 12, border: '1px solid #fecaca' }}>{error}</div>}
@@ -1368,7 +1448,7 @@ const BacktestPage: React.FC = () => {
                           <button key={f} onClick={() => setTradeFilter(f)} style={{
                             padding: '4px 12px', borderRadius: 20, border: 'none', fontSize: 12, fontWeight: 600, cursor: 'pointer',
                             background: tradeFilter === f ? 'var(--nd-primary)' : isDark ? 'rgba(255,255,255,0.06)' : '#f1f5f9',
-                            color: tradeFilter === f ? '#000' : 'var(--nd-text-2)',
+                            color: tradeFilter === f ? '#fff' : 'var(--nd-text-2)',
                           }}>{f}</button>
                         ))}
                       </div>

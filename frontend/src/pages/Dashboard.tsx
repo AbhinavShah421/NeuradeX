@@ -380,7 +380,7 @@ const Dashboard: React.FC = () => {
 
       {/* Accuracy stat cards */}
       {STAT_CARDS.length > 0 && (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 20 }}>
+        <div className="nd-grid-4" style={{ gap: 12, marginBottom: 20 }}>
           {STAT_CARDS.map(s => (
             <div key={s.label} className="nd-card" style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '14px 18px' }}>
               <div className="nd-icon-chip" style={{ background: s.bg }}>

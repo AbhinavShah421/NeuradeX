@@ -3,6 +3,7 @@ Orders API — place, cancel, and list orders via Groww Trading API.
 """
 
 import random
+import httpx
 from datetime import datetime
 from typing import Literal, Optional
 
@@ -151,3 +152,31 @@ async def list_orders():
         "status": "success",
         "data": [],
     }
+
+
+# ── Feedback-service proxy ────────────────────────────────────────────────────
+# The browser cannot reach feedback-service:8012 directly (Docker-internal only).
+# These endpoints proxy through the backend so the frontend can call /api/orders/feedback/*.
+
+_FEEDBACK_BASE = "http://feedback-service:8012"
+
+async def _feedback_get(path: str):
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(f"{_FEEDBACK_BASE}{path}", timeout=5.0)
+            r.raise_for_status()
+            return r.json()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Feedback service unavailable: {e}")
+
+
+@router.get("/feedback/stats")
+async def feedback_stats():
+    return await _feedback_get("/stats")
+
+
+@router.get("/feedback/trades")
+async def feedback_trades():
+    return await _feedback_get("/trades")

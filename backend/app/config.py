@@ -104,6 +104,11 @@ class Settings(BaseSettings):
     # Internal service URLs
     FEEDBACK_SERVICE_URL: str = "http://feedback-service:8012"
 
+    # Pattern-memory nightly refresh (replays real backtests to keep the bank fresh)
+    MEMORY_SWEEP_ENABLED: bool = True
+    MEMORY_SWEEP_HOUR_IST: int = 2        # run at ~02:00 IST (after market close)
+    MEMORY_SWEEP_LOOKBACK_DAYS: int = 730 # 2 years of daily candles per symbol
+
     @model_validator(mode='after')
     def compute_urls(self) -> 'Settings':
         if not self.POSTGRES_URL:

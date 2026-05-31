@@ -30,8 +30,9 @@ class OutcomeRequest(BaseModel):
 # ── Lazy init ─────────────────────────────────────────────────────────────────
 
 async def _ensure_db() -> None:
-    from app.agents import get_learning
+    from app.agents import get_learning, get_memory
     await get_learning().init_db()
+    await get_memory().init_db()
 
 _db_ready = False
 
@@ -74,8 +75,16 @@ async def analyze(req: AnalyzeRequest):
     except Exception:
         pass
 
-    # Persist prediction
-    await learning.store_prediction(decision, _candle_time(req.candles), context, rl_state)
+    # Fingerprint for pattern-memory learning
+    fingerprint = None
+    try:
+        from app.agents.fingerprint import build_fingerprint
+        fingerprint = build_fingerprint(req.candles)
+    except Exception:
+        pass
+
+    # Persist prediction (with fingerprint so the outcome can feed memory later)
+    await learning.store_prediction(decision, _candle_time(req.candles), context, rl_state, fingerprint)
 
     return {
         "prediction_id":   decision.prediction_id,
@@ -166,6 +175,150 @@ async def get_weights():
     await _db_once()
     from app.agents import get_learning
     return await get_learning().get_weights()
+
+
+# ── Pattern Memory ────────────────────────────────────────────────────────────
+
+class SeedMemoryRequest(BaseModel):
+    symbols:      Optional[list[str]] = None   # default: KNOWN_STOCKS universe
+    lookback_days: int = 365
+    horizon:       int = 3      # bars ahead used to label the outcome
+    stride:        int = 1      # sample every Nth window
+    max_per_symbol: int = 400
+
+
+@router.get("/memory/stats")
+async def memory_stats():
+    """Size + win-rate breakdown of the Pattern Memory bank (for the UI)."""
+    await _db_once()
+    from app.agents import get_memory
+    return await get_memory().stats()
+
+
+@router.post("/memory/query")
+async def memory_query(req: AnalyzeRequest):
+    """Inspect what the memory bank recalls for the situation in `candles`."""
+    await _db_once()
+    from app.agents import get_memory
+    from app.agents.fingerprint import build_fingerprint, classify_regime
+    fp = build_fingerprint(req.candles)
+    if fp is None:
+        return {"status": "error", "detail": "need ≥15 candles", "data": None}
+    regime = classify_regime(req.candles)
+    res = await get_memory().query(fp, symbol=req.symbol.upper(), regime=regime)
+    return {"status": "success", "data": {**res, "regime": regime}}
+
+
+@router.post("/memory/sweep")
+async def memory_sweep(background: bool = True):
+    """Refresh the BACKTEST memory from fresh real backtests across the watchlist.
+
+    Replaces (not appends) backtest cases so it stays bounded; LIVE cases are
+    preserved. Runs automatically nightly — this triggers it on demand."""
+    await _db_once()
+    import asyncio
+    from app.agents.memory_sweep import run_memory_sweep, is_running
+    if is_running():
+        return {"status": "already_running"}
+    if background:
+        asyncio.create_task(run_memory_sweep(trigger="manual"))
+        return {"status": "started"}
+    return await run_memory_sweep(trigger="manual")
+
+
+@router.get("/memory/sweep/status")
+async def memory_sweep_status():
+    """Last sweep summary + whether one is currently running."""
+    from app.agents.memory_sweep import get_last_sweep, is_running
+    return {"running": is_running(), "last": get_last_sweep()}
+
+
+@router.post("/memory/seed")
+async def memory_seed(req: SeedMemoryRequest):
+    """Bulk-seed the memory bank by replaying historical daily candles.
+
+    For each sliding window we fingerprint the situation, look `horizon` bars
+    ahead to measure the realised forward return, label the action by its sign,
+    and store the case. This is the system's 'study' phase — it walks through
+    history once so it starts live having already 'seen' thousands of setups.
+    """
+    await _db_once()
+    from datetime import datetime, timedelta
+    from app.agents import get_memory
+    from app.agents.fingerprint import build_fingerprint, classify_regime
+    from app.api.agent import KNOWN_STOCKS
+    from app.utils.candle_utils import parse_candles, simulate_daily_candles
+    from app.utils.groww_client import get_groww_client
+
+    symbols = [s.upper() for s in (req.symbols or list(KNOWN_STOCKS.keys()))]
+    horizon = max(1, req.horizon)
+    stride  = max(1, req.stride)
+    groww   = get_groww_client()
+
+    total_inserted = 0
+    per_symbol: dict[str, int] = {}
+
+    for sym in symbols:
+        # Fetch daily candles (Groww, simulated fallback)
+        candles: list[dict] = []
+        try:
+            end   = datetime.now()
+            start = end - timedelta(days=req.lookback_days)
+            if groww:
+                raw = await groww.get_historical(sym, 1440, start, end)
+                if raw and len(raw) > 40:
+                    candles = parse_candles(raw, date_key="timestamp")
+            if not candles:
+                candles = simulate_daily_candles(sym, start, end, date_key="timestamp")
+        except Exception as exc:
+            logger.warning("seed fetch failed for %s: %s", sym, exc)
+            continue
+
+        if len(candles) < 40:
+            continue
+
+        cases: list[dict] = []
+        # need ≥15 lookback for fingerprint, and `horizon` lookahead for label
+        for i in range(15, len(candles) - horizon, stride):
+            window = candles[: i + 1]
+            fp = build_fingerprint(window)
+            if fp is None:
+                continue
+            entry = float(candles[i]["close"])
+            future = float(candles[i + horizon]["close"])
+            fwd_ret = (future - entry) / entry * 100 if entry else 0.0
+            # Label: would a long have paid off over the horizon?
+            if fwd_ret > 0.3:
+                action = "BUY"
+            elif fwd_ret < -0.3:
+                action = "SELL"
+            else:
+                action = "HOLD"
+            cases.append({
+                "symbol": sym, "fingerprint": fp, "action": action,
+                "entry_price": entry, "exit_price": future,
+                # For a SELL/short label the "win" is a downward move → flip sign
+                "pnl_pct": fwd_ret if action != "SELL" else -fwd_ret,
+                "regime": classify_regime(window), "source": "BACKTEST",
+            })
+            if len(cases) >= req.max_per_symbol:
+                break
+
+        inserted = await get_memory().add_cases_bulk(cases)
+        per_symbol[sym] = inserted
+        total_inserted += inserted
+
+    logger.info("Pattern memory seeded",
+                extra={"log_type": "ai_engine", "event": "memory_seed",
+                       "symbols": len(symbols), "inserted": total_inserted})
+    return {
+        "status": "success",
+        "data": {
+            "symbols_processed": len(symbols),
+            "total_inserted": total_inserted,
+            "per_symbol": per_symbol,
+        },
+    }
 
 
 # ── Helper ────────────────────────────────────────────────────────────────────

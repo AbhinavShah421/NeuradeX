@@ -22,9 +22,12 @@ _DDL_STATEMENTS = [
     risk_score      FLOAT,
     agent_signals   TEXT NOT NULL,
     rl_state        INT,
+    fingerprint     TEXT,
     context         TEXT,
     created_at      TIMESTAMPTZ DEFAULT NOW()
 )""",
+    # Older deployments created the table before fingerprinting existed
+    "ALTER TABLE ai_engine_predictions ADD COLUMN IF NOT EXISTS fingerprint TEXT",
     """CREATE TABLE IF NOT EXISTS ai_engine_outcomes (
     id              SERIAL PRIMARY KEY,
     prediction_id   VARCHAR(36),
@@ -47,7 +50,7 @@ _DDL_STATEMENTS = [
 )""",
     """INSERT INTO ai_engine_agent_weights (agent_name, weight)
 VALUES ('technical',1.0),('pattern',1.0),('momentum',1.0),
-       ('volatility',1.0),('sentiment',1.0),('rl',0.8)
+       ('volatility',1.0),('sentiment',1.0),('rl',0.8),('memory',1.3)
 ON CONFLICT DO NOTHING""",
 ]
 
@@ -75,6 +78,7 @@ class LearningSystem:
         candle_time: str,
         context: dict,
         rl_state: Optional[int] = None,
+        fingerprint: Optional[list] = None,
     ) -> None:
         signals = [
             {"agent": s.agent_name, "action": s.action,
@@ -86,13 +90,16 @@ class LearningSystem:
             from sqlalchemy import text
             from app.database.postgres import engine
             async with engine.begin() as conn:
-                await conn.execute(text("""
+                # RETURNING lets us reliably detect if the row was inserted
+                # (ON CONFLICT DO NOTHING returns nothing if the row already exists)
+                result = await conn.execute(text("""
                     INSERT INTO ai_engine_predictions
                       (prediction_id, symbol, timestamp, candle_time, final_action,
                        final_confidence, agent_agreement, risk_score, agent_signals,
-                       rl_state, context)
-                    VALUES (:pid,:sym,:ts,:ct,:fa,:fc,:ag,:rs,:sigs,:rls,:ctx)
+                       rl_state, fingerprint, context)
+                    VALUES (:pid,:sym,:ts,:ct,:fa,:fc,:ag,:rs,:sigs,:rls,:fp,:ctx)
                     ON CONFLICT (prediction_id) DO NOTHING
+                    RETURNING prediction_id
                 """), {
                     "pid": decision.prediction_id,
                     "sym": context.get("symbol", ""),
@@ -104,8 +111,18 @@ class LearningSystem:
                     "rs":  decision.risk_score,
                     "sigs": json.dumps(signals),
                     "rls": rl_state,
+                    "fp":  json.dumps(fingerprint) if fingerprint else None,
                     "ctx": json.dumps(context),
                 })
+                inserted = result.fetchone()
+                if inserted:
+                    for sig in signals:
+                        await conn.execute(text("""
+                            UPDATE ai_engine_agent_weights
+                            SET total_predictions = total_predictions + 1,
+                                updated_at = NOW()
+                            WHERE agent_name = :name
+                        """), {"name": sig["agent"]})
         except Exception as exc:
             logger.warning("store_prediction failed: %s", exc)
 
@@ -135,14 +152,16 @@ class LearningSystem:
                        "ep": entry_price, "xp": exit_price,
                        "pnl": pnl, "pp": pnl_pct, "rw": reward, "oc": outcome})
 
-                # Get the agent signals for this prediction
+                # Get the agent signals + fingerprint for this prediction
                 row = (await conn.execute(
-                    text("SELECT agent_signals FROM ai_engine_predictions WHERE prediction_id=:pid"),
+                    text("SELECT agent_signals, fingerprint, final_action "
+                         "FROM ai_engine_predictions WHERE prediction_id=:pid"),
                     {"pid": prediction_id}
                 )).fetchone()
 
                 if row:
                     signals = json.loads(row[0])
+                    self._pending_memory = (row[1], row[2])  # (fingerprint json, action)
                     # Find the winning action (highest conf*weight)
                     best = max(signals, key=lambda s: s["confidence"] * s["weight"])
                     best_action = best["action"]
@@ -156,8 +175,7 @@ class LearningSystem:
 
                         await conn.execute(text("""
                             UPDATE ai_engine_agent_weights
-                            SET total_predictions   = total_predictions + 1,
-                                correct_predictions = correct_predictions + :corr,
+                            SET correct_predictions = correct_predictions + :corr,
                                 total_reward        = total_reward + :rw,
                                 weight              = GREATEST(0.3, LEAST(2.5, weight + :delta)),
                                 updated_at          = NOW()
@@ -170,6 +188,22 @@ class LearningSystem:
                         })
         except Exception as exc:
             logger.warning("record_outcome failed: %s", exc)
+
+        # Promote this realised trade into the Pattern Memory bank so the next
+        # similar situation can learn from how it actually turned out.
+        pending = getattr(self, "_pending_memory", None)
+        if pending and pending[0]:
+            try:
+                from app.agents import get_memory
+                fp = json.loads(pending[0])
+                await get_memory().add_case(
+                    symbol=symbol, fingerprint=fp, action=pending[1],
+                    pnl_pct=pnl_pct, entry_price=entry_price, exit_price=exit_price,
+                    source="LIVE",
+                )
+            except Exception as exc:
+                logger.debug("memory promotion skipped: %s", exc)
+        self._pending_memory = None
 
         await self._sync_weights_to_redis()
         return reward
@@ -221,14 +255,16 @@ class LearningSystem:
                 """))).fetchall()
             result = []
             for r in rows:
-                total   = r[2] or 0
-                correct = r[3] or 0
+                total   = r[2] or 0   # total analyses run
+                correct = r[3] or 0   # correct among those with recorded outcomes
+                # accuracy denominator: only predictions with a known outcome
+                # (correct_predictions <= outcomes_recorded <= total)
                 result.append({
                     "agent":        r[0],
                     "weight":       round(float(r[1]), 3),
                     "total":        total,
                     "correct":      correct,
-                    "accuracy":     round(correct / total, 3) if total > 0 else 0.0,
+                    "accuracy":     round(correct / total, 3) if correct > 0 and total > 0 else 0.0,
                     "total_reward": round(float(r[4]), 4),
                 })
             return result

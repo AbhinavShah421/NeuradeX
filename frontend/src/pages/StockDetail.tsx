@@ -161,7 +161,7 @@ const StockDetail: React.FC = () => {
         </div>
 
         {/* Quick stats strip */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 0, marginTop: 20, paddingTop: 16, borderTop: '1px solid var(--nd-border)' }}>
+        <div className="nd-grid-4" style={{ gap: 0, marginTop: 20, paddingTop: 16, borderTop: '1px solid var(--nd-border)' }}>
           {[
             { label: 'Day High',  value: inr(stock.high),    icon: 'arrow_upward',   color: 'var(--nd-green)' },
             { label: 'Day Low',   value: inr(stock.low),     icon: 'arrow_downward', color: 'var(--nd-red)' },
@@ -189,7 +189,7 @@ const StockDetail: React.FC = () => {
             <h2 style={{ fontSize: 16, fontWeight: 600 }}>AI Prediction</h2>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 0 }}>
+          <div className="nd-grid-3" style={{ gap: 0 }}>
             {/* Signal */}
             <div style={{ padding: '0 24px 0 0', borderRight: '1px solid var(--nd-border)' }}>
               <p className="nd-label">Signal</p>
@@ -256,7 +256,7 @@ const StockDetail: React.FC = () => {
             <h2 style={{ fontSize: 16, fontWeight: 600 }}>Sentiment Analysis</h2>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 0 }}>
+          <div className="nd-grid-3" style={{ gap: 0 }}>
             {/* Overall score gauge */}
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '0 24px 0 0', borderRight: '1px solid var(--nd-border)' }}>
               <div style={{

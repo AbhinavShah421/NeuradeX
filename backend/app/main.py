@@ -3,6 +3,7 @@ Main FastAPI Application
 NeuradeX System
 """
 
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -45,6 +46,15 @@ async def lifespan(app: FastAPI):
         logger.info("Loading ML models", extra={"log_type": "app_lifecycle", "event": "ml_init"})
         await initialize_ml_models()
 
+        # Nightly pattern-memory refresh (replays real backtests after market close)
+        try:
+            from app.agents.memory_sweep import scheduled_sweep_loop
+            app.state.memory_sweep_task = asyncio.create_task(scheduled_sweep_loop())
+            logger.info("Pattern-memory nightly sweep scheduled",
+                        extra={"log_type": "app_lifecycle", "event": "memory_sweep_scheduled"})
+        except Exception as exc:
+            logger.warning("Could not schedule memory sweep: %s", exc)
+
         logger.info(
             "Application startup complete",
             extra={"log_type": "app_lifecycle", "event": "startup_complete"},
@@ -61,6 +71,9 @@ async def lifespan(app: FastAPI):
 
     logger.info("Shutting down application", extra={"log_type": "app_lifecycle", "event": "shutdown"})
     try:
+        task = getattr(app.state, "memory_sweep_task", None)
+        if task:
+            task.cancel()
         await close_postgres()
         await close_mongodb()
         await close_redis()

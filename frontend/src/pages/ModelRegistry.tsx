@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react';
 
-const MLFLOW_BASE = 'http://localhost:8000/api/mlflow';
+// Relative URL → routes through nginx to the backend MLflow proxy.
+// Works on localhost and through ngrok (never hardcode the host).
+const MLFLOW_BASE = '/api/mlflow';
 
 interface ModelVersion {
   name: string;

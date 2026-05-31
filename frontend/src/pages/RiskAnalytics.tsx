@@ -132,7 +132,7 @@ const RiskAnalytics: React.FC = () => {
             <p style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>As of {new Date(riskMetrics.asOf).toLocaleString('en-IN')}</p>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 12 }}>
+          <div className="nd-grid-4" style={{ gap: 12, marginBottom: 12 }}>
             {[
               { label: 'VaR 95% (1-day)',  value: money(riskMetrics.var951Day),              sub: 'Max expected loss',  color: 'var(--nd-red)' },
               { label: 'VaR 99% (1-day)',  value: money(riskMetrics.var991Day),              sub: 'Tail risk',          color: 'var(--nd-red)' },
@@ -147,7 +147,7 @@ const RiskAnalytics: React.FC = () => {
             ))}
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 20 }}>
+          <div className="nd-grid-4" style={{ gap: 12, marginBottom: 20 }}>
             {[
               { label: 'Sharpe Ratio',      value: riskMetrics.sharpeRatio.toFixed(3),       color: 'var(--nd-green)' },
               { label: 'Sortino Ratio',     value: riskMetrics.sortinoRatio.toFixed(3),      color: 'var(--nd-green)' },
@@ -203,7 +203,7 @@ const RiskAnalytics: React.FC = () => {
             <p className="nd-label">Portfolio Value at Risk</p>
             <p className="nd-value-xl">₹{stressTest.portfolioValue.toLocaleString('en-IN')}</p>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+          <div className="nd-grid-2" style={{ gap: 16 }}>
             {stressTest.scenarios.map((s: StressScenario) => (
               <div key={s.name} className="nd-card" style={{ borderTop: `3px solid ${severityBorder[s.severity]}`, padding: 0 }}>
                 <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--nd-border)' }}>
@@ -218,7 +218,7 @@ const RiskAnalytics: React.FC = () => {
                   </div>
                   <p style={{ fontSize: 12.5, color: 'var(--nd-text-2)' }}>{s.description}</p>
                 </div>
-                <div style={{ padding: '14px 20px', display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
+                <div className="nd-grid-3" style={{ padding: '14px 20px', gap: 12 }}>
                   <div>
                     <p style={{ fontSize: 11, color: 'var(--nd-text-3)', textTransform: 'uppercase', letterSpacing: '0.3px' }}>Market</p>
                     <p style={{ fontWeight: 700, color: 'var(--nd-red)' }}>{pct(s.marketReturn)}</p>
@@ -451,7 +451,7 @@ const RiskAnalytics: React.FC = () => {
               {/* ── Section 2: Portfolio scenario cards ── */}
               <div style={{ padding: '20px 24px' }}>
                 <p style={{ fontWeight: 700, fontSize: 13, textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--nd-text-2)', marginBottom: 14 }}>Portfolio Scenarios</p>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 14 }}>
+                <div className="nd-grid-3" style={{ gap: 14 }}>
                   {[
                     { label: 'Current Portfolio', p: optimization.currentPortfolio,     accent: 'var(--nd-border)', icon: 'account_balance_wallet' },
                     { label: 'Min Variance',      p: optimization.minVariancePortfolio, accent: '#3b82f6',          icon: 'compress' },
@@ -557,7 +557,7 @@ const RiskAnalytics: React.FC = () => {
           {/* ── Default view before AI analysis is run ── */}
           {!llmAnalysis && !llmLoading && (
             <>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16, marginBottom: 20 }}>
+              <div className="nd-grid-3" style={{ gap: 16, marginBottom: 20 }}>
                 {[
                   { label: 'Current Portfolio', p: optimization.currentPortfolio,     accent: 'var(--nd-border)', icon: 'account_balance_wallet' },
                   { label: 'Min Variance',      p: optimization.minVariancePortfolio, accent: '#3b82f6',          icon: 'compress' },

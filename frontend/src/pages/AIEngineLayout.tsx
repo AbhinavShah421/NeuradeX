@@ -31,6 +31,13 @@ const SUB_NAV = [
     icon: 'receipt_long',
     description: 'Practice with real prices, no real money',
   },
+  {
+    to: '/ai-engine/memory',
+    exact: false,
+    label: 'Pattern Memory',
+    icon: 'memory',
+    description: 'What the system has learned from past patterns',
+  },
 ];
 
 const AIEngineLayout: React.FC = () => {
@@ -48,15 +55,15 @@ const AIEngineLayout: React.FC = () => {
       <div style={{ paddingTop: 20, paddingBottom: 0, marginBottom: 24 }}>
 
         {/* Breadcrumb-style header */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
-          <span className="material-icons" style={{ fontSize: 22, color: '#8b5cf6' }}>auto_awesome</span>
-          <h1 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: 'var(--nd-text-1)' }}>AI Engine</h1>
-          <span style={{ color: 'var(--nd-text-3)', fontSize: 16 }}>›</span>
-          <span style={{ fontSize: 16, fontWeight: 600, color: 'var(--nd-text-2)' }}>{activeItem.label}</span>
-          <span style={{ fontSize: 12, color: 'var(--nd-text-3)', marginLeft: 4 }}>— {activeItem.description}</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 14, flexWrap: 'wrap' }}>
+          <span className="material-icons" style={{ fontSize: 20, color: 'var(--nd-green)', flexShrink: 0 }}>auto_awesome</span>
+          <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: 'var(--nd-text-1)', flexShrink: 0 }}>AI Engine</h1>
+          <span style={{ color: 'var(--nd-text-3)', fontSize: 14, flexShrink: 0 }}>›</span>
+          <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--nd-text-2)', flexShrink: 0 }}>{activeItem.label}</span>
+          <span style={{ fontSize: 11, color: 'var(--nd-text-3)', marginLeft: 2 }}>— {activeItem.description}</span>
         </div>
 
-        {/* Tab strip */}
+        {/* Tab strip — scrollable, never wraps or overflows */}
         <div style={{
           display: 'flex',
           gap: 2,
@@ -64,7 +71,9 @@ const AIEngineLayout: React.FC = () => {
           border: '1px solid var(--nd-border)',
           borderRadius: 12,
           padding: 4,
-          width: 'fit-content',
+          overflowX: 'auto',
+          scrollbarWidth: 'none',
+          WebkitOverflowScrolling: 'touch' as any,
         }}>
           {SUB_NAV.map(item => {
             const active = isActive(item.to, item.exact);
@@ -75,16 +84,18 @@ const AIEngineLayout: React.FC = () => {
                 style={{
                   display: 'flex',
                   alignItems: 'center',
-                  gap: 7,
-                  padding: '8px 18px',
+                  gap: 6,
+                  padding: '8px 14px',
                   borderRadius: 9,
                   textDecoration: 'none',
                   fontSize: 13,
                   fontWeight: 500,
                   transition: 'all 0.15s',
-                  background: active ? '#8b5cf6' : 'transparent',
+                  background: active ? 'var(--nd-green)' : 'transparent',
                   color: active ? '#fff' : 'var(--nd-text-2)',
-                  boxShadow: active ? '0 2px 8px #8b5cf640' : 'none',
+                  boxShadow: active ? '0 2px 8px var(--nd-green)40' : 'none',
+                  whiteSpace: 'nowrap',
+                  flexShrink: 0,
                 }}
               >
                 <span className="material-icons" style={{ fontSize: 15 }}>{item.icon}</span>
@@ -98,16 +109,19 @@ const AIEngineLayout: React.FC = () => {
         <div style={{
           display: 'flex',
           alignItems: 'center',
-          gap: 8,
-          marginTop: 12,
+          gap: 6,
+          marginTop: 10,
           fontSize: 11,
           color: 'var(--nd-text-3)',
+          overflowX: 'auto',
+          scrollbarWidth: 'none',
+          whiteSpace: 'nowrap',
         }}>
-          <span className="material-icons" style={{ fontSize: 13, color: 'var(--nd-green)' }}>fiber_manual_record</span>
+          <span className="material-icons" style={{ fontSize: 13, color: 'var(--nd-green)', flexShrink: 0 }}>fiber_manual_record</span>
           All modes (Live · Paper · Backtest) feed into the same training pipeline →
-          <span style={{ color: 'var(--nd-accent)', fontWeight: 500 }}>model-trainer</span>
-          <span style={{ color: 'var(--nd-text-3)' }}>→</span>
-          <span style={{ color: 'var(--nd-accent)', fontWeight: 500 }}>MLflow</span>
+          <span style={{ color: 'var(--nd-accent)', fontWeight: 500, flexShrink: 0 }}>model-trainer</span>
+          <span style={{ flexShrink: 0 }}>→</span>
+          <span style={{ color: 'var(--nd-accent)', fontWeight: 500, flexShrink: 0 }}>MLflow</span>
         </div>
       </div>
 
