@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useAppStore } from '../stores/appStore';
 import apiService from '../services/api';
-import SessionLauncher from '../components/SessionLauncher';
+import SessionManager from '../components/SessionManager';
 import { BacktestResult, BacktestTrade, EquityPoint, LiveSignal, StrategyParam } from '../types';
 
 const inr = (v: number) =>
@@ -229,8 +229,8 @@ const BacktestPage: React.FC = () => {
       {/* ══════════════════════════════════════════════════════════════════════ */}
       {pageTab === 'autopilot' && (
         <div>
-          {/* Server-backed session — survives refresh, keeps running in the background */}
-          <SessionLauncher mode="replay" storageKey="nd_session_replay" />
+          {/* Multi-session manager — run several stocks at once, all server-side */}
+          <SessionManager mode="replay" />
         </div>
       )}
 

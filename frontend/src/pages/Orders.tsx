@@ -157,13 +157,20 @@ const ACTION_COLOR: Record<string, string> = {
 };
 
 // ── Trade chart block: candles for the trade's day + entry/exit markers ───────
-function TradeChartBlock({ trade }: { trade: TradeRecord }) {
+function TradeChartBlock({ trade, allTrades = [] }: { trade: TradeRecord; allTrades?: TradeRecord[] }) {
   const { theme } = useAppStore();
   const [candles, setCandles] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [note, setNote] = useState<string | null>(null);
 
   const date = trade.timestampOpen ? trade.timestampOpen.slice(0, 10) : '';
+
+  // If this trade belongs to a session, show ALL the session's trades together
+  // so you see the full execution of that trading session, not just one entry/exit.
+  const sessionId = trade.marketContext?.sessionId;
+  const sessionTrades = sessionId
+    ? allTrades.filter(t => t.marketContext?.sessionId === sessionId && (t.timestampOpen || '').slice(0, 10) === date)
+    : [trade];
 
   useEffect(() => {
     let alive = true;
@@ -194,10 +201,12 @@ function TradeChartBlock({ trade }: { trade: TradeRecord }) {
   };
 
   const markers: TradeMarker[] = [];
-  const entryTs = snap(trade.timestampOpen);
-  const exitTs = snap(trade.timestampClose);
-  if (entryTs) markers.push({ timestamp: entryTs, action: 'BUY', price: trade.entryPrice, text: `BUY ₹${trade.entryPrice?.toFixed(2)}` });
-  if (exitTs && trade.exitPrice) markers.push({ timestamp: exitTs, action: 'SELL', price: trade.exitPrice, text: `SELL ₹${trade.exitPrice.toFixed(2)}` });
+  for (const t of sessionTrades) {
+    const entryTs = snap(t.timestampOpen);
+    const exitTs = snap(t.timestampClose);
+    if (entryTs) markers.push({ timestamp: entryTs, action: 'BUY', price: t.entryPrice, text: `BUY ₹${t.entryPrice?.toFixed(2)}` });
+    if (exitTs && t.exitPrice) markers.push({ timestamp: exitTs, action: 'SELL', price: t.exitPrice, text: `SELL ₹${t.exitPrice.toFixed(2)}` });
+  }
 
   if (loading) return <div style={{ padding: 24, textAlign: 'center', color: 'var(--nd-text-3)', fontSize: 13 }}>Loading chart…</div>;
   if (note && !candles.length) return <div style={{ padding: 20, textAlign: 'center', color: 'var(--nd-text-3)', fontSize: 12, background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 10 }}>{note}</div>;
@@ -209,8 +218,12 @@ function TradeChartBlock({ trade }: { trade: TradeRecord }) {
   );
 }
 
-function ExecutionModal({ trade, onClose }: { trade: TradeRecord; onClose: () => void }) {
+function ExecutionModal({ trade, allTrades = [], onClose }: { trade: TradeRecord; allTrades?: TradeRecord[]; onClose: () => void }) {
   const steps = buildExecutionSteps(trade);
+  const sessionId = trade.marketContext?.sessionId;
+  const sessionCount = sessionId
+    ? allTrades.filter(t => t.marketContext?.sessionId === sessionId).length
+    : 1;
 
   return (
     <div
@@ -243,8 +256,10 @@ function ExecutionModal({ trade, onClose }: { trade: TradeRecord; onClose: () =>
 
           {/* Price chart with entry/exit markers */}
           <div style={{ marginBottom: 20 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--nd-text-2)', marginBottom: 8 }}>Price action · entry & exit</div>
-            <TradeChartBlock trade={trade} />
+            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--nd-text-2)', marginBottom: 8 }}>
+              {sessionCount > 1 ? `Session execution · ${sessionCount} trades` : 'Price action · entry & exit'}
+            </div>
+            <TradeChartBlock trade={trade} allTrades={allTrades} />
           </div>
 
           {steps.map((step, idx) => (
@@ -479,7 +494,7 @@ const Orders: React.FC = () => {
       )}
 
       {/* Execution preview modal */}
-      {selected && <ExecutionModal trade={selected} onClose={() => setSelected(null)} />}
+      {selected && <ExecutionModal trade={selected} allTrades={trades} onClose={() => setSelected(null)} />}
     </div>
   );
 };
