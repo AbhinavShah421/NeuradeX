@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../stores/appStore';
 import apiService from '../services/api';
-import TradeChart, { TradeMarker } from './TradeChart';
+import TradingChart, { TradeMarker } from './TradingChart';
 import StockPicker from './StockPicker';
 
 /**
@@ -242,7 +242,7 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
           </div>
 
           <div style={{ border: '1px solid var(--nd-border)', borderRadius: 10, overflow: 'hidden', marginBottom: 12 }}>
-            <TradeChart candles={detail.candles ?? []} prevDayCandles={detail.prevDayCandles ?? []} markers={markers} height={400} isDark={isDark} />
+            <TradingChart candles={detail.candles ?? []} prevDayCandles={detail.prevDayCandles ?? []} markers={markers} height={400} isDark={isDark} />
           </div>
 
           {dec.action && (

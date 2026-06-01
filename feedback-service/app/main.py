@@ -294,9 +294,9 @@ async def get_trades(limit: int = 200, offset: int = 0):
             SELECT trade_id, symbol, exchange, action, entry_price, exit_price,
                    pnl_pct, pnl_abs, duration_minutes, ensemble_confidence,
                    agent_signals, market_context, outcome, timestamp_open, timestamp_close,
-                   trade_source
+                   trade_source, created_at
             FROM trade_records
-            ORDER BY timestamp_open DESC
+            ORDER BY created_at DESC
             LIMIT $1 OFFSET $2
             """,
             limit, offset,
@@ -307,10 +307,9 @@ async def get_trades(limit: int = 200, offset: int = 0):
             d["agent_signals"]   = json.loads(d["agent_signals"])   if d["agent_signals"]   else {}
             d["market_context"]  = json.loads(d["market_context"])  if d["market_context"]  else {}
             # Normalise timestamps to ISO strings
-            if d["timestamp_open"]:
-                d["timestamp_open"] = d["timestamp_open"].isoformat()
-            if d["timestamp_close"]:
-                d["timestamp_close"] = d["timestamp_close"].isoformat()
+            for k in ("timestamp_open", "timestamp_close", "created_at"):
+                if d.get(k):
+                    d[k] = d[k].isoformat()
             result.append(d)
         return result
     except Exception as exc:
@@ -328,7 +327,7 @@ async def get_trade(trade_id: str):
             SELECT trade_id, symbol, exchange, action, entry_price, exit_price,
                    pnl_pct, pnl_abs, duration_minutes, ensemble_confidence,
                    agent_signals, market_context, outcome, timestamp_open, timestamp_close,
-                   trade_source
+                   trade_source, created_at
             FROM trade_records WHERE trade_id=$1
             """,
             trade_id,
@@ -340,10 +339,9 @@ async def get_trade(trade_id: str):
         market_context = json.loads(d["market_context"]) if d["market_context"] else {}
         d["agent_signals"]  = agent_signals
         d["market_context"] = market_context
-        if d["timestamp_open"]:
-            d["timestamp_open"] = d["timestamp_open"].isoformat()
-        if d["timestamp_close"]:
-            d["timestamp_close"] = d["timestamp_close"].isoformat()
+        for k in ("timestamp_open", "timestamp_close", "created_at"):
+            if d.get(k):
+                d[k] = d[k].isoformat()
 
         # Reconstruct execution steps for the frontend
         atr = float(market_context.get("atr", 0))

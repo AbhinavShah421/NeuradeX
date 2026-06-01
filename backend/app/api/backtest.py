@@ -526,8 +526,10 @@ async def run_backtest(req: BacktestRequest):
         },
     )
 
-    # Persist completed trades to feedback-service so they appear in Orders page
+    # Persist completed trades to feedback-service so they appear in Orders page.
+    # A run id groups this backtest's trades into one collapsible session in Orders.
     strat_name = STRATEGIES[req.strategy]["name"]
+    run_id = f"bt-{uuid.uuid4().hex[:12]}"
     records = []
     for t in result["trades"]:
         try:
@@ -544,7 +546,8 @@ async def run_backtest(req: BacktestRequest):
                 timestamp_close=exit_dt.isoformat(),
                 duration_minutes=t["holding_days"] * 375,
                 agent_signals=_strategy_agent_signals(req.strategy, "BUY"),
-                market_context={"atr": t["entry_price"] * 0.01, "strategy": req.strategy, "data_source": source, "holding_days": t["holding_days"]},
+                market_context={"atr": t["entry_price"] * 0.01, "strategy": req.strategy, "data_source": source,
+                                "holding_days": t["holding_days"], "session_id": run_id, "session_mode": "STRATEGY"},
                 confidence=0.75,
             ))
         except Exception:
