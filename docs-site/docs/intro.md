@@ -60,7 +60,8 @@ Groww API / News Sources
                     │ RabbitMQ: trade.outcome
              model-trainer (8013)
 
-  backend (8000) ← REST API + WebSocket gateway
+  stock-scanner (8014) ── continuous market sweep ──→ Redis: ai_engine:watchlist
+  backend (8000) ← REST API + WebSocket gateway (reads watchlist, runs autopilot)
   frontend (3000) ← React / Vite dashboard
 ```
 
@@ -82,6 +83,7 @@ Groww API / News Sources
 | `trade-executor` | **8011** | Java 17 · Spring Boot | Paper/live order placement via Groww |
 | `feedback-service` | **8012** | Python · FastAPI | Trade outcome recording, weight updates |
 | `model-trainer` | **8013** | Python · FastAPI | Scheduled model retraining, MLflow logging |
+| `stock-scanner` | **8014** | Python · FastAPI | Independent market sweep — continuously scores the universe for intraday fitness and maintains the AI watchlist |
 | `frontend` | **3000** | React 18 · Vite · TypeScript | Dashboard, backtesting UI, portfolio |
 | `docs` | **3001** | Docusaurus 3 | This developer portal |
 | `postgres` | **5432** | TimescaleDB (PG 15) | Time-series OHLCV, trades, portfolio |
