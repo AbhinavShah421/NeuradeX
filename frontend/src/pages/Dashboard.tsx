@@ -574,6 +574,14 @@ const AiWatchlistTab: React.FC = () => {
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>{w.symbol}</div>
                 <div style={{ fontSize: 11, color: 'var(--nd-text-3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{w.name}</div>
+                {w.news && ((w.news.catalyst && w.news.catalyst !== 'none') || w.news.summary) && (
+                  <div title="LLM news sentiment" style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 2, fontSize: 10.5, fontWeight: 600, color: ACTION_BG[w.news.action] ?? 'var(--nd-text-3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    <span className="material-icons" style={{ fontSize: 12, flexShrink: 0 }}>article</span>
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {(w.news.catalyst && w.news.catalyst !== 'none') ? w.news.catalyst : w.news.summary}
+                    </span>
+                  </div>
+                )}
               </div>
               <div style={{ textAlign: 'right' }}>
                 <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--nd-text-1)' }}>₹{w.price?.toLocaleString('en-IN')}</div>
@@ -611,6 +619,37 @@ const WatchlistEvidence: React.FC<{ stock: any; scannedAt?: string; onClose: () 
           It weighs every indicator that moves price — liquidity, volatility, trend, momentum, MACD, RSI, the opening gap and the broader market — and only stocks that clear the liquidity + volatility bar make the list.
         </p>
         <div style={{ fontSize: 12, color: 'var(--nd-text-3)', background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 8, padding: '8px 12px', marginBottom: 12 }}>{stock.reasoning}</div>
+        {stock.news && (
+          <div style={{ border: '1px solid var(--nd-border)', borderRadius: 10, padding: '10px 12px', marginBottom: 12, background: 'var(--nd-surface)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+              <span className="material-icons" style={{ fontSize: 15, color: ACTION_BG[stock.news.action] ?? 'var(--nd-text-3)' }}>article</span>
+              <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--nd-text-3)', letterSpacing: 0.3 }}>NEWS SENTIMENT · LLM</span>
+              <span style={{ flex: 1 }} />
+              <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 4, background: `${ACTION_BG[stock.news.action]}1a`, color: ACTION_BG[stock.news.action] }}>{stock.news.action}</span>
+              {stock.news.confidence != null && <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>{(stock.news.confidence * 100).toFixed(0)}%</span>}
+            </div>
+            {stock.news.summary && <div style={{ fontSize: 12, color: 'var(--nd-text-2)', lineHeight: 1.5, marginBottom: 6 }}>{stock.news.summary}</div>}
+            {stock.news.catalyst && stock.news.catalyst !== 'none' && (
+              <div style={{ fontSize: 11.5, marginBottom: 6 }}>
+                <span style={{ color: 'var(--nd-text-3)' }}>Catalyst: </span>
+                <strong style={{ color: ACTION_BG[stock.news.action] ?? 'var(--nd-text-1)' }}>{stock.news.catalyst}</strong>
+              </div>
+            )}
+            {Array.isArray(stock.news.topHeadlines) && stock.news.topHeadlines.length > 0 && (
+              <div style={{ marginTop: 4 }}>
+                {stock.news.topHeadlines.map((h: string, i: number) => (
+                  <div key={i} style={{ display: 'flex', gap: 6, fontSize: 11, color: 'var(--nd-text-3)', padding: '3px 0' }}>
+                    <span style={{ color: 'var(--nd-text-4, var(--nd-text-3))' }}>•</span>
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{h}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ fontSize: 10, color: 'var(--nd-text-3)', marginTop: 6 }}>
+              {stock.news.headlinesCount} headlines{stock.news.updatedAt ? ` · ${new Date(stock.news.updatedAt).toLocaleString()}` : ''}
+            </div>
+          </div>
+        )}
         {stock.metrics && (<>
           <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--nd-text-3)', marginBottom: 8 }}>MARKET-INDICATOR EVIDENCE</div>
           {[
