@@ -88,8 +88,15 @@ async def _train_ensemble_from_backtest(symbol: str, candles: list[dict], trades
     lookahead), store it as a prediction, then record the trade's *actual* P&L as
     the outcome — which nudges each agent's weight and the RL policy. Capped so a
     single backtest can't flood the learner. Runs in the background.
+
+    Disabled by default: these are multi-day swing trades and the agents are
+    intraday, so this would pollute the intraday learning signal. Intraday
+    training comes from paper + replay sessions instead. Enable with
+    TRAIN_FROM_STRATEGY_BACKTEST=true only if you want swing-trade training.
     """
     if not trades or not candles:
+        return
+    if not getattr(settings, "TRAIN_FROM_STRATEGY_BACKTEST", False):
         return
     try:
         from app.agents import get_engine, get_learning, get_rl_agent

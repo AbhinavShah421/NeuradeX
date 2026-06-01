@@ -326,11 +326,19 @@ async def get_accuracy_stats():
         correct_preds = int(acc_row[1] or 0) if acc_row else 0
         accuracy_rate = (correct_preds / total_preds) if total_preds else 0.0
 
-        # pnl_pct is stored as a fraction (0.0245 = 2.45%)
-        returns = [float(r[0]) for r in rows if r[0] is not None]
-        pnls    = [float(r[1]) for r in rows if r[1] is not None]
-        wins    = sum(1 for r in rows if r[2] == 'WIN')
-        losses  = sum(1 for r in rows if r[2] == 'LOSS')
+        # The system is INTRADAY. The headline metrics must reflect the intraday
+        # trades (paper + replay + live) — NOT the multi-day strategy backtester,
+        # whose swing trades (held for days/months, ±hundreds of %) would otherwise
+        # swamp the win-rate / return / drawdown. Strategy backtests stay visible
+        # in `by_source` for transparency.
+        # pnl_pct is stored as a fraction (0.0245 = 2.45%).
+        INTRADAY = {"PAPER", "REPLAY", "LIVE"}
+        intraday_rows = [r for r in rows if (r[3] or "LIVE") in INTRADAY]
+
+        returns = [float(r[0]) for r in intraday_rows if r[0] is not None]
+        pnls    = [float(r[1]) for r in intraday_rows if r[1] is not None]
+        wins    = sum(1 for r in intraday_rows if r[2] == 'WIN')
+        losses  = sum(1 for r in intraday_rows if r[2] == 'LOSS')
         total   = wins + losses
 
         win_rate   = (wins / total) if total else 0.0
@@ -341,7 +349,7 @@ async def get_accuracy_stats():
         best_pct   = max(returns) * 100 if returns else 0.0
         worst_pct  = min(returns) * 100 if returns else 0.0
 
-        # Max drawdown from the running cumulative P&L curve
+        # Max drawdown over the intraday equity curve (trades already time-ordered)
         max_dd = 0.0
         if pnls:
             cum = peak = 0.0
@@ -370,6 +378,7 @@ async def get_accuracy_stats():
             "total_predictions":   total_preds,
             "correct_predictions": correct_preds,
 
+            "scope":               "intraday",   # headline metrics = PAPER+REPLAY+LIVE
             "win_rate":            round(win_rate, 4),
             "winning_trades":      wins,
             "losing_trades":       losses,
