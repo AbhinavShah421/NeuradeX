@@ -384,10 +384,12 @@ const AutopilotBanner: React.FC = () => {
     : 'Live paper-trade the whole watchlist during market hours';
 
   const btDesc = bt.enabled
-    ? ((bt.running ?? 0) > 0
-        ? `Replaying ${bt.queueDate ?? bt.cursor} at ${bt.speed ?? 1}× · ${bt.queuePending ?? 0}/${bt.queueTotal ?? 0} sessions left · ${bt.completedDays ?? 0} days trained`
-        : `Next day: ${bt.cursor ?? '—'} · ${bt.completedDays ?? 0} days trained so far`)
-    : 'Continuously replay past days (walking backward) to train on dense real data';
+    ? (bt.activeWindow === false
+        ? `Paused for paper-trading hours — resumes after close · ${bt.completedDays ?? 0} days trained`
+        : (bt.running ?? 0) > 0
+          ? `Replaying ${bt.queueDate ?? bt.cursor} at ${bt.speed ?? 1}× · ${bt.queuePending ?? 0}/${bt.queueTotal ?? 0} sessions left · ${bt.completedDays ?? 0} days trained`
+          : `Next day: ${bt.cursor ?? '—'} · ${bt.completedDays ?? 0} days trained so far`)
+    : 'Replays past days (walking back) outside market hours to train on dense real data';
 
   return (
     <div className="nd-card" style={{ padding: '14px 18px', marginBottom: 20, borderLeft: `3px solid ${anyOn ? 'var(--nd-green)' : 'var(--nd-border)'}` }}>

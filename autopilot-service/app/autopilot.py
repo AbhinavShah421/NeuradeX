@@ -51,6 +51,13 @@ BT_DAYS_BACK = int(os.getenv("AUTOPILOT_BACKTEST_MAX_DAYS_BACK", "30"))  # how f
 MARKET_OPEN_MIN  = 9 * 60 + 15
 MARKET_CLOSE_MIN = 15 * 60 + 30
 
+# Backtest only runs *outside* the paper-trading window so the agents focus
+# entirely on live paper trading during market hours. It is allowed before the
+# morning cutoff (09:00) and again after the evening resume (15:40, post-close);
+# in between it closes its queue and starts nothing.
+BT_MORNING_CUTOFF = int(os.getenv("AUTOPILOT_BACKTEST_MORNING_CUTOFF", str(9 * 60)))       # 09:00
+BT_EVENING_RESUME = int(os.getenv("AUTOPILOT_BACKTEST_EVENING_RESUME", str(15 * 60 + 40))) # 15:40
+
 _redis: redis.Redis | None = None
 
 
@@ -78,6 +85,17 @@ def _market_open() -> bool:
         return False
     m = n.hour * 60 + n.minute
     return MARKET_OPEN_MIN <= m <= MARKET_CLOSE_MIN
+
+
+def _backtest_allowed() -> bool:
+    """Backtest may run only when paper trading isn't (and won't shortly be)
+    active: before the morning cutoff or after the evening resume on weekdays,
+    and freely on weekends."""
+    n = _now_ist()
+    if n.weekday() >= 5:
+        return True
+    m = n.hour * 60 + n.minute
+    return (m < BT_MORNING_CUTOFF) or (m >= BT_EVENING_RESUME)
 
 
 def _prev_trading_day(date_str: str) -> str:
@@ -142,6 +160,33 @@ async def _list_sessions() -> list[dict]:
     return []
 
 
+async def _stop_session(sid: str) -> None:
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            await c.post(f"{BACKEND_URL}/api/sessions/{sid}/stop")
+    except Exception as exc:
+        logger.debug("stop_session %s error: %s", sid, exc)
+
+
+async def _paper_running() -> bool:
+    sessions = await _list_sessions()
+    return any(s.get("status") == "running" and s.get("mode") == "paper" for s in sessions)
+
+
+async def _stop_backtest_queue(reason: str = "paper-trading window") -> None:
+    """Close any running backtest replay queue (called at the morning cutoff so
+    the agents are free to focus on live paper trading)."""
+    st = await _load_bt_state()
+    queue = st.get("queue") or []
+    if not queue:
+        return
+    for sid in queue:
+        await _stop_session(sid)
+    st.update({"queue": [], "queue_pending": 0, "queue_date": None})
+    await _save_bt_state(st)
+    logger.info("backtest queue closed (%s): %d sessions stopped", reason, len(queue))
+
+
 # ── Paper autopilot ───────────────────────────────────────────────────────────
 
 async def _do_paper_tick() -> None:
@@ -194,6 +239,16 @@ async def _save_bt_state(st: dict) -> None:
 
 
 async def _do_backtest_step() -> None:
+    # Never compete with paper trading: outside the allowed window (i.e. from the
+    # 09:00 morning cutoff until the post-close evening resume), close any running
+    # queue and start nothing. Also yield if paper sessions are live, as a guard.
+    if not _backtest_allowed():
+        await _stop_backtest_queue("paper-trading hours")
+        return
+    if await _paper_running():
+        await _stop_backtest_queue("paper sessions active")
+        return
+
     st = await _load_bt_state()
     cursor = st.get("cursor") or _prev_trading_day(_today())
     st.setdefault("cursor", cursor)
@@ -331,6 +386,7 @@ async def status() -> dict:
         },
         "backtest": {
             "enabled": await _flag(BACKTEST_FLAG),
+            "active_window": _backtest_allowed(),   # False = paused for paper-trading hours
             "running": len(bt_running),
             "speed": BT_SPEED,
             "cursor": st.get("cursor"),

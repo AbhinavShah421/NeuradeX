@@ -368,6 +368,13 @@ async def _autopilot_status() -> dict:
     return {"paper": {"enabled": paper}, "backtest": {"enabled": bt}, "service_unavailable": True}
 
 
+@router.get("/llm-status")
+async def get_llm_status():
+    """Which LLM provider is active (Anthropic vs Ollama) and whether it responds."""
+    from app.utils.llm_client import llm_status
+    return {"status": "success", "data": await llm_status(probe=True)}
+
+
 @router.get("/autopilot")
 async def get_autopilot():
     return {"status": "success", "data": await _autopilot_status()}
