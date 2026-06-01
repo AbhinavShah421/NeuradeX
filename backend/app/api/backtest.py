@@ -783,22 +783,43 @@ def _intraday_indicators(candles: list[dict], idx: int) -> dict:
     avg_vol = sum(vols) / n
     vol_ratio = vols[-1] / max(avg_vol, 1)
 
+    # Intraday ATR (avg true range over the last 14 bars) — used to size stops
+    # and targets to the stock's own volatility instead of fixed percentages.
+    if n >= 2:
+        highs = [c["high"] for c in window]
+        lows  = [c["low"] for c in window]
+        trs = [max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
+               for i in range(max(1, n - 14), n)]
+        atr = sum(trs) / len(trs) if trs else 0.0
+    else:
+        atr = 0.0
+
     return {
         "vwap":      round(vwap, 2),
         "sma5":      round(sma5, 2),
         "sma20":     round(sma20, 2),
         "rsi":       round(rsi, 1),
         "mom5":      round(mom5, 3),
+        "atr":       round(atr, 4),
         "vol_ratio": round(vol_ratio, 2),
         "above_vwap": closes[-1] > vwap,
     }
 
 
 def _tech_signal(ind: dict, position: str, candle: dict, entry_price: float) -> int:
-    """1 = buy, -1 = sell, 0 = hold based on technicals."""
+    """1 = buy, -1 = sell, 0 = hold based on technicals.
+
+    Entries are trend-filtered (no counter-trend knife-catching); exits are
+    volatility-scaled (ATR) with a profit-lock so winners are allowed to run
+    while bad entries are cut quickly — the realised reward:risk that fixed
+    +2.5%/-1.5% with eager momentum exits was giving away.
+    """
     rsi, mom5 = ind["rsi"], ind["mom5"]
     price = candle["close"]
     vwap, sma5, sma20 = ind["vwap"], ind["sma5"], ind["sma20"]
+    atr = ind.get("atr", 0.0)
+    atr_pct = max(0.5, min(2.5, (atr / price * 100) if price else 0.8))  # bound to sane range
+
     try:
         h, m = int(candle["time"].split(":")[0]), int(candle["time"].split(":")[1])
     except (KeyError, ValueError, IndexError):
@@ -809,16 +830,30 @@ def _tech_signal(ind: dict, position: str, candle: dict, entry_price: float) -> 
         return -1
 
     if position == "NONE":
-        if rsi < 35 and price >= vwap and mom5 > 0:      return 1
-        if sma5 > sma20 and mom5 > 0.18 and rsi < 62:   return 1
-        if mom5 > 0.35 and price > vwap and rsi < 66:   return 1
+        # Trend filter: skip entries while clearly trending down (don't catch
+        # falling knives). VWAP + RSI still gate the individual triggers.
+        downtrend = sma5 < sma20 and mom5 < -0.10
+        if downtrend:
+            return 0
+        if rsi < 38 and price >= vwap and mom5 > 0:          return 1   # oversold bounce off support
+        if sma5 >= sma20 and mom5 > 0.18 and rsi < 62:       return 1   # trend continuation
+        if mom5 > 0.35 and price > vwap and rsi < 66:        return 1   # momentum breakout
     elif position == "LONG":
         gain_pct = (price - entry_price) / entry_price * 100
-        if rsi > 72:                          return -1
-        if sma5 < sma20 and mom5 < -0.12:    return -1
-        if mom5 < -0.28:                      return -1
-        if gain_pct >= 2.5:                  return -1   # take profit
-        if gain_pct <= -1.5:                 return -1   # stop loss
+        stop = -max(1.0, 0.9 * atr_pct)        # ~1×ATR, floor 1.0%
+        take = max(2.5, 1.8 * atr_pct)         # let winners run, scaled to volatility
+
+        if gain_pct <= stop:                   return -1   # volatility-scaled stop loss
+        if gain_pct >= take:                   return -1   # take profit (runs further than before)
+        # Profit-lock: once up ≥1.2%, exit if price loses the 5-bar MA (trail) —
+        # protects gains without bailing on every momentum wiggle.
+        if gain_pct >= 1.2 and price < sma5:   return -1
+        # Cut bad entries fast — but only while still ~flat, never on a winner.
+        if gain_pct < 0.5:
+            if sma5 < sma20 and mom5 < -0.15:  return -1
+            if mom5 < -0.30:                   return -1
+        # Overbought, but only when momentum has already turned down.
+        if rsi > 75 and mom5 < 0:              return -1
 
     return 0
 
