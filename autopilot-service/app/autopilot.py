@@ -144,7 +144,7 @@ async def _list_sessions() -> list[dict]:
 
 # ── Paper autopilot ───────────────────────────────────────────────────────────
 
-async def _paper_tick() -> None:
+async def _do_paper_tick() -> None:
     if not _market_open():
         return
     syms = await _watchlist_symbols()
@@ -193,7 +193,7 @@ async def _save_bt_state(st: dict) -> None:
         logger.debug("bt state save failed: %s", exc)
 
 
-async def _backtest_step() -> None:
+async def _do_backtest_step() -> None:
     st = await _load_bt_state()
     cursor = st.get("cursor") or _prev_trading_day(_today())
     st.setdefault("cursor", cursor)
@@ -256,6 +256,34 @@ async def _backtest_step() -> None:
 
 
 # ── Loops ─────────────────────────────────────────────────────────────────────
+
+# Serialize ticks so the periodic loop and an on-enable kick can't both start a
+# queue at the same time.
+_paper_lock = asyncio.Lock()
+_bt_lock = asyncio.Lock()
+
+
+async def _paper_tick() -> None:
+    async with _paper_lock:
+        await _do_paper_tick()
+
+
+async def _backtest_step() -> None:
+    async with _bt_lock:
+        await _do_backtest_step()
+
+
+async def kick(mode: str) -> None:
+    """Run one tick right now (called when a mode is toggled on) so the user sees
+    a queue immediately instead of waiting for the next loop cycle."""
+    try:
+        if mode == "backtest" and await _flag(BACKTEST_FLAG):
+            await _backtest_step()
+        elif mode == "paper" and await _flag(PAPER_FLAG):
+            await _paper_tick()
+    except Exception as exc:
+        logger.debug("kick %s failed: %s", mode, exc)
+
 
 async def paper_loop() -> None:
     await asyncio.sleep(20)
