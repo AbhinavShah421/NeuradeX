@@ -201,20 +201,22 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
     trade_executed = None
 
     if action == "BUY" and pos["status"] == "NONE":
-        qty = max(1, int(s["cash"] * 0.95 / candle["close"]))
-        cost = qty * candle["close"]
+        from app.utils.trade_costs import buy_fill
+        fill = buy_fill(candle["close"])          # market buy fills above the close (slippage)
+        qty = max(1, int(s["cash"] * 0.95 / fill))
+        cost = qty * fill
         if cost <= s["cash"]:
             s["cash"] -= cost
             fp, regime = _entry_fingerprint(window)
             s["position"] = {
-                "status": "LONG", "entry_price": candle["close"], "quantity": qty,
+                "status": "LONG", "entry_price": fill, "quantity": qty,
                 "entry_time": candle["time"], "current_pnl": 0.0,
                 "entry_fp": fp, "entry_regime": regime,
             }
-            trade_executed = {"action": "BUY", "price": candle["close"], "quantity": qty, "pnl": None, "time": candle["time"]}
+            trade_executed = {"action": "BUY", "price": fill, "quantity": qty, "pnl": None, "time": candle["time"]}
             s["trades"].append({
                 "time": candle["time"], "timestamp": candle.get("timestamp", 0),
-                "action": "BUY", "price": candle["close"], "quantity": qty,
+                "action": "BUY", "price": fill, "quantity": qty,
                 "confidence": int(conf * 100), "reason": reason,
                 "pnl": None, "pnl_pct": None, "candle_index": idx, "indicators": ind,
             })
@@ -237,18 +239,22 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
                 logger.debug("session store_prediction skipped: %s", exc)
 
     elif action == "SELL" and pos["status"] == "LONG":
+        from app.utils.trade_costs import sell_fill, charges
         qty   = pos["quantity"]
-        entry = pos["entry_price"]
-        revenue = qty * candle["close"]
-        pnl     = revenue - qty * entry
+        entry = pos["entry_price"]                 # already includes buy slippage
+        exit_fill = sell_fill(candle["close"])     # market sell fills below the close
+        fees    = charges(entry, exit_fill, qty)   # brokerage + exchange + GST + STT
+        revenue = qty * exit_fill - fees
+        pnl     = revenue - qty * entry            # net P&L (slippage in fills + charges)
         pnl_pct = round(pnl / (qty * entry) * 100, 2) if entry > 0 else 0.0
         s["cash"] += revenue
-        trade_executed = {"action": "SELL", "price": candle["close"], "quantity": qty, "pnl": round(pnl, 2), "time": candle["time"]}
+        trade_executed = {"action": "SELL", "price": exit_fill, "quantity": qty, "pnl": round(pnl, 2), "time": candle["time"]}
         s["trades"].append({
             "time": candle["time"], "timestamp": candle.get("timestamp", 0),
-            "action": "SELL", "price": candle["close"], "quantity": qty,
+            "action": "SELL", "price": exit_fill, "quantity": qty,
             "confidence": int(conf * 100), "reason": reason,
             "pnl": round(pnl, 2), "pnl_pct": pnl_pct, "candle_index": idx, "indicators": ind,
+            "costs": fees,
         })
         # Persist round-trip to Orders + teach the memory bank
         try:
@@ -257,7 +263,7 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
             exit_dt  = datetime.strptime(f"{s['date']} {candle['time']}", "%Y-%m-%d %H:%M").replace(tzinfo=IST)
             dur = int((exit_dt - entry_dt).total_seconds() / 60)
             asyncio.create_task(_save_backtest_trades([_build_trade_record(
-                symbol=symbol, action="BUY", entry_price=entry, exit_price=candle["close"],
+                symbol=symbol, action="BUY", entry_price=entry, exit_price=exit_fill,
                 pnl_abs=round(pnl, 2), pnl_pct_decimal=pnl_pct / 100.0,
                 timestamp_open=entry_dt.isoformat(), timestamp_close=exit_dt.isoformat(),
                 duration_minutes=dur, agent_signals=_derive_agent_signals("BUY", ind),
@@ -268,16 +274,16 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
             )]))
         except Exception:
             pass
-        # Teach the pattern-memory bank (BUY + regime) — same as backtests
+        # Teach the pattern-memory bank (BUY + regime) — net of costs
         asyncio.create_task(_feed_memory(symbol, pos.get("entry_fp"), pos.get("entry_regime", "unknown"),
-                                         pnl_pct, entry, candle["close"], s["mode"]))
+                                         pnl_pct, entry, exit_fill, s["mode"]))
         # Train the AI engine: record the outcome → updates per-agent weights
         _pid = pos.get("prediction_id")
         if _pid:
             try:
                 from app.agents import get_learning
                 asyncio.create_task(get_learning().record_outcome(
-                    _pid, symbol, entry, candle["close"], round(pnl, 2), pnl_pct))
+                    _pid, symbol, entry, exit_fill, round(pnl, 2), pnl_pct))
             except Exception as exc:
                 logger.debug("session record_outcome skipped: %s", exc)
         s["position"] = {"status": "NONE", "entry_price": 0.0, "quantity": 0, "entry_time": None, "current_pnl": 0.0}
