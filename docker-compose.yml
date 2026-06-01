@@ -444,6 +444,8 @@ services:
       AUTOPILOT_BACKTEST_MAX: "15"          # sessions per day queue
       AUTOPILOT_BACKTEST_POLL: "15"         # queue completion poll
       AUTOPILOT_BACKTEST_MAX_DAYS_BACK: "30"  # walk back N trading days, then wrap
+      AUTOPILOT_BACKTEST_MORNING_CUTOFF: "540"  # 09:00 IST — stop backtest before market
+      AUTOPILOT_BACKTEST_EVENING_RESUME: "940"  # 15:40 IST — resume after paper closes
     ports:
       - "8015:8015"
     depends_on:
