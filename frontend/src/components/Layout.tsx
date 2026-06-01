@@ -60,6 +60,12 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   const navigate  = useNavigate();
   const isDark = theme === 'dark';
 
+  // Keep the theme on <html> so the persisted dark mode covers the whole page
+  // (and matches the pre-render script in index.html that prevents a flash).
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark-mode', isDark);
+  }, [isDark]);
+
   useEffect(() => {
     const init = async () => {
       try { await socketService.connect(); setIsConnected(true); }
