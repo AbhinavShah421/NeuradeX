@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import apiService from '../services/api';
+import { useAppStore } from '../stores/appStore';
+import TradeChart, { TradeMarker } from '../components/TradeChart';
 
 interface AgentSignals {
   technical?: string;
@@ -154,6 +156,59 @@ const ACTION_COLOR: Record<string, string> = {
   BUY: '#22c55e', SELL: '#ef4444', HOLD: '#f59e0b',
 };
 
+// ── Trade chart block: candles for the trade's day + entry/exit markers ───────
+function TradeChartBlock({ trade }: { trade: TradeRecord }) {
+  const { theme } = useAppStore();
+  const [candles, setCandles] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [note, setNote] = useState<string | null>(null);
+
+  const date = trade.timestampOpen ? trade.timestampOpen.slice(0, 10) : '';
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      if (!date) { setLoading(false); setNote('No date on this trade.'); return; }
+      try {
+        const r = await apiService.getIntradayCandles(trade.symbol, date);
+        const cs = (r as any).data?.candles ?? [];
+        if (!alive) return;
+        if (!cs.length) setNote('No intraday chart available for this date.');
+        setCandles(cs);
+      } catch {
+        if (alive) setNote('Chart unavailable for this date (older than Groww intraday history).');
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => { alive = false; };
+  }, [trade.symbol, date]);
+
+  // Snap entry/exit to the nearest candle so the markers render on a real bar
+  const snap = (iso?: string): number | null => {
+    if (!iso || !candles.length) return null;
+    const target = Math.floor(new Date(iso).getTime() / 1000);
+    let best = candles[0].timestamp, bestD = Infinity;
+    for (const c of candles) { const d = Math.abs(c.timestamp - target); if (d < bestD) { bestD = d; best = c.timestamp; } }
+    return best;
+  };
+
+  const markers: TradeMarker[] = [];
+  const entryTs = snap(trade.timestampOpen);
+  const exitTs = snap(trade.timestampClose);
+  if (entryTs) markers.push({ timestamp: entryTs, action: 'BUY', price: trade.entryPrice, text: `BUY ₹${trade.entryPrice?.toFixed(2)}` });
+  if (exitTs && trade.exitPrice) markers.push({ timestamp: exitTs, action: 'SELL', price: trade.exitPrice, text: `SELL ₹${trade.exitPrice.toFixed(2)}` });
+
+  if (loading) return <div style={{ padding: 24, textAlign: 'center', color: 'var(--nd-text-3)', fontSize: 13 }}>Loading chart…</div>;
+  if (note && !candles.length) return <div style={{ padding: 20, textAlign: 'center', color: 'var(--nd-text-3)', fontSize: 12, background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 10 }}>{note}</div>;
+
+  return (
+    <div style={{ border: '1px solid var(--nd-border)', borderRadius: 10, overflow: 'hidden' }}>
+      <TradeChart candles={candles} markers={markers} height={300} isDark={theme === 'dark'} />
+    </div>
+  );
+}
+
 function ExecutionModal({ trade, onClose }: { trade: TradeRecord; onClose: () => void }) {
   const steps = buildExecutionSteps(trade);
 
@@ -185,6 +240,13 @@ function ExecutionModal({ trade, onClose }: { trade: TradeRecord; onClose: () =>
 
         {/* Steps timeline */}
         <div style={{ overflowY: 'auto', padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: 0 }}>
+
+          {/* Price chart with entry/exit markers */}
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--nd-text-2)', marginBottom: 8 }}>Price action · entry & exit</div>
+            <TradeChartBlock trade={trade} />
+          </div>
+
           {steps.map((step, idx) => (
             <div key={step.step} style={{ display: 'flex', gap: 16, paddingBottom: idx < steps.length - 1 ? 0 : 0 }}>
 

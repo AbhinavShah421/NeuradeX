@@ -32,6 +32,13 @@ const SUB_NAV = [
     description: 'Practice with real prices, no real money',
   },
   {
+    to: '/ai-engine/sessions',
+    exact: false,
+    label: 'Live Sessions',
+    icon: 'monitoring',
+    description: 'Background trades that survive refresh — run many at once',
+  },
+  {
     to: '/ai-engine/memory',
     exact: false,
     label: 'Pattern Memory',

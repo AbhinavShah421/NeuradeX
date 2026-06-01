@@ -13,7 +13,7 @@ from app.config import settings
 from app.database.mongodb import init_mongodb, close_mongodb
 from app.database.postgres import init_postgres, close_postgres
 from app.utils.redis_client import init_redis, close_redis
-from app.api import stocks, predictions, portfolio, risk, orders, agent, backtest, auth, paper_trading, ai_engine, mlflow_proxy
+from app.api import stocks, predictions, portfolio, risk, orders, agent, backtest, auth, paper_trading, ai_engine, mlflow_proxy, sessions
 from app.websocket.socket_manager import sio
 from app.ml_core.initializer import initialize_ml_models
 from app.utils.groww_client import init_groww_client
@@ -55,6 +55,15 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning("Could not schedule memory sweep: %s", exc)
 
+        # Background runner that advances live trading sessions server-side
+        try:
+            from app.api.sessions import session_runner_loop
+            app.state.session_runner_task = asyncio.create_task(session_runner_loop())
+            logger.info("Live session runner scheduled",
+                        extra={"log_type": "app_lifecycle", "event": "session_runner_scheduled"})
+        except Exception as exc:
+            logger.warning("Could not start session runner: %s", exc)
+
         logger.info(
             "Application startup complete",
             extra={"log_type": "app_lifecycle", "event": "startup_complete"},
@@ -71,9 +80,10 @@ async def lifespan(app: FastAPI):
 
     logger.info("Shutting down application", extra={"log_type": "app_lifecycle", "event": "shutdown"})
     try:
-        task = getattr(app.state, "memory_sweep_task", None)
-        if task:
-            task.cancel()
+        for _attr in ("memory_sweep_task", "session_runner_task"):
+            task = getattr(app.state, _attr, None)
+            if task:
+                task.cancel()
         await close_postgres()
         await close_mongodb()
         await close_redis()
@@ -132,6 +142,7 @@ app.include_router(backtest.router, prefix="/api/backtest", tags=["backtest"])
 app.include_router(paper_trading.router, prefix="/api/paper-trading", tags=["paper-trading"])
 app.include_router(ai_engine.router, prefix="/api/ai-engine", tags=["ai-engine"])
 app.include_router(mlflow_proxy.router, prefix="/api/mlflow", tags=["mlflow"])
+app.include_router(sessions.router, prefix="/api/sessions", tags=["sessions"])
 
 # Socket.IO ASGI app
 app_sio = socketio.ASGIApp(sio, app)

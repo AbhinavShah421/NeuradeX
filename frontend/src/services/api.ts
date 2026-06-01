@@ -482,7 +482,7 @@ class ApiService {
 
   async progressiveStart(payload: {
     symbol: string; date: string; start_time: string;
-    capital: number; model?: string;
+    capital: number; model?: string; real_only?: boolean;
   }): Promise<ApiResponse<any>> {
     try {
       const response = await this.api.post('/api/backtest/progressive/start', payload);
@@ -498,7 +498,7 @@ class ApiService {
     capital: number; cash: number;
     position: 'NONE' | 'LONG'; quantity: number;
     entry_price: number; entry_time: string | null;
-    trades: any[]; model?: string;
+    trades: any[]; model?: string; real_only?: boolean;
   }): Promise<ApiResponse<any>> {
     try {
       const response = await this.api.post('/api/backtest/progressive/step', payload);
@@ -693,6 +693,40 @@ class ApiService {
       console.error('Health check failed:', error);
       throw error;
     }
+  }
+
+  // ── Live trading sessions (server-side, background-persistent) ──────────────
+  async sessionStart(payload: {
+    mode: 'replay' | 'paper'; symbol: string; date?: string;
+    start_time?: string; capital?: number; speed?: number; model?: string;
+  }): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/sessions/start', payload);
+    return response.data;
+  }
+
+  async sessionList(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/sessions');
+    return response.data;
+  }
+
+  async sessionGet(id: string): Promise<ApiResponse<any>> {
+    const response = await this.api.get(`/api/sessions/${id}`);
+    return response.data;
+  }
+
+  async sessionStop(id: string): Promise<ApiResponse<any>> {
+    const response = await this.api.post(`/api/sessions/${id}/stop`);
+    return response.data;
+  }
+
+  async sessionSpeed(id: string, speed: number): Promise<ApiResponse<any>> {
+    const response = await this.api.post(`/api/sessions/${id}/speed`, { speed });
+    return response.data;
+  }
+
+  async sessionDelete(id: string): Promise<ApiResponse<any>> {
+    const response = await this.api.delete(`/api/sessions/${id}`);
+    return response.data;
   }
 
   // Microservice health — backend proxies checks on the Docker network
