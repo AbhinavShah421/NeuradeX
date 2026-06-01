@@ -123,6 +123,11 @@ class Settings(BaseSettings):
     # replay sessions. Leave off unless you specifically want swing-trade training.
     TRAIN_FROM_STRATEGY_BACKTEST: bool = False
 
+    # Intraday trade costs (basis points) so simulated P&L is net-of-cost.
+    TRADE_SLIPPAGE_BPS: float = 2.0   # per side — spread/slippage on the fill
+    TRADE_FEE_BPS: float = 3.0        # per side — brokerage + exchange + GST
+    TRADE_STT_BPS: float = 2.5        # sell side — Securities Transaction Tax
+
     # Pattern-memory nightly refresh (replays real backtests to keep the bank fresh)
     MEMORY_SWEEP_ENABLED: bool = True
     MEMORY_SWEEP_HOUR_IST: int = 2        # run at ~02:00 IST (after market close)
