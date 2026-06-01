@@ -187,6 +187,13 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
                 {n.label}
               </Link>
             ))}
+
+            {/* Docs — always opens in a new tab */}
+            <a href="/neuradex/dev/docs/" target="_blank" rel="noopener noreferrer"
+               className="nd-nav-link" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              Docs
+              <span className="material-icons" style={{ fontSize: 14, color: 'var(--nd-text-3)' }}>open_in_new</span>
+            </a>
           </nav>
 
           <div className="nd-header-right">
@@ -329,6 +336,13 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
                   {n.label}
                 </Link>
               ))}
+              {/* Docs — always opens in a new tab */}
+              <a href="/neuradex/dev/docs/" target="_blank" rel="noopener noreferrer"
+                 className="nd-mobile-nav-link" onClick={() => setMobileMenuOpen(false)}>
+                <span className="material-icons" style={{ fontSize: 20, color: 'var(--nd-text-3)' }}>menu_book</span>
+                Docs
+                <span className="material-icons" style={{ fontSize: 14, color: 'var(--nd-text-3)', marginLeft: 'auto' }}>open_in_new</span>
+              </a>
             </div>
             {broker && (
               <div className="nd-mobile-menu-footer">
