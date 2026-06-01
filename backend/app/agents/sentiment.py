@@ -1,8 +1,9 @@
-"""Sentiment Agent — LLM-based market context analysis with rule-based fallback."""
+"""Sentiment Agent — reads the LLM news-sentiment signal (produced off the hot
+path by the sentiment-service from Google-News headlines), with a rule-based
+price fallback. This is the one agent driven by information that is genuinely
+independent of price, which is what gives the ensemble real diversity."""
 from __future__ import annotations
-import asyncio
 import json
-import re
 from .base import AgentSignal, BaseAgent
 from app.utils.elk_logger import get_logger
 
@@ -16,60 +17,43 @@ class SentimentAgent(BaseAgent):
         if len(candles) < 5:
             return AgentSignal(agent_name=self.name, action="HOLD", confidence=0.3,
                                reasoning="Insufficient data")
+        # 1) News-driven LLM sentiment, cached in Redis by the sentiment-service.
+        sig = await self._cached_news_signal(symbol)
+        if sig is not None:
+            return sig
+        # 2) Fallback (cold start / off-watchlist): rule-based price trend.
+        return self._rule_based(candles)
+
+    async def _cached_news_signal(self, symbol: str) -> AgentSignal | None:
         try:
-            return await asyncio.wait_for(
-                self._llm_sentiment(symbol, candles, context), timeout=8.0
-            )
+            from app.utils.redis_client import cache_get
+            raw = await cache_get(f"ai_engine:sentiment:{symbol.upper()}")
+            if not raw:
+                return None
+            d = json.loads(raw)
         except Exception as exc:
-            logger.debug("Sentiment LLM skipped (%s) — using rule-based fallback", exc)
-            return self._rule_based(candles)
+            logger.debug("news sentiment read failed for %s: %s", symbol, exc)
+            return None
 
-    async def _llm_sentiment(self, symbol: str, candles: list[dict], context: dict) -> AgentSignal:
-        from app.utils.llm_client import llm_chat
+        # If the worker found no news, don't override the price fallback.
+        if int(d.get("headlines_count", 0)) <= 0:
+            return None
 
-        recent      = candles[-10:]
-        price_chg   = (recent[-1]["close"] - recent[0]["close"]) / recent[0]["close"] * 100
-        cur_price   = recent[-1]["close"]
-        high_10     = max(c["high"] for c in recent)
-        low_10      = min(c["low"]  for c in recent)
-        position    = context.get("position", "NONE")
-
-        # Pull any cached news/market sentiment for this symbol (written off the
-        # hot path by the sentiment worker). When present this is what makes the
-        # signal genuinely independent of price; when absent the LLM still reasons
-        # over the price context below.
-        news_ctx = context.get("news_summary") or ""
-
-        prompt = f"""You are a concise quantitative trading analyst. Analyze {symbol}:
-
-- 10-candle price change: {price_chg:+.2f}%
-- Current price: {cur_price:.2f}
-- 10-bar high/low: {high_10:.2f} / {low_10:.2f}
-- Current position: {position}
-{("- Recent news/sentiment: " + news_ctx) if news_ctx else ""}
-
-Respond with EXACTLY this JSON (nothing else):
-{{"action":"BUY","confidence":0.65,"reasoning":"brief reason under 15 words"}}
-
-Rules: action must be BUY/SELL/HOLD, confidence 0.0-1.0."""
-
-        content = await llm_chat(prompt, temperature=0.1, max_tokens=120, timeout=8.0)
-        if not content:
-            raise ValueError("LLM unavailable")
-        match = re.search(r"\{[^{}]+\}", content)
-        if not match:
-            raise ValueError("No JSON in LLM response")
-        data = json.loads(match.group())
-
-        action     = data.get("action", "HOLD").upper()
+        action = str(d.get("action", "HOLD")).upper()
         if action not in ("BUY", "SELL", "HOLD"):
             action = "HOLD"
-        confidence = float(max(0.10, min(0.95, data.get("confidence", 0.50))))
-
+        confidence = float(max(0.10, min(0.95, d.get("confidence", 0.50))))
         return AgentSignal(
             agent_name=self.name, action=action, confidence=confidence,
-            reasoning=str(data.get("reasoning", "LLM analysis")),
-            indicators={"price_change_10c": round(price_chg, 3), "source": "llm"},
+            reasoning=str(d.get("summary", "News sentiment"))[:160],
+            indicators={
+                "source": "news_llm",
+                "sentiment": d.get("sentiment"),
+                "score": d.get("score"),
+                "catalyst": d.get("catalyst"),
+                "headlines": d.get("headlines_count"),
+                "provider": d.get("provider"),
+            },
         )
 
     @staticmethod

@@ -460,6 +460,32 @@ services:
     networks:
       - stock-prediction-network
 
+  # ── Sentiment Service (LLM news sentiment → independent ensemble signal) ─────
+
+  sentiment-service:
+    build:
+      context: ./sentiment-service
+      dockerfile: Dockerfile
+    container_name: stock-prediction-sentiment
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      # LLM provider (same auto-selection as the backend)
+      LLM_PROVIDER: ${LLM_PROVIDER:-auto}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-haiku-4-5-20251001}
+      LLM_MODEL: ${OLLAMA_MODEL:-llama3.2}
+      LLM_API_URL: http://host.docker.internal:11434
+      SENTIMENT_INTERVAL: "1800"     # refresh watchlist news every 30 min
+      SENTIMENT_TTL: "5400"          # a signal stays valid 90 min
+    ports:
+      - "8016:8016"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - stock-prediction-network
+
   # ── Phase 2 (cont): Model Trainer ────────────────────────────────────────────
 
   model-trainer:
