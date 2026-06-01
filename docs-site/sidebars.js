@@ -30,6 +30,7 @@ const sidebars = {
       items: [
         'ai-engine/learning-loop',
         'ai-engine/watchlist-autopilot',
+        'ai-engine/llm-provider',
         'ai-engine/live-sessions',
         'ai-engine/data-providers',
       ],
@@ -68,6 +69,7 @@ const sidebars = {
         'microservices/risk-trade',
         'microservices/feedback-trainer',
         'microservices/stock-scanner',
+        'microservices/sentiment-service',
       ],
     },
     {

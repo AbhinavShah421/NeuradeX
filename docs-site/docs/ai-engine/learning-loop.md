@@ -24,7 +24,7 @@ paper-trade, the more accurate future predictions become.
 | `pattern` | Candlestick / price-shape patterns |
 | `momentum` | Multi-bar rate-of-change |
 | `volatility` | ATR regime + a risk score (can force HOLD) |
-| `sentiment` | Momentum-derived sentiment proxy |
+| `sentiment` | **LLM news sentiment** — reads the [sentiment-service](../microservices/sentiment-service.md) signal (Google-News + LLM); the only price-independent agent |
 | `rl` | Q-learning policy (108-state table in Redis) |
 | `memory` | **Case-based reasoning** over historical outcomes |
 

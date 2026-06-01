@@ -19,6 +19,9 @@ sidebar_position: 2
 | `ai_engine:watchlist:premarket:{date}` | stock-scanner | stock-scanner (eval) | 3 d | Morning snapshot graded after close |
 | `ai_engine:scan_calibration` | stock-scanner | stock-scanner | 120 d | Learned per-action confidence multipliers |
 | `ai_engine:scan_eval:latest` / `:{date}` | stock-scanner | backend `/scan-evaluation` | 30–90 d | Post-market signal-score grade |
-| `ai_engine:autopilot_enabled` | backend/autopilot | backend/autopilot | 30 d | Autopilot ON/OFF flag |
-| `ai_engine:autopilot:started:{date}` | backend/autopilot | backend/autopilot | 2 d | Symbols autopilot has opened today (one-per-day guard) |
+| `ai_engine:autopilot_enabled` | backend / autopilot-service | autopilot-service | 30 d | Paper autopilot ON/OFF flag |
+| `ai_engine:autopilot_backtest_enabled` | backend / autopilot-service | autopilot-service | 30 d | Backtest autopilot ON/OFF flag |
+| `ai_engine:autopilot_backtest_state` | autopilot-service | autopilot-service, backend status | 30 d | Backtest cursor day, queue, days trained |
+| `ai_engine:autopilot:started:{date}` | autopilot-service | autopilot-service | 2 d | Symbols paper autopilot opened today (one-per-day guard) |
+| `ai_engine:sentiment:{SYMBOL}` | sentiment-service | backend `sentiment` agent | 90 min | LLM news-sentiment signal |
 | `session:{id}` (session store) | backend/sessions | backend/sessions, runner loop | — | Server-side live/paper session state |
