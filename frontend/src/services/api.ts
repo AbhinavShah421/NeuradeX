@@ -729,6 +729,25 @@ class ApiService {
     return response.data;
   }
 
+  // Market-data providers (Groww, Yahoo, Alpha Vantage, …) and their availability
+  async getDataProviders(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/backtest/providers');
+    return response.data;
+  }
+
+  // Settings — provider configuration (auth required)
+  async getProviderSettings(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/settings/providers');
+    return response.data;
+  }
+
+  async updateProviderSettings(payload: {
+    order?: string[]; disabled?: string[]; keys?: Record<string, string>;
+  }): Promise<ApiResponse<any>> {
+    const response = await this.api.put('/api/settings/providers', payload);
+    return response.data;
+  }
+
   // Microservice health — backend proxies checks on the Docker network
   async getServicesHealth(): Promise<ApiResponse<any>> {
     const response = await this.api.get('/api/agent/services/health');

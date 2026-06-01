@@ -13,7 +13,7 @@ from app.config import settings
 from app.database.mongodb import init_mongodb, close_mongodb
 from app.database.postgres import init_postgres, close_postgres
 from app.utils.redis_client import init_redis, close_redis
-from app.api import stocks, predictions, portfolio, risk, orders, agent, backtest, auth, paper_trading, ai_engine, mlflow_proxy, sessions
+from app.api import stocks, predictions, portfolio, risk, orders, agent, backtest, auth, paper_trading, ai_engine, mlflow_proxy, sessions, user_settings
 from app.websocket.socket_manager import sio
 from app.ml_core.initializer import initialize_ml_models
 from app.utils.groww_client import init_groww_client
@@ -143,6 +143,7 @@ app.include_router(paper_trading.router, prefix="/api/paper-trading", tags=["pap
 app.include_router(ai_engine.router, prefix="/api/ai-engine", tags=["ai-engine"])
 app.include_router(mlflow_proxy.router, prefix="/api/mlflow", tags=["mlflow"])
 app.include_router(sessions.router, prefix="/api/sessions", tags=["sessions"])
+app.include_router(user_settings.router, prefix="/api/settings", tags=["settings"])
 
 # Socket.IO ASGI app
 app_sio = socketio.ASGIApp(sio, app)

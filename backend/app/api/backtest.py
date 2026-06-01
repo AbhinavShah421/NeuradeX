@@ -220,23 +220,11 @@ class BacktestRequest(BaseModel):
 
 
 async def _fetch_candles(symbol: str, start: datetime, end: datetime) -> tuple[list[dict], str]:
-    groww = get_groww_client()
-    if groww:
-        try:
-            logger.info(
-                "Calling Groww get_historical for backtest",
-                extra={"log_type": "groww_call", "caller": "backtest._fetch_candles", "method": "get_historical", "symbol": symbol, "interval_minutes": 1440},
-            )
-            raw = await groww.get_historical(symbol, 1440, start, end)
-            if raw and len(raw) > 10:
-                candles = parse_candles(raw)
-                if candles:
-                    return candles, "groww"
-        except Exception as exc:
-            logger.warning(
-                "Groww candles fetch failed, using simulation",
-                extra={"log_type": "backtest_event", "event": "candles_fallback", "symbol": symbol, "error": str(exc)},
-            )
+    # Try every configured data provider (Groww → Yahoo → Alpha Vantage), then simulate
+    from app.data.providers import fetch_daily
+    candles, source = await fetch_daily(symbol, start, end)
+    if candles and len(candles) > 10:
+        return candles, source
     return simulate_daily_candles(symbol, start, end, initial_factor=random.uniform(0.60, 0.80)), "simulated"
 
 
@@ -439,6 +427,13 @@ def _run_engine(candles: list[dict], strategy: str, params: dict,
 @router.get("/strategies")
 async def get_strategies():
     return {"status": "success", "data": STRATEGIES}
+
+
+@router.get("/providers")
+async def get_data_providers():
+    """List configured market-data providers and whether each is currently usable."""
+    from app.data.providers import list_status
+    return {"status": "success", "data": await list_status()}
 
 
 @router.post("/run")
@@ -1088,9 +1083,9 @@ async def day_autopilot(req: DayAutopilotRequest):
 
 def _no_real_intraday_msg(symbol: str, date: str) -> str:
     return (
-        f"No real Groww intraday data for {symbol} on {date}. Groww only serves "
-        f"5-min intraday history for recent trading days (roughly the last 2–3 months), "
-        f"and this may also be a market holiday. Pick a recent weekday — e.g. the last "
+        f"No real intraday data for {symbol} on {date} from any provider "
+        f"(Groww / Yahoo / Alpha Vantage). This is usually a market holiday or a date "
+        f"outside the providers' intraday history. Pick a recent weekday — e.g. the last "
         f"few trading days — or try a more liquid stock."
     )
 
@@ -1110,46 +1105,15 @@ async def get_intraday_candles(
     except ValueError:
         raise HTTPException(400, "date must be YYYY-MM-DD")
 
-    candles, data_source = None, "simulated"
-    groww = get_groww_client()
-    if groww:
-        try:
-            trade_date = datetime.strptime(date, "%Y-%m-%d")
-            logger.info(
-                "Calling Groww get_historical for intraday candles",
-                extra={"log_type": "groww_call", "caller": "backtest.get_intraday_candles", "method": "get_historical", "symbol": symbol, "date": date, "interval_minutes": 5},
-            )
-            raw = await groww.get_historical(
-                symbol, 5,
-                trade_date,
-                trade_date.replace(hour=23, minute=59),
-            )
-            if raw and len(raw) > 30:
-                parsed = []
-                for c in raw:
-                    if isinstance(c, list) and len(c) >= 6:
-                        ts = int(c[0])
-                        dt_ist = datetime.fromtimestamp(ts, tz=IST)
-                        parsed.append({
-                            "time":      dt_ist.strftime("%H:%M"),
-                            "timestamp": ts,
-                            "open":  float(c[1]), "high": float(c[2]),
-                            "low":   float(c[3]), "close": float(c[4]),
-                            "volume": int(c[5]),
-                        })
-                if parsed:
-                    candles = parsed
-                    data_source = "groww"
-        except Exception as exc:
-            logger.warning(
-                "Groww intraday fetch failed, using simulation",
-                extra={"log_type": "backtest_event", "event": "intraday_fallback", "error": str(exc)},
-            )
+    # Try every configured provider (Groww → Yahoo → Alpha Vantage)
+    from app.data.providers import fetch_intraday
+    candles, data_source = await fetch_intraday(symbol, date, 5)
 
     if not candles:
         if real_only:
             raise HTTPException(422, _no_real_intraday_msg(symbol, date))
         candles = _simulate_intraday_5min(symbol, date)
+        data_source = "simulated"
 
     return {
         "status": "success",
@@ -1260,52 +1224,15 @@ def _minutes_to_time(minutes: int) -> str:
 
 async def _fetch_candles_up_to(symbol: str, date_str: str, up_to_time: str) -> tuple[list[dict], str]:
     """Fetch 5-min candles from market open up to up_to_time (HH:MM inclusive)."""
-    date = datetime.strptime(date_str, "%Y-%m-%d")
     up_to_minutes = _time_to_minutes(up_to_time)
 
-    groww = get_groww_client()
-    if groww:
-        try:
-            logger.info(
-                "Calling Groww get_historical for progressive step",
-                extra={
-                    "log_type": "groww_call",
-                    "caller": "backtest.progressive",
-                    "method": "get_historical",
-                    "symbol": symbol,
-                    "date": date_str,
-                    "up_to_time": up_to_time,
-                    "interval_minutes": 5,
-                },
-            )
-            raw = await groww.get_historical(symbol, 5, date, date.replace(hour=23, minute=59))
-            if raw and len(raw) >= 1:
-                parsed = []
-                for c in raw:
-                    if isinstance(c, list) and len(c) >= 6:
-                        ts = int(c[0])
-                        dt_ist = datetime.fromtimestamp(ts, tz=IST)
-                        candle_minutes = dt_ist.hour * 60 + dt_ist.minute
-                        if candle_minutes <= up_to_minutes:
-                            parsed.append({
-                                "time":      dt_ist.strftime("%H:%M"),
-                                "timestamp": ts,
-                                "open":  float(c[1]), "high": float(c[2]),
-                                "low":   float(c[3]), "close": float(c[4]),
-                                "volume": int(c[5]),
-                            })
-                if parsed:
-                    return parsed, "groww"
-        except Exception as exc:
-            logger.warning(
-                "Groww historical fetch failed for progressive step, using simulation",
-                extra={
-                    "log_type": "backtest_event",
-                    "event": "progressive_fallback",
-                    "symbol": symbol,
-                    "error": str(exc),
-                },
-            )
+    # Try every configured provider (Groww → Yahoo → Alpha Vantage), then slice
+    from app.data.providers import fetch_intraday
+    candles, source = await fetch_intraday(symbol, date_str, 5)
+    if candles:
+        sliced = [c for c in candles if _time_to_minutes(c["time"]) <= up_to_minutes]
+        if sliced:
+            return sliced, source
 
     all_candles = _simulate_intraday_5min(symbol, date_str)
     sliced = [c for c in all_candles if _time_to_minutes(c["time"]) <= up_to_minutes]
@@ -1321,32 +1248,13 @@ def _prev_trading_day(d: datetime) -> datetime:
 
 
 async def _fetch_full_day_candles(symbol: str, date_str: str) -> list[dict]:
-    """Fetch the complete trading-day candles for a past date (background display only).
+    """Fetch the complete trading-day candles for a date from any real provider.
     Returns empty list silently on any failure — callers must tolerate missing data.
     """
-    date = datetime.strptime(date_str, "%Y-%m-%d")
-    groww = get_groww_client()
-    if not groww:
-        return []
     try:
-        raw = await groww.get_historical(symbol, 5, date, date.replace(hour=23, minute=59))
-        if not raw:
-            return []
-        parsed = []
-        for c in raw:
-            if isinstance(c, list) and len(c) >= 6:
-                ts = int(c[0])
-                dt_ist = datetime.fromtimestamp(ts, tz=IST)
-                m = dt_ist.hour * 60 + dt_ist.minute
-                if _MARKET_OPEN_MINUTES <= m <= _SQUAREOFF_MINUTES:
-                    parsed.append({
-                        "time":      dt_ist.strftime("%H:%M"),
-                        "timestamp": ts,
-                        "open":  float(c[1]), "high": float(c[2]),
-                        "low":   float(c[3]), "close": float(c[4]),
-                        "volume": int(c[5]),
-                    })
-        return parsed
+        from app.data.providers import fetch_intraday
+        candles, source = await fetch_intraday(symbol, date_str, 5)
+        return candles if source != "simulated" else []
     except Exception:
         return []
 
@@ -1422,7 +1330,7 @@ async def progressive_start(req: ProgressiveStartRequest):
     candles, data_source = await _fetch_candles_up_to(symbol, req.date, start_time_str)
     if not candles:
         raise HTTPException(500, "Could not fetch candle data")
-    if req.real_only and data_source != "groww":
+    if req.real_only and data_source in ("simulated", "none"):
         raise HTTPException(422, _no_real_intraday_msg(symbol, req.date))
 
     # Fetch previous trading day's full candles for background chart display only.
@@ -1537,7 +1445,7 @@ async def progressive_step(req: ProgressiveStepRequest):
     candles, data_source = await _fetch_candles_up_to(symbol, req.date, next_time_str)
     if not candles:
         raise HTTPException(500, "Could not fetch candle data")
-    if req.real_only and data_source != "groww":
+    if req.real_only and data_source in ("simulated", "none"):
         raise HTTPException(422, _no_real_intraday_msg(symbol, req.date))
 
     model       = req.model or getattr(settings, "LLM_MODEL", "llama3.2")
