@@ -418,11 +418,11 @@ const LearningCurveCard: React.FC = () => {
 
   const W = 600, H = 160, PL = 36, PR = 12, PT = 12, PB = 22;
   const xs = pts.map((_, i) => i);
-  const ys = pts.map(p => p.cum_win_rate * 100);
+  const ys = pts.map(p => p.cumWinRate * 100);
   const yMin = Math.max(0, Math.min(...ys) - 5), yMax = Math.min(100, Math.max(...ys) + 5);
   const sx = (i: number) => PL + (i / (xs.length - 1)) * (W - PL - PR);
   const sy = (v: number) => PT + (1 - (v - yMin) / (yMax - yMin || 1)) * (H - PT - PB);
-  const line = pts.map((p, i) => `${sx(i).toFixed(1)},${sy(p.cum_win_rate * 100).toFixed(1)}`).join(' ');
+  const line = pts.map((p, i) => `${sx(i).toFixed(1)},${sy(p.cumWinRate * 100).toFixed(1)}`).join(' ');
   const last = pts[pts.length - 1];
 
   return (
@@ -433,8 +433,8 @@ const LearningCurveCard: React.FC = () => {
           <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>Cumulative win-rate as the AI accumulates experience from every trade</div>
         </div>
         <div style={{ textAlign: 'right' }}>
-          <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--nd-green)' }}>{(last.cum_win_rate * 100).toFixed(1)}%</div>
-          <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>{data.total_trades} trades</div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--nd-green)' }}>{(last.cumWinRate * 100).toFixed(1)}%</div>
+          <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>{data.totalTrades} trades</div>
         </div>
       </div>
       <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 150 }} preserveAspectRatio="none">
@@ -445,7 +445,7 @@ const LearningCurveCard: React.FC = () => {
           </g>
         ))}
         <polyline points={line} fill="none" stroke="var(--nd-green)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-        <circle cx={sx(pts.length - 1)} cy={sy(last.cum_win_rate * 100)} r="3.5" fill="var(--nd-green)" />
+        <circle cx={sx(pts.length - 1)} cy={sy(last.cumWinRate * 100)} r="3.5" fill="var(--nd-green)" />
       </svg>
     </div>
   );
