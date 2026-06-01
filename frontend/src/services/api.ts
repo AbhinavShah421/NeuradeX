@@ -729,6 +729,12 @@ class ApiService {
     return response.data;
   }
 
+  // Market-data providers (Groww, Yahoo, Alpha Vantage, …) and their availability
+  async getDataProviders(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/backtest/providers');
+    return response.data;
+  }
+
   // Microservice health — backend proxies checks on the Docker network
   async getServicesHealth(): Promise<ApiResponse<any>> {
     const response = await this.api.get('/api/agent/services/health');
