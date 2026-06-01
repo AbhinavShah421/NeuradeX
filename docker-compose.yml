@@ -171,6 +171,12 @@ services:
       INFLUXDB_HOST: influxdb
       LLM_API_URL: http://host.docker.internal:11434
       ELASTICSEARCH_URL: http://elasticsearch:9200
+      # LLM provider — "auto" uses Anthropic when ANTHROPIC_API_KEY is set on the
+      # host (or in backend/.env), otherwise falls back to Ollama.
+      LLM_PROVIDER: ${LLM_PROVIDER:-auto}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-haiku-4-5-20251001}
+      LLM_MODEL: ${OLLAMA_MODEL:-llama3.2}
     ports:
       - "8000:8000"
     volumes:

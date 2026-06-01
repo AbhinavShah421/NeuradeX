@@ -62,8 +62,19 @@ class Settings(BaseSettings):
     RABBITMQ_PASSWORD: str = "guest"
     RABBITMQ_URL: str = ""
 
-    # LLM Settings — Ollama runs on the host machine; host.docker.internal reaches it from Docker
-    LLM_MODEL: str = "llama3.2"
+    # LLM Settings
+    # Provider selection: "auto" uses Anthropic when ANTHROPIC_API_KEY is set,
+    # otherwise falls back to Ollama. Force one with "anthropic" / "ollama", or
+    # disable LLM entirely with "off".
+    LLM_PROVIDER: str = "auto"          # auto | anthropic | ollama | off
+
+    # Anthropic (Claude) — used when a key is present
+    ANTHROPIC_API_KEY: str = ""
+    ANTHROPIC_MODEL: str = "claude-haiku-4-5-20251001"
+    ANTHROPIC_BASE_URL: str = "https://api.anthropic.com"
+
+    # Ollama (local) — runs on the host; host.docker.internal reaches it from Docker
+    LLM_MODEL: str = "llama3.2"          # ollama model
     LLM_API_URL: str = "http://host.docker.internal:11434"
     LLM_MAX_TOKENS: int = 512
     LLM_TEMPERATURE: float = 0.7

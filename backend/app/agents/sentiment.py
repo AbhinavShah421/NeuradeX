@@ -25,8 +25,7 @@ class SentimentAgent(BaseAgent):
             return self._rule_based(candles)
 
     async def _llm_sentiment(self, symbol: str, candles: list[dict], context: dict) -> AgentSignal:
-        import ollama
-        from app.config import settings
+        from app.utils.llm_client import llm_chat
 
         recent      = candles[-10:]
         price_chg   = (recent[-1]["close"] - recent[0]["close"]) / recent[0]["close"] * 100
@@ -35,28 +34,29 @@ class SentimentAgent(BaseAgent):
         low_10      = min(c["low"]  for c in recent)
         position    = context.get("position", "NONE")
 
+        # Pull any cached news/market sentiment for this symbol (written off the
+        # hot path by the sentiment worker). When present this is what makes the
+        # signal genuinely independent of price; when absent the LLM still reasons
+        # over the price context below.
+        news_ctx = context.get("news_summary") or ""
+
         prompt = f"""You are a concise quantitative trading analyst. Analyze {symbol}:
 
 - 10-candle price change: {price_chg:+.2f}%
 - Current price: {cur_price:.2f}
 - 10-bar high/low: {high_10:.2f} / {low_10:.2f}
 - Current position: {position}
+{("- Recent news/sentiment: " + news_ctx) if news_ctx else ""}
 
 Respond with EXACTLY this JSON (nothing else):
 {{"action":"BUY","confidence":0.65,"reasoning":"brief reason under 15 words"}}
 
-Rules: action must be BUY/SELL/HOLD, confidence 0.0–1.0."""
+Rules: action must be BUY/SELL/HOLD, confidence 0.0-1.0."""
 
-        model   = getattr(settings, "LLM_MODEL", "llama3.2")
-        resp    = await asyncio.to_thread(
-            lambda: ollama.chat(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                options={"temperature": 0.1},
-            )
-        )
-        content = resp.get("message", {}).get("content", "{}")
-        match   = re.search(r"\{[^{}]+\}", content)
+        content = await llm_chat(prompt, temperature=0.1, max_tokens=120, timeout=8.0)
+        if not content:
+            raise ValueError("LLM unavailable")
+        match = re.search(r"\{[^{}]+\}", content)
         if not match:
             raise ValueError("No JSON in LLM response")
         data = json.loads(match.group())
