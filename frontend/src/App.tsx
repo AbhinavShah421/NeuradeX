@@ -14,7 +14,6 @@ import AIAgent from './pages/AIAgent';
 import Backtest from './pages/Backtest';
 import PaperTrading from './pages/PaperTrading';
 import PatternMemory from './pages/PatternMemory';
-import LiveSessions from './pages/LiveSessions';
 import ModelRegistry from './pages/ModelRegistry';
 import Orders from './pages/Orders';
 import Settings from './pages/Settings';
@@ -46,7 +45,6 @@ const App: React.FC = () => {
                     <Route path="agents" element={<AIAgent />} />
                     <Route path="backtest" element={<Backtest />} />
                     <Route path="paper-trading" element={<PaperTrading />} />
-                    <Route path="sessions" element={<LiveSessions />} />
                     <Route path="memory" element={<PatternMemory />} />
                   </Route>
 
