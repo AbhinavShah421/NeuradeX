@@ -496,22 +496,40 @@ const WatchlistEvidence: React.FC<{ stock: any; scannedAt?: string; onClose: () 
       </div>
       <div style={{ padding: '14px 20px' }}>
         <p style={{ margin: '0 0 12px', fontSize: 12.5, color: 'var(--nd-text-2)', lineHeight: 1.6 }}>
-          Why the AI picked this: the 7-agent ensemble analysed real daily candles and reached a
+          Why the AI picked this for <strong>intraday</strong>: the scanner judged a
           <strong> {stock.action}</strong> view at <strong>{(stock.confidence * 100).toFixed(0)}%</strong> confidence
-          with <strong>{(stock.agreement * 100).toFixed(0)}%</strong> agreement (score {stock.score}).
+          (intraday-fit score {stock.score}). Only stocks that clear the liquidity + volatility bar make the list.
         </p>
         <div style={{ fontSize: 12, color: 'var(--nd-text-3)', background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 8, padding: '8px 12px', marginBottom: 12 }}>{stock.reasoning}</div>
-        <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--nd-text-3)', marginBottom: 8 }}>AGENT BREAKDOWN</div>
-        {(stock.agents ?? []).map((a: any) => (
-          <div key={a.agent} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: '1px solid var(--nd-border)' }}>
-            <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--nd-text-1)', textTransform: 'capitalize', width: 84 }}>{a.agent}</span>
-            <span style={{ fontSize: 11, fontWeight: 700, color: ACTION_BG[a.action] ?? 'var(--nd-text-2)', width: 40 }}>{a.action}</span>
-            <span style={{ fontSize: 11, color: 'var(--nd-text-3)', width: 40 }}>{(a.confidence * 100).toFixed(0)}%</span>
-            <span style={{ fontSize: 11, color: 'var(--nd-text-3)', flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.reasoning}</span>
-          </div>
-        ))}
+        {stock.metrics && (<>
+          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--nd-text-3)', marginBottom: 8 }}>INTRADAY-FIT EVIDENCE</div>
+          {[
+            ['Avg daily volume', `${(stock.metrics.avgVolume / 1e6).toFixed(2)}M`],
+            ['Volatility (ATR)', `${stock.metrics.atrPct}%`],
+            ['Avg daily range', `${stock.metrics.rangePct}%`],
+            ['RSI (14)', `${stock.metrics.rsi}`],
+            ['Momentum (10d)', `${stock.metrics.momentumPct >= 0 ? '+' : ''}${stock.metrics.momentumPct}%`],
+            ['Liquidity score', `${(stock.metrics.liquidityScore * 100).toFixed(0)}%`],
+            ['Volatility score', `${(stock.metrics.volatilityScore * 100).toFixed(0)}%`],
+          ].map(([k, v]) => (
+            <div key={k} style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 0', borderBottom: '1px solid var(--nd-border)', fontSize: 12 }}>
+              <span style={{ color: 'var(--nd-text-3)' }}>{k}</span>
+              <span style={{ color: 'var(--nd-text-1)', fontWeight: 600 }}>{v}</span>
+            </div>
+          ))}
+        </>)}
+        {Array.isArray(stock.agents) && stock.agents.length > 0 && (<>
+          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--nd-text-3)', margin: '12px 0 8px' }}>AGENT BREAKDOWN</div>
+          {stock.agents.map((a: any) => (
+            <div key={a.agent} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: '1px solid var(--nd-border)' }}>
+              <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--nd-text-1)', textTransform: 'capitalize', width: 84 }}>{a.agent}</span>
+              <span style={{ fontSize: 11, fontWeight: 700, color: ACTION_BG[a.action] ?? 'var(--nd-text-2)', width: 40 }}>{a.action}</span>
+              <span style={{ fontSize: 11, color: 'var(--nd-text-3)', flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.reasoning}</span>
+            </div>
+          ))}
+        </>)}
         <div style={{ marginTop: 12, fontSize: 11, color: 'var(--nd-text-3)' }}>
-          Live model decision · scanned {scannedAt ? new Date(scannedAt).toLocaleString() : ''}. No hard-coded values.
+          Live scan from the stock-scanner service · {scannedAt ? new Date(scannedAt).toLocaleString() : ''}. No hard-coded values.
         </div>
       </div>
     </div>

@@ -399,6 +399,28 @@ services:
     networks:
       - stock-prediction-network
 
+  # ── Stock Scanner: continuous intraday market sweep → AI watchlist ───────────
+
+  stock-scanner:
+    build:
+      context: ./stock-scanner
+      dockerfile: Dockerfile
+    container_name: stock-prediction-stock-scanner
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      SCAN_INTERVAL: "1200"
+      SCAN_MIN_VOLUME: "300000"
+      SCAN_MIN_ATR_PCT: "1.2"
+      SCAN_TOP_N: "15"
+    ports:
+      - "8014:8014"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - stock-prediction-network
+
   # ── Phase 2 (cont): Model Trainer ────────────────────────────────────────────
 
   model-trainer:

@@ -195,18 +195,30 @@ async def learning_summary():
 
 @router.get("/watchlist")
 async def get_watchlist():
-    """The live AI-selected watchlist with full evidence per stock."""
-    from app.agents.market_scanner import get_watchlist as _gw
-    return {"status": "success", "data": await _gw()}
+    """The live AI watchlist produced by the stock-scanner service (read from Redis)."""
+    import json
+    from app.utils.redis_client import cache_get
+    try:
+        raw = await cache_get("ai_engine:watchlist")
+        if raw:
+            return {"status": "success", "data": json.loads(raw)}
+    except Exception as exc:
+        logger.debug("watchlist read failed: %s", exc)
+    return {"status": "success", "data": {"updated_at": None, "scanned": 0, "universe": 0, "items": []}}
 
 
 @router.post("/watchlist/scan")
 async def scan_watchlist():
-    """Trigger an immediate market rescan (also runs every 30 min in the background)."""
-    from app.agents.market_scanner import scan_market
-    import asyncio
-    asyncio.create_task(scan_market())
-    return {"status": "started"}
+    """Ask the stock-scanner microservice to run an immediate full market sweep."""
+    import httpx
+    from app.config import settings
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(f"{settings.SCANNER_SERVICE_URL}/scan")
+        return {"status": "started"}
+    except Exception as exc:
+        logger.warning("could not trigger scanner: %s", exc)
+        return {"status": "error", "detail": str(exc)}
 
 
 # ── Autopilot ─────────────────────────────────────────────────────────────────
