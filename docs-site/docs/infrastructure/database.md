@@ -17,6 +17,11 @@ Connection: `postgres:5432` · DB: `stock_prediction_db`
 | `trade_records` | feedback-service | backend/predictions.py, model-trainer | `trade_id, symbol, entry_price, exit_price, pnl_pct, pnl_abs, outcome, agent_signals, market_context, timestamp_open, timestamp_close, trade_source` |
 | `rl_experiences` | feedback-service | model-trainer | `symbol, state, action, reward, next_state, done` |
 | `agent_weights` | feedback-service | ensemble-engine | `agent, weight, updated_at` |
+| `ai_engine_predictions` | backend/ai_engine.py | backend (learning) | `prediction_id, action, confidence, agent_signals, rl_state, fingerprint, final_action` |
+| `ai_engine_outcomes` | backend/ai_engine.py | backend/predictions.py | `prediction_id, symbol, entry_price, exit_price, pnl, pnl_pct, reward, outcome, created_at` |
+| `ai_engine_agent_weights` | backend (learning) | backend/ensemble | `agent_name, weight, total_predictions, correct_predictions, total_reward` |
+| `pattern_memory` | backend (memory) | backend/memory | Fingerprint cases: `action, pnl_pct, regime, source` |
+| `scan_evaluations` | backend/ai_engine.py (`/scan-feedback`) | backend `/scan-evaluation` | `eval_date, symbol, action, predicted_confidence, predicted_signal_score, day_return_pct, realized_return_pct, correct` — the [stock-scanner](../microservices/stock-scanner.md)'s post-market signal-score grades |
 
 The `ohlcv` table is a **TimescaleDB hypertable** partitioned by `time` for fast time-series queries.
 

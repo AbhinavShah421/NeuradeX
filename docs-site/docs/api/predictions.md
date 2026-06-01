@@ -8,21 +8,28 @@ sidebar_position: 3
 
 **File:** [`backend/app/api/predictions.py`](https://github.com/AbhinavShah421/NeuradeX/blob/main/backend/app/api/predictions.py)
 
-| Method | Path | Line | Description |
-|---|---|---|---|
-| `GET` | `/api/predictions/{symbol}` | [34](https://github.com/AbhinavShah421/NeuradeX/blob/main/backend/app/api/predictions.py#L34) | Latest ensemble prediction — reads Redis `ensemble:{symbol}` |
-| `POST` | `/api/predictions/{symbol}/custom-analysis` | [107](https://github.com/AbhinavShah421/NeuradeX/blob/main/backend/app/api/predictions.py#L107) | Trigger on-demand analysis |
-| `GET` | `/api/predictions/{symbol}/history` | [156](https://github.com/AbhinavShah421/NeuradeX/blob/main/backend/app/api/predictions.py#L156) | Historical predictions from PostgreSQL |
-| `GET` | `/api/predictions/accuracy/stats` | [186](https://github.com/AbhinavShah421/NeuradeX/blob/main/backend/app/api/predictions.py#L186) | Win-rate and accuracy metrics |
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/predictions/{symbol}` | **Real** technical prediction for a stock (see below) |
+| `POST` | `/api/predictions/{symbol}/custom-analysis` | On-demand deeper analysis |
+| `GET` | `/api/predictions/{symbol}/history` | Historical predictions from PostgreSQL |
+| `GET` | `/api/predictions/accuracy/stats` | **Real** win-rate / accuracy from `trade_records` + `ai_engine_outcomes` (win-rate, avg return, Sharpe, max drawdown, by-source) |
 
-## Cache Behaviour
+## How `GET /predictions/{symbol}` is computed
+
+The prediction is computed from **live technicals — no random values**:
 
 ```
 GET /predictions/{symbol}
-  └─ Redis GET ensemble:{symbol}
-       ├─ HIT  → return cached decision (set by ensemble-engine, TTL 300s)
-       └─ MISS → return last known from PostgreSQL or trigger custom-analysis
+  ├─ on the AI watchlist today?  → reuse the scanner's fresh analysis
+  │                                 (source: "scanner", real Yahoo-derived metrics)
+  └─ otherwise → fetch real daily candles (Groww → simulated fallback) and derive
+                 direction from a weighted vote over RSI, 20/50-SMA trend,
+                 10-bar momentum and ATR; target/stop sized from ATR
 ```
+
+The response includes the computed `indicators` block (RSI, SMA20/50, momentum,
+ATR%) and a `source` of `scanner` or a fresh technical compute.
 
 ## Response Example
 
