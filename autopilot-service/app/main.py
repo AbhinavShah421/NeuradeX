@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from .autopilot import paper_loop, backtest_loop, status, set_mode
+from .autopilot import paper_loop, backtest_loop, status, set_mode, kick
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("autopilot")
@@ -50,4 +50,7 @@ async def get_status():
 async def control(req: ControlRequest):
     mode = req.mode if req.mode in ("paper", "backtest") else "paper"
     await set_mode(mode, req.enabled)
+    if req.enabled:
+        # Start the first queue/tick immediately so the toggle feels instant.
+        asyncio.create_task(kick(mode))
     return {"status": "success", "data": await status()}
