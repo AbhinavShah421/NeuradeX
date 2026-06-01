@@ -117,6 +117,12 @@ class Settings(BaseSettings):
     SCANNER_SERVICE_URL: str = "http://stock-scanner:8014"
     AUTOPILOT_SERVICE_URL: str = "http://autopilot-service:8015"
 
+    # The agents are INTRADAY. The multi-day strategy backtester (SMA/MACD swing
+    # trades held for days/months) must NOT train the intraday ensemble weights/
+    # RL — that pollutes the learning signal. Intraday training comes from paper +
+    # replay sessions. Leave off unless you specifically want swing-trade training.
+    TRAIN_FROM_STRATEGY_BACKTEST: bool = False
+
     # Pattern-memory nightly refresh (replays real backtests to keep the bank fresh)
     MEMORY_SWEEP_ENABLED: bool = True
     MEMORY_SWEEP_HOUR_IST: int = 2        # run at ~02:00 IST (after market close)

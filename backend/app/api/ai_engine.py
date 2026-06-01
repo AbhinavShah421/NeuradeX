@@ -438,9 +438,13 @@ async def learning_curve():
     from sqlalchemy import text
     try:
         async with engine.begin() as conn:
+            # Intraday system → curve reflects intraday trades (paper/replay/live),
+            # not the multi-day strategy backtester.
             rows = (await conn.execute(text("""
                 SELECT outcome, pnl_pct, created_at FROM trade_records
-                WHERE outcome IN ('WIN','LOSS') ORDER BY created_at ASC, id ASC
+                WHERE outcome IN ('WIN','LOSS')
+                  AND COALESCE(trade_source,'LIVE') IN ('PAPER','REPLAY','LIVE')
+                ORDER BY created_at ASC, id ASC
             """))).fetchall()
     except Exception as exc:
         logger.warning("learning_curve failed: %s", exc)

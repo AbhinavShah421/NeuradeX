@@ -264,7 +264,7 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
                 market_context={"regime": "intraday", "vwap": ind.get("vwap"), "rsi": ind.get("rsi"),
                                 "session_mode": s["mode"], "session_id": s["id"]},
                 confidence=conf,
-                trade_source="PAPER" if s["mode"] == "paper" else "BACKTEST",
+                trade_source="PAPER" if s["mode"] == "paper" else "REPLAY",
             )]))
         except Exception:
             pass
