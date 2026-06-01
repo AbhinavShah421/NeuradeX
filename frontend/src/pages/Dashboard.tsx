@@ -334,6 +334,97 @@ const DirectoryTab: React.FC = () => {
   );
 };
 
+// ── Metric evidence modal ─────────────────────────────────────────────────────
+// Shows exactly how each headline number is derived from real stored data.
+
+const MetricModal: React.FC<{ cardId: string; stats: any; onClose: () => void }> = ({ cardId, stats, onClose }) => {
+  const pct = (v: number) => `${(v * 100).toFixed(1)}%`;
+  const Row: React.FC<{ k: string; v: React.ReactNode; c?: string }> = ({ k, v, c }) => (
+    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '9px 0', borderBottom: '1px solid var(--nd-border)', fontSize: 13 }}>
+      <span style={{ color: 'var(--nd-text-3)' }}>{k}</span>
+      <span style={{ color: c || 'var(--nd-text-1)', fontWeight: 600, textAlign: 'right' }}>{v}</span>
+    </div>
+  );
+
+  const META: Record<string, { title: string; icon: string; how: string; rows: () => React.ReactNode }> = {
+    accuracy: {
+      title: 'Model Accuracy', icon: 'psychology',
+      how: 'Share of the AI engine’s recorded predictions whose outcome was correct (from the agent learning loop). It rises as the agents learn from each backtest, paper trade and live session.',
+      rows: () => (<>
+        <Row k="Correct predictions" v={stats.correctPredictions} c="var(--nd-green)" />
+        <Row k="Total predictions" v={stats.totalPredictions} />
+        <Row k="Accuracy" v={pct(stats.accuracyRate)} c="var(--nd-green)" />
+      </>),
+    },
+    win: {
+      title: 'Win Rate', icon: 'emoji_events',
+      how: 'Share of closed trades that were profitable, computed from every recorded trade (Live, Paper, Backtest).',
+      rows: () => (<>
+        <Row k="Winning trades" v={stats.winningTrades} c="var(--nd-green)" />
+        <Row k="Losing trades" v={stats.losingTrades} c="var(--nd-red)" />
+        <Row k="Total closed trades" v={stats.totalTrades} />
+        <Row k="Win rate" v={pct(stats.winRate)} c="var(--nd-green)" />
+        {Array.isArray(stats.bySource) && stats.bySource.length > 0 && (
+          <div style={{ marginTop: 10 }}>
+            <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginBottom: 6 }}>By source</div>
+            {stats.bySource.map((b: any) => (
+              <Row key={b.source} k={`${b.source} (${b.trades})`} v={`${(b.winRate * 100).toFixed(1)}% · ${b.avgReturn >= 0 ? '+' : ''}${b.avgReturn}%`} />
+            ))}
+          </div>
+        )}
+      </>),
+    },
+    return: {
+      title: 'Average Return', icon: 'trending_up',
+      how: 'Mean P&L % across all closed trades. Best/worst show the spread the average is drawn from.',
+      rows: () => (<>
+        <Row k="Average return / trade" v={`${stats.averageReturn >= 0 ? '+' : ''}${stats.averageReturn}%`} c={stats.averageReturn >= 0 ? 'var(--nd-green)' : 'var(--nd-red)'} />
+        <Row k="Std deviation" v={`${stats.returnStd}%`} />
+        <Row k="Best trade" v={`+${stats.bestTradePct}%`} c="var(--nd-green)" />
+        <Row k="Worst trade" v={`${stats.worstTradePct}%`} c="var(--nd-red)" />
+        <Row k="Across" v={`${stats.totalTrades} trades`} />
+      </>),
+    },
+    sharpe: {
+      title: 'Sharpe Ratio', icon: 'analytics',
+      how: 'Risk-adjusted return = mean return ÷ standard deviation of returns (per trade). Higher means more consistent returns for the risk taken.',
+      rows: () => (<>
+        <Row k="Sharpe (mean ÷ std)" v={stats.sharpeRatio} c="var(--nd-purple)" />
+        <Row k="Mean return" v={`${stats.averageReturn}%`} />
+        <Row k="Return std" v={`${stats.returnStd}%`} />
+        <Row k="Max drawdown (₹)" v={`₹${stats.maxDrawdown?.toLocaleString('en-IN')}`} c="var(--nd-red)" />
+      </>),
+    },
+  };
+  const m = META[cardId];
+  if (!m) return null;
+
+  return (
+    <div onClick={e => { if (e.target === e.currentTarget) onClose(); }}
+      style={{ position: 'fixed', inset: 0, background: '#00000080', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 12 }}>
+      <div style={{ background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 16, width: '100%', maxWidth: 460, maxHeight: '88vh', overflow: 'auto', boxShadow: '0 24px 64px #00000060' }}>
+        <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--nd-border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span className="material-icons" style={{ color: 'var(--nd-green)' }}>{m.icon}</span>
+            <span style={{ fontSize: 16, fontWeight: 700, color: 'var(--nd-text-1)' }}>{m.title}</span>
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer' }}>
+            <span className="material-icons" style={{ color: 'var(--nd-text-3)', fontSize: 20 }}>close</span>
+          </button>
+        </div>
+        <div style={{ padding: '14px 20px' }}>
+          <p style={{ margin: '0 0 14px', fontSize: 12.5, lineHeight: 1.6, color: 'var(--nd-text-2)' }}>{m.how}</p>
+          {m.rows()}
+          <div style={{ marginTop: 14, fontSize: 11, color: 'var(--nd-text-3)', background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 8, padding: '8px 12px' }}>
+            Computed live from <strong>{stats.totalTrades}</strong> closed trades and <strong>{stats.totalPredictions}</strong> predictions — no hard-coded values.
+            {!stats.hasData && ' Run a backtest or session to start populating these.'}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ── Dashboard Page ────────────────────────────────────────────────────────────
 
 const Dashboard: React.FC = () => {
@@ -343,6 +434,7 @@ const Dashboard: React.FC = () => {
   const [error, setError]             = useState<string | null>(null);
   const [predictions, setPredictions] = useState<Record<string, Prediction>>({});
   const [accuracyStats, setAccuracyStats] = useState<any>(null);
+  const [selectedCard, setSelectedCard] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -364,10 +456,10 @@ const Dashboard: React.FC = () => {
   }, []);
 
   const STAT_CARDS = accuracyStats ? [
-    { label: 'Model Accuracy', value: `${(accuracyStats.accuracyRate * 100).toFixed(1)}%`, icon: 'psychology',    color: 'var(--nd-green)',  bg: 'var(--nd-green-50)' },
-    { label: 'Win Rate',       value: `${(accuracyStats.winRate * 100).toFixed(1)}%`,        icon: 'emoji_events', color: 'var(--nd-green)',  bg: 'var(--nd-green-50)' },
-    { label: 'Avg Return',     value: `${accuracyStats.averageReturn?.toFixed(2)}%`,          icon: 'trending_up',  color: 'var(--nd-blue)',   bg: '#e3f2fd'            },
-    { label: 'Sharpe Ratio',   value: accuracyStats.sharpeRatio?.toFixed(2),                  icon: 'analytics',    color: 'var(--nd-purple)', bg: '#f5f3ff'            },
+    { id: 'accuracy', label: 'Model Accuracy', value: `${(accuracyStats.accuracyRate * 100).toFixed(1)}%`, icon: 'psychology',    color: 'var(--nd-green)',  bg: 'var(--nd-green-50)' },
+    { id: 'win',      label: 'Win Rate',       value: `${(accuracyStats.winRate * 100).toFixed(1)}%`,        icon: 'emoji_events', color: 'var(--nd-green)',  bg: 'var(--nd-green-50)' },
+    { id: 'return',   label: 'Avg Return',     value: `${accuracyStats.averageReturn?.toFixed(2)}%`,          icon: 'trending_up',  color: 'var(--nd-blue)',   bg: '#e3f2fd'            },
+    { id: 'sharpe',   label: 'Sharpe Ratio',   value: accuracyStats.sharpeRatio?.toFixed(2),                  icon: 'analytics',    color: 'var(--nd-purple)', bg: '#f5f3ff'            },
   ] : [];
 
   return (
@@ -378,21 +470,29 @@ const Dashboard: React.FC = () => {
         <p className="nd-page-sub">Real-time NSE · BSE stock data with AI-generated predictions</p>
       </div>
 
-      {/* Accuracy stat cards */}
+      {/* Accuracy stat cards — click any to see the evidence */}
       {STAT_CARDS.length > 0 && (
         <div className="nd-grid-4" style={{ gap: 12, marginBottom: 20 }}>
           {STAT_CARDS.map(s => (
-            <div key={s.label} className="nd-card" style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '14px 18px' }}>
+            <div key={s.label} className="nd-card" onClick={() => setSelectedCard(s.id)}
+              style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '14px 18px', cursor: 'pointer', transition: 'box-shadow 0.15s' }}
+              onMouseEnter={e => (e.currentTarget.style.boxShadow = 'var(--nd-shadow-md)')}
+              onMouseLeave={e => (e.currentTarget.style.boxShadow = 'none')}>
               <div className="nd-icon-chip" style={{ background: s.bg }}>
                 <span className="material-icons" style={{ color: s.color }}>{s.icon}</span>
               </div>
-              <div>
+              <div style={{ flex: 1, minWidth: 0 }}>
                 <p className="nd-label">{s.label}</p>
                 <p style={{ fontSize: 18, fontWeight: 700, color: s.color }}>{s.value}</p>
               </div>
+              <span className="material-icons" style={{ fontSize: 16, color: 'var(--nd-text-3)' }}>info</span>
             </div>
           ))}
         </div>
+      )}
+
+      {selectedCard && accuracyStats && (
+        <MetricModal cardId={selectedCard} stats={accuracyStats} onClose={() => setSelectedCard(null)} />
       )}
 
       {/* Tabbed card */}
