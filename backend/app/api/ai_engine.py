@@ -221,6 +221,124 @@ async def scan_watchlist():
         return {"status": "error", "detail": str(exc)}
 
 
+# ── Scanner post-market signal score (learning feedback) ──────────────────────
+
+class ScanFeedback(BaseModel):
+    date:                    str
+    evaluated_at:            Optional[str] = None
+    picks:                   int = 0
+    hits:                    int = 0
+    accuracy:                float = 0.0
+    avg_realized_return_pct: float = 0.0
+    by_action:               dict = {}
+    results:                 list[dict] = []
+
+
+_SCAN_EVAL_DDL = """
+CREATE TABLE IF NOT EXISTS scan_evaluations (
+    id                     SERIAL PRIMARY KEY,
+    eval_date              DATE NOT NULL,
+    symbol                 TEXT NOT NULL,
+    action                 TEXT,
+    predicted_confidence   DOUBLE PRECISION,
+    predicted_signal_score DOUBLE PRECISION,
+    day_return_pct         DOUBLE PRECISION,
+    realized_return_pct    DOUBLE PRECISION,
+    correct                BOOLEAN,
+    created_at             TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (eval_date, symbol)
+);
+"""
+
+
+@router.post("/scan-feedback")
+async def scan_feedback(req: ScanFeedback):
+    """Receive the scanner's post-market grade and persist each pick's outcome so
+    it feeds the system's learning record (and the signal-score history)."""
+    from datetime import date
+    from sqlalchemy import text
+    from app.database.postgres import engine
+    try:
+        eval_date = date.fromisoformat(req.date)
+    except (ValueError, TypeError):
+        eval_date = date.today()
+    inserted = 0
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text(_SCAN_EVAL_DDL))
+            for g in req.results:
+                await conn.execute(text("""
+                    INSERT INTO scan_evaluations
+                      (eval_date, symbol, action, predicted_confidence,
+                       predicted_signal_score, day_return_pct, realized_return_pct, correct)
+                    VALUES (:d,:sym,:act,:pc,:ps,:dr,:rr,:ok)
+                    ON CONFLICT (eval_date, symbol) DO UPDATE SET
+                      action=:act, predicted_confidence=:pc, predicted_signal_score=:ps,
+                      day_return_pct=:dr, realized_return_pct=:rr, correct=:ok
+                """), {
+                    "d": eval_date, "sym": g.get("symbol"), "act": g.get("action"),
+                    "pc": g.get("predicted_confidence"), "ps": g.get("predicted_signal_score"),
+                    "dr": g.get("day_return_pct"), "rr": g.get("realized_return_pct"),
+                    "ok": bool(g.get("correct")),
+                })
+                inserted += 1
+    except Exception as exc:
+        logger.warning("scan_feedback persist failed: %s", exc)
+    logger.info("scan feedback %s: %d picks, accuracy %.0f%%",
+                req.date, req.picks, (req.accuracy or 0) * 100)
+    return {"status": "recorded", "stored": inserted, "date": req.date}
+
+
+@router.get("/scan-evaluation")
+async def scan_evaluation():
+    """Latest post-market signal-score grade + the accuracy trend over time.
+
+    The detailed latest grade comes straight from the scanner (Redis); the trend
+    is the per-day accuracy history persisted from each feedback push."""
+    import json
+    from app.utils.redis_client import cache_get
+    from sqlalchemy import text
+    from app.database.postgres import engine
+
+    latest = None
+    try:
+        raw = await cache_get("ai_engine:scan_eval:latest")
+        if raw:
+            latest = json.loads(raw)
+    except Exception as exc:
+        logger.debug("scan eval read failed: %s", exc)
+
+    trend: list[dict] = []
+    overall = {"days": 0, "accuracy": None, "picks": 0}
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text(_SCAN_EVAL_DDL))
+            rows = (await conn.execute(text("""
+                SELECT eval_date,
+                       AVG(CASE WHEN correct THEN 1.0 ELSE 0.0 END) AS acc,
+                       AVG(realized_return_pct) AS avg_ret,
+                       COUNT(*) AS n
+                FROM scan_evaluations
+                GROUP BY eval_date ORDER BY eval_date ASC
+            """))).fetchall()
+            for r in rows:
+                trend.append({
+                    "date": r[0].strftime("%Y-%m-%d") if r[0] else None,
+                    "accuracy": round(float(r[1]), 4),
+                    "avg_realized_return_pct": round(float(r[2] or 0.0), 2),
+                    "picks": int(r[3]),
+                })
+            agg = (await conn.execute(text("""
+                SELECT AVG(CASE WHEN correct THEN 1.0 ELSE 0.0 END), COUNT(*) FROM scan_evaluations
+            """))).fetchone()
+            if agg and agg[1]:
+                overall = {"days": len(trend), "accuracy": round(float(agg[0]), 4), "picks": int(agg[1])}
+    except Exception as exc:
+        logger.debug("scan eval trend failed: %s", exc)
+
+    return {"status": "success", "data": {"latest": latest, "trend": trend, "overall": overall}}
+
+
 # ── Autopilot ─────────────────────────────────────────────────────────────────
 
 class AutopilotRequest(BaseModel):

@@ -426,12 +426,84 @@ const LearningCurveCard: React.FC = () => {
 
 const ACTION_BG: Record<string, string> = { BUY: '#22c55e', SELL: '#ef4444', HOLD: '#f59e0b' };
 
+const fmtDateTime = (s?: string): string => {
+  if (!s) return '';
+  const d = new Date(s);
+  return `${d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}, ${d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}`;
+};
+
+const SignalScorePanel: React.FC<{ ev: any }> = ({ ev }) => {
+  const [open, setOpen] = useState(false);
+  const latest = ev?.latest;
+  const overall = ev?.overall;
+  const haveScore = latest || (overall && overall.accuracy != null);
+  if (!haveScore) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 10, padding: '10px 12px', marginBottom: 12, fontSize: 12, color: 'var(--nd-text-3)', lineHeight: 1.5 }}>
+        <span className="material-icons" style={{ fontSize: 17, color: 'var(--nd-blue)' }}>insights</span>
+        <span>After the market closes, the scanner grades each morning pick against the actual day move and shows a <strong>signal score</strong> here — that accuracy then calibrates future scans so the system keeps learning.</span>
+      </div>
+    );
+  }
+  const acc = (latest?.accuracy ?? overall?.accuracy ?? 0) as number;
+  const color = acc >= 0.6 ? 'var(--nd-green)' : acc >= 0.45 ? '#d98c00' : 'var(--nd-red)';
+  const results: any[] = latest?.results ?? [];
+  return (
+    <div style={{ border: '1px solid var(--nd-border)', borderRadius: 12, marginBottom: 12, overflow: 'hidden', background: 'var(--nd-surface)' }}>
+      <div onClick={() => setOpen(o => !o)} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 14px', cursor: 'pointer' }}>
+        <span className="material-icons" style={{ fontSize: 19, color }}>verified</span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--nd-text-1)' }}>
+            Last signal score{latest?.date ? ` · ${latest.date}` : ''}
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>
+            {(latest?.picks ?? overall?.picks ?? 0)} picks graded vs the actual day move
+            {overall?.days ? ` · ${overall.days}-day avg ${((overall.accuracy ?? 0) * 100).toFixed(0)}%` : ''}
+          </div>
+        </div>
+        <div style={{ textAlign: 'right' }}>
+          <div style={{ fontSize: 18, fontWeight: 800, color }}>{(acc * 100).toFixed(0)}%</div>
+          <div style={{ fontSize: 10, color: 'var(--nd-text-3)' }}>accuracy</div>
+        </div>
+        {results.length > 0 && (
+          <span className="material-icons" style={{ fontSize: 18, color: 'var(--nd-text-3)' }}>{open ? 'expand_less' : 'expand_more'}</span>
+        )}
+      </div>
+      {open && results.length > 0 && (
+        <div style={{ borderTop: '1px solid var(--nd-border)', padding: '8px 14px 12px' }}>
+          {latest?.avgRealizedReturnPct != null && (
+            <div style={{ fontSize: 11.5, color: 'var(--nd-text-3)', marginBottom: 8 }}>
+              Avg realised return in the predicted direction:&nbsp;
+              <strong style={{ color: latest.avgRealizedReturnPct >= 0 ? 'var(--nd-green)' : 'var(--nd-red)' }}>
+                {latest.avgRealizedReturnPct >= 0 ? '+' : ''}{latest.avgRealizedReturnPct}%
+              </strong>
+            </div>
+          )}
+          {results.map((r) => (
+            <div key={r.symbol} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 0', borderBottom: '1px solid var(--nd-border)', fontSize: 12 }}>
+              <span className="material-icons" style={{ fontSize: 15, color: r.correct ? 'var(--nd-green)' : 'var(--nd-red)' }}>{r.correct ? 'check_circle' : 'cancel'}</span>
+              <span style={{ fontWeight: 700, color: 'var(--nd-text-1)', width: 90 }}>{r.symbol}</span>
+              <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 4, background: `${ACTION_BG[r.action]}1a`, color: ACTION_BG[r.action] }}>{r.action}</span>
+              <span style={{ flex: 1 }} />
+              <span style={{ color: r.dayReturnPct >= 0 ? 'var(--nd-green)' : 'var(--nd-red)', fontWeight: 600 }}>
+                day {r.dayReturnPct >= 0 ? '+' : ''}{r.dayReturnPct}%
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const AiWatchlistTab: React.FC = () => {
   const [data, setData] = useState<any>(null);
+  const [evalData, setEvalData] = useState<any>(null);
   const [sel, setSel] = useState<any>(null);
   const [scanning, setScanning] = useState(false);
   const load = useCallback(async () => {
     try { const r = await apiService.aiWatchlist(); setData((r as any).data); } catch {}
+    try { const e = await apiService.scanEvaluation(); setEvalData((e as any).data); } catch {}
   }, []);
   useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, [load]);
   const rescan = async () => {
@@ -446,7 +518,8 @@ const AiWatchlistTab: React.FC = () => {
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
         <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>
           AI-selected from a live scan of {data?.scanned ?? 0}/{data?.universe ?? 0} stocks
-          {data?.updated_at ? ` · updated ${new Date(data.updated_at).toLocaleTimeString()}` : ''}
+          {data?.marketRegime ? ` · market ${data.marketRegime}` : ''}
+          {data?.updatedAt ? ` · last updated ${fmtDateTime(data.updatedAt)} IST` : ''}
         </div>
         <button onClick={rescan} disabled={scanning}
           style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '5px 12px', borderRadius: 8, border: '1px solid var(--nd-border)', background: 'var(--nd-surface)', cursor: scanning ? 'wait' : 'pointer', fontSize: 12, color: 'var(--nd-text-2)' }}>
@@ -454,6 +527,9 @@ const AiWatchlistTab: React.FC = () => {
           {scanning ? 'Scanning…' : 'Rescan'}
         </button>
       </div>
+
+      <SignalScorePanel ev={evalData} />
+
       {items.length === 0 ? (
         <div style={{ padding: 40, textAlign: 'center', color: 'var(--nd-text-3)', fontSize: 13 }}>
           The market scanner is warming up — the AI watchlist will appear shortly.
@@ -470,7 +546,9 @@ const AiWatchlistTab: React.FC = () => {
               </div>
               <div style={{ textAlign: 'right' }}>
                 <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--nd-text-1)' }}>₹{w.price?.toLocaleString('en-IN')}</div>
-                <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>conf {(w.confidence * 100).toFixed(0)}%</div>
+                <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>
+                  {w.signalScore != null ? `signal ${Math.round(w.signalScore)} · ` : ''}conf {(w.confidence * 100).toFixed(0)}%
+                </div>
               </div>
               <span style={{ fontSize: 11, fontWeight: 700, padding: '3px 9px', borderRadius: 5, background: `${ACTION_BG[w.action]}1a`, color: ACTION_BG[w.action] }}>{w.action}</span>
               <span className="material-icons" style={{ fontSize: 16, color: 'var(--nd-text-3)' }}>chevron_right</span>
@@ -478,7 +556,7 @@ const AiWatchlistTab: React.FC = () => {
           ))}
         </div>
       )}
-      {sel && <WatchlistEvidence stock={sel} scannedAt={data?.updated_at} onClose={() => setSel(null)} />}
+      {sel && <WatchlistEvidence stock={sel} scannedAt={data?.updatedAt} onClose={() => setSel(null)} />}
     </div>
   );
 };
@@ -498,17 +576,24 @@ const WatchlistEvidence: React.FC<{ stock: any; scannedAt?: string; onClose: () 
         <p style={{ margin: '0 0 12px', fontSize: 12.5, color: 'var(--nd-text-2)', lineHeight: 1.6 }}>
           Why the AI picked this for <strong>intraday</strong>: the scanner judged a
           <strong> {stock.action}</strong> view at <strong>{(stock.confidence * 100).toFixed(0)}%</strong> confidence
-          (intraday-fit score {stock.score}). Only stocks that clear the liquidity + volatility bar make the list.
+          {stock.signalScore != null ? <> (signal score <strong>{Math.round(stock.signalScore)}</strong>)</> : null}.
+          It weighs every indicator that moves price — liquidity, volatility, trend, momentum, MACD, RSI, the opening gap and the broader market — and only stocks that clear the liquidity + volatility bar make the list.
         </p>
         <div style={{ fontSize: 12, color: 'var(--nd-text-3)', background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 8, padding: '8px 12px', marginBottom: 12 }}>{stock.reasoning}</div>
         {stock.metrics && (<>
-          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--nd-text-3)', marginBottom: 8 }}>INTRADAY-FIT EVIDENCE</div>
+          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--nd-text-3)', marginBottom: 8 }}>MARKET-INDICATOR EVIDENCE</div>
           {[
             ['Avg daily volume', `${(stock.metrics.avgVolume / 1e6).toFixed(2)}M`],
+            ['Relative volume', stock.metrics.relVolume != null ? `${stock.metrics.relVolume}×` : '—'],
             ['Volatility (ATR)', `${stock.metrics.atrPct}%`],
             ['Avg daily range', `${stock.metrics.rangePct}%`],
+            ['Trend (SMA20/50)', stock.metrics.smaTrend ? `${stock.metrics.smaTrend}${stock.metrics.sma20 ? ` · 20: ${stock.metrics.sma20}` : ''}` : '—'],
+            ['MACD histogram', stock.metrics.macdHist != null ? `${stock.metrics.macdHist >= 0 ? '+' : ''}${stock.metrics.macdHist}` : '—'],
             ['RSI (14)', `${stock.metrics.rsi}`],
             ['Momentum (10d)', `${stock.metrics.momentumPct >= 0 ? '+' : ''}${stock.metrics.momentumPct}%`],
+            ['Opening gap', stock.metrics.gapPct != null ? `${stock.metrics.gapPct >= 0 ? '+' : ''}${stock.metrics.gapPct}%` : '—'],
+            ['Room to 20d high', stock.metrics.distFromHighPct != null ? `${stock.metrics.distFromHighPct}%` : '—'],
+            ['Market regime', stock.metrics.marketRegime ?? '—'],
             ['Liquidity score', `${(stock.metrics.liquidityScore * 100).toFixed(0)}%`],
             ['Volatility score', `${(stock.metrics.volatilityScore * 100).toFixed(0)}%`],
           ].map(([k, v]) => (
