@@ -195,13 +195,38 @@ async def learning_summary():
 
 @router.get("/watchlist")
 async def get_watchlist():
-    """The live AI watchlist produced by the stock-scanner service (read from Redis)."""
+    """The live AI watchlist produced by the stock-scanner service (read from
+    Redis), each item enriched with its latest LLM news-sentiment signal
+    (produced by the sentiment-service)."""
     import json
     from app.utils.redis_client import cache_get
     try:
         raw = await cache_get("ai_engine:watchlist")
         if raw:
-            return {"status": "success", "data": json.loads(raw)}
+            data = json.loads(raw)
+            for item in data.get("items", []):
+                sym = (item.get("symbol") or "").upper()
+                if not sym:
+                    continue
+                try:
+                    s = await cache_get(f"ai_engine:sentiment:{sym}")
+                    if s:
+                        sd = json.loads(s)
+                        if int(sd.get("headlines_count", 0)) > 0:
+                            item["news"] = {
+                                "sentiment": sd.get("sentiment"),
+                                "score": sd.get("score"),
+                                "action": sd.get("action"),
+                                "confidence": sd.get("confidence"),
+                                "catalyst": sd.get("catalyst"),
+                                "summary": sd.get("summary"),
+                                "headlines_count": sd.get("headlines_count"),
+                                "top_headlines": sd.get("top_headlines", []),
+                                "updated_at": sd.get("updated_at"),
+                            }
+                except Exception:
+                    pass
+            return {"status": "success", "data": data}
     except Exception as exc:
         logger.debug("watchlist read failed: %s", exc)
     return {"status": "success", "data": {"updated_at": None, "scanned": 0, "universe": 0, "items": []}}
