@@ -33,6 +33,16 @@ interface AppState {
   setTheme: (theme: 'light' | 'dark') => void;
 }
 
+const THEME_KEY = 'neuradex-theme';
+
+const getInitialTheme = (): 'light' | 'dark' => {
+  try {
+    const t = localStorage.getItem(THEME_KEY);
+    if (t === 'dark' || t === 'light') return t;
+  } catch { /* localStorage unavailable */ }
+  return 'light';
+};
+
 export const useAppStore = create<AppState>((set) => ({
   // Initial state
   stocks: [],
@@ -45,7 +55,7 @@ export const useAppStore = create<AppState>((set) => ({
   portfolio: null,
   loadingPortfolio: false,
 
-  theme: 'light',
+  theme: getInitialTheme(),
 
   // Actions
   setStocks: (stocks) => set({ stocks }),
@@ -65,5 +75,8 @@ export const useAppStore = create<AppState>((set) => ({
   setPortfolio: (portfolio) => set({ portfolio }),
   setLoadingPortfolio: (loading) => set({ loadingPortfolio: loading }),
 
-  setTheme: (theme) => set({ theme }),
+  setTheme: (theme) => {
+    try { localStorage.setItem(THEME_KEY, theme); } catch { /* ignore */ }
+    set({ theme });
+  },
 }));
