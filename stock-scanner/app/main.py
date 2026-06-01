@@ -1,5 +1,7 @@
 """Stock Scanner microservice — independently and continuously sweeps the market
-for intraday-tradable stocks and maintains the AI watchlist in Redis."""
+for intraday-tradable stocks, maintains the AI watchlist in Redis, runs a fresh
+scan before the open, and grades the morning picks after the close to produce a
+signal score that feeds the system's learning."""
 import asyncio
 import logging
 from contextlib import asynccontextmanager
@@ -7,7 +9,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .scanner import scanner_loop, scan_once, get_state
+from .scanner import (
+    scanner_loop, schedule_loop, scan_once, evaluate_day,
+    get_state, get_latest_eval, warm_state,
+)
 from .universe import UNIVERSE
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -19,7 +24,9 @@ _tasks: list[asyncio.Task] = []
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("stock-scanner starting — universe of %d stocks", len(UNIVERSE))
+    await warm_state()
     _tasks.append(asyncio.create_task(scanner_loop()))
+    _tasks.append(asyncio.create_task(schedule_loop()))
     yield
     for t in _tasks:
         t.cancel()
@@ -42,6 +49,19 @@ async def status():
 
 @app.post("/scan")
 async def scan():
-    """Trigger an immediate full sweep (also runs continuously in the background)."""
-    asyncio.create_task(scan_once())
+    """Trigger an immediate full sweep (manual refresh; also runs continuously)."""
+    asyncio.create_task(scan_once(phase="manual"))
     return {"status": "started"}
+
+
+@app.post("/evaluate")
+async def evaluate(date: str | None = None):
+    """Grade a day's morning watchlist against the actual move (post-market signal score)."""
+    asyncio.create_task(evaluate_day(date))
+    return {"status": "started"}
+
+
+@app.get("/evaluation")
+async def evaluation():
+    """The latest post-market signal-score grade."""
+    return {"status": "success", "data": await get_latest_eval()}

@@ -672,6 +672,10 @@ class ApiService {
     const response = await this.api.post('/api/ai-engine/watchlist/scan');
     return response.data;
   }
+  async scanEvaluation(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/ai-engine/scan-evaluation');
+    return response.data;
+  }
   async getAutopilot(): Promise<ApiResponse<any>> {
     const response = await this.api.get('/api/ai-engine/autopilot');
     return response.data;
