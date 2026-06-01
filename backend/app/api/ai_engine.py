@@ -111,40 +111,15 @@ async def analyze(req: AnalyzeRequest):
 
 @router.post("/outcome")
 async def record_outcome(req: OutcomeRequest):
-    """Record trade outcome — triggers weight update + RL Q-table update."""
+    """Record trade outcome — record_outcome updates agent weights + RL Q-table + memory."""
     await _db_once()
-    from app.agents import get_learning, get_rl_agent
-    from app.database.postgres import engine as pg_engine
-    from sqlalchemy import text
+    from app.agents import get_learning
 
-    learning = get_learning()
-    reward   = await learning.record_outcome(
+    reward = await get_learning().record_outcome(
         req.prediction_id, req.symbol,
         req.entry_price, req.exit_price,
         req.pnl, req.pnl_pct,
     )
-
-    # Update RL Q-table
-    try:
-        async with pg_engine.begin() as conn:
-            row = (await conn.execute(
-                text("SELECT rl_state, agent_signals FROM ai_engine_predictions WHERE prediction_id=:pid"),
-                {"pid": req.prediction_id},
-            )).fetchone()
-
-        if row and row[0] is not None:
-            import json
-            state   = row[0]
-            signals = json.loads(row[1])
-            rl_sig  = next((s for s in signals if s["agent"] == "rl"), None)
-            if rl_sig:
-                from app.agents.rl_agent import ACTIONS
-                action_idx = ACTIONS.index(rl_sig["action"]) if rl_sig["action"] in ACTIONS else 2
-                # next_state: use same state as proxy (no live next candles here)
-                await get_rl_agent().update(state, action_idx, reward, state)
-    except Exception as exc:
-        logger.warning("RL update skipped: %s", exc)
-
     return {"reward": round(reward, 4), "status": "recorded"}
 
 
@@ -175,6 +150,45 @@ async def get_weights():
     await _db_once()
     from app.agents import get_learning
     return await get_learning().get_weights()
+
+
+@router.get("/learning-summary")
+async def learning_summary():
+    """Aggregate training status — proves every backtest/paper trade trains the agents."""
+    await _db_once()
+    from app.agents import get_learning, get_memory
+    from app.database.postgres import engine
+    from sqlalchemy import text
+
+    perf = await get_learning().get_performance()
+    mem  = await get_memory().stats()
+
+    totals = {"predictions": 0, "outcomes": 0, "recent_outcomes_24h": 0}
+    overall_acc = 0.0
+    try:
+        async with engine.begin() as conn:
+            totals["predictions"] = int((await conn.execute(
+                text("SELECT COUNT(*) FROM ai_engine_predictions"))).scalar() or 0)
+            totals["outcomes"] = int((await conn.execute(
+                text("SELECT COUNT(*) FROM ai_engine_outcomes"))).scalar() or 0)
+            totals["recent_outcomes_24h"] = int((await conn.execute(
+                text("SELECT COUNT(*) FROM ai_engine_outcomes WHERE created_at > NOW() - INTERVAL '24 hours'"))).scalar() or 0)
+            row = (await conn.execute(text(
+                "SELECT AVG(CASE WHEN outcome='correct' THEN 1.0 ELSE 0.0 END) FROM ai_engine_outcomes"))).fetchone()
+            overall_acc = float(row[0]) if row and row[0] is not None else 0.0
+    except Exception as exc:
+        logger.warning("learning_summary totals failed: %s", exc)
+
+    return {
+        "status": "success",
+        "data": {
+            "totals": totals,
+            "overall_accuracy": round(overall_acc, 3),
+            "agents": perf,
+            "memory_cases": mem.get("total_cases", 0),
+            "memory_by_source": mem.get("by_source", []),
+        },
+    }
 
 
 # ── Pattern Memory ────────────────────────────────────────────────────────────

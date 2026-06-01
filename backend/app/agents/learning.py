@@ -139,6 +139,10 @@ class LearningSystem:
     ) -> float:
         reward  = self._reward(pnl_pct)
         outcome = "correct" if pnl >= 0 else "wrong"
+        mem_fp: Optional[str] = None      # fingerprint json to promote into memory
+        mem_action: str = "HOLD"
+        rl_state: Optional[int] = None
+        rl_action: Optional[str] = None
         try:
             from sqlalchemy import text
             from app.database.postgres import engine
@@ -152,16 +156,17 @@ class LearningSystem:
                        "ep": entry_price, "xp": exit_price,
                        "pnl": pnl, "pp": pnl_pct, "rw": reward, "oc": outcome})
 
-                # Get the agent signals + fingerprint for this prediction
+                # Get the agent signals + fingerprint + rl_state for this prediction
                 row = (await conn.execute(
-                    text("SELECT agent_signals, fingerprint, final_action "
+                    text("SELECT agent_signals, fingerprint, final_action, rl_state "
                          "FROM ai_engine_predictions WHERE prediction_id=:pid"),
                     {"pid": prediction_id}
                 )).fetchone()
 
                 if row:
                     signals = json.loads(row[0])
-                    self._pending_memory = (row[1], row[2])  # (fingerprint json, action)
+                    mem_fp, mem_action = row[1], row[2]
+                    rl_state = row[3]
                     # Find the winning action (highest conf*weight)
                     best = max(signals, key=lambda s: s["confidence"] * s["weight"])
                     best_action = best["action"]
@@ -186,24 +191,34 @@ class LearningSystem:
                             "delta": delta,
                             "name":  sig["agent"],
                         })
+                        if sig["agent"] == "rl":
+                            rl_action = sig["action"]
         except Exception as exc:
             logger.warning("record_outcome failed: %s", exc)
 
+        # Train the RL agent's Q-table from this outcome (every recorded trade,
+        # regardless of caller — sessions, backtests, or the analyze→outcome flow).
+        if rl_state is not None and rl_action:
+            try:
+                from app.agents import get_rl_agent
+                from app.agents.rl_agent import ACTIONS
+                action_idx = ACTIONS.index(rl_action) if rl_action in ACTIONS else 2
+                await get_rl_agent().update(rl_state, action_idx, reward, rl_state)
+            except Exception as exc:
+                logger.debug("RL update skipped: %s", exc)
+
         # Promote this realised trade into the Pattern Memory bank so the next
         # similar situation can learn from how it actually turned out.
-        pending = getattr(self, "_pending_memory", None)
-        if pending and pending[0]:
+        if mem_fp:
             try:
                 from app.agents import get_memory
-                fp = json.loads(pending[0])
                 await get_memory().add_case(
-                    symbol=symbol, fingerprint=fp, action=pending[1],
+                    symbol=symbol, fingerprint=json.loads(mem_fp), action=mem_action,
                     pnl_pct=pnl_pct, entry_price=entry_price, exit_price=exit_price,
                     source="LIVE",
                 )
             except Exception as exc:
                 logger.debug("memory promotion skipped: %s", exc)
-        self._pending_memory = None
 
         await self._sync_weights_to_redis()
         return reward

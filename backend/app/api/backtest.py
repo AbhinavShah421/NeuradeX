@@ -80,6 +80,54 @@ async def _feed_memory_from_backtest(symbol: str, candles: list[dict], trades: l
         logger.warning("Could not feed pattern memory from backtest: %s", exc)
 
 
+async def _train_ensemble_from_backtest(symbol: str, candles: list[dict], trades: list[dict],
+                                        max_trades: int = 40) -> None:
+    """Train the 7-agent ensemble (weights + RL Q-table) from realised backtest trades.
+
+    For each trade we replay the ensemble on the candles available at entry (no
+    lookahead), store it as a prediction, then record the trade's *actual* P&L as
+    the outcome — which nudges each agent's weight and the RL policy. Capped so a
+    single backtest can't flood the learner. Runs in the background.
+    """
+    if not trades or not candles:
+        return
+    try:
+        from app.agents import get_engine, get_learning, get_rl_agent
+        engine   = get_engine()
+        learning = get_learning()
+        await learning.init_db()
+        weights = await learning.get_weights()
+        if weights:
+            engine.update_weights(weights)
+
+        date_idx = {c.get("date"): i for i, c in enumerate(candles)}
+        ctx = {"symbol": symbol, "capital": 100_000.0, "position": "NONE"}
+        for t in trades[:max_trades]:
+            idx = date_idx.get(t.get("entry_date"))
+            if idx is None or idx < 26:    # ensemble/RL need ≥26 candles
+                continue
+            window = candles[: idx + 1]
+            try:
+                decision = await engine.decide(symbol, window, ctx)
+                rl_state = None
+                try:
+                    rl_state = get_rl_agent().extract_state(window)
+                except Exception:
+                    pass
+                # The strategy executed a long, so train against a BUY prediction
+                decision.action = "BUY"
+                await learning.store_prediction(decision, str(t.get("entry_date", "")), ctx, rl_state, None)
+                await learning.record_outcome(
+                    decision.prediction_id, symbol,
+                    float(t.get("entry_price", 0.0)), float(t.get("exit_price", 0.0)),
+                    float(t.get("pnl", 0.0)), float(t.get("pnl_pct", 0.0)),
+                )
+            except Exception:
+                continue
+    except Exception as exc:
+        logger.warning("Could not train ensemble from backtest: %s", exc)
+
+
 def _derive_agent_signals(action: str, indicators: dict, strategy: str = "") -> dict:
     """Map available indicators to the 5 agent signal slots the Orders page expects."""
     rsi = float(indicators.get("rsi", 50) or 50)
@@ -504,6 +552,8 @@ async def run_backtest(req: BacktestRequest):
     asyncio.create_task(_save_backtest_trades(records))
     # Also teach the Pattern Memory bank from these realised trades
     asyncio.create_task(_feed_memory_from_backtest(symbol, candles, result["trades"]))
+    # Train the agent ensemble (weights + RL) from these realised trades
+    asyncio.create_task(_train_ensemble_from_backtest(symbol, candles, result["trades"]))
 
     return {
         "status": "success",

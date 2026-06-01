@@ -658,6 +658,11 @@ class ApiService {
     return response.data;
   }
 
+  async learningSummary(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/ai-engine/learning-summary');
+    return response.data;
+  }
+
   async memoryQuery(payload: { symbol: string; candles: any[] }): Promise<ApiResponse<any>> {
     const response = await this.api.post('/api/ai-engine/memory/query', payload);
     return response.data;

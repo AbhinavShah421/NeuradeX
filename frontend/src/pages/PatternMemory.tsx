@@ -17,6 +17,13 @@ const card: React.CSSProperties = {
   borderRadius: 12, padding: 20,
 };
 
+const LStat: React.FC<{ label: string; value: string; color?: string }> = ({ label, value, color }) => (
+  <div>
+    <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginBottom: 4 }}>{label}</div>
+    <div style={{ fontSize: 20, fontWeight: 700, color: color || 'var(--nd-text-1)' }}>{value}</div>
+  </div>
+);
+
 const actionColor = (a: string) =>
   a === 'BUY' ? 'var(--nd-green)' : a === 'SELL' ? 'var(--nd-red)' : 'var(--nd-text-3)';
 
@@ -27,6 +34,7 @@ const PatternMemory: React.FC = () => {
   const [seedMsg, setSeedMsg] = useState('');
   const [sweeping, setSweeping] = useState(false);
   const [lastSweep, setLastSweep] = useState<any>(null);
+  const [learning, setLearning] = useState<any>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -38,6 +46,10 @@ const PatternMemory: React.FC = () => {
     } finally {
       setLoading(false);
     }
+    try {
+      const ls = await apiService.learningSummary();
+      setLearning((ls as any).data ?? null);
+    } catch { /* ignore */ }
   }, []);
 
   const loadSweep = useCallback(async () => {
@@ -109,6 +121,42 @@ const PatternMemory: React.FC = () => {
           abstains. The more the bank learns, the more selective and accurate decisions become.
         </p>
       </div>
+
+      {/* Learning status — proves every backtest/paper trade trains the agents */}
+      {learning && (
+        <div style={{ ...card, marginBottom: 16, borderLeft: '3px solid var(--nd-green)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+            <span className="material-icons" style={{ color: 'var(--nd-green)', fontSize: 20 }}>school</span>
+            <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>Agent Learning</h3>
+            {learning.totals?.recentOutcomes24h > 0 && (
+              <span style={{ fontSize: 11, color: 'var(--nd-green)', background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 20, padding: '2px 10px' }}>
+                ● {learning.totals.recentOutcomes24h} trained in last 24h
+              </span>
+            )}
+          </div>
+          <div className="nd-grid-4">
+            <LStat label="Predictions made" value={(learning.totals?.predictions ?? 0).toLocaleString()} />
+            <LStat label="Outcomes learned" value={(learning.totals?.outcomes ?? 0).toLocaleString()} />
+            <LStat label="Overall accuracy" value={`${((learning.overallAccuracy ?? 0) * 100).toFixed(1)}%`} color={(learning.overallAccuracy ?? 0) >= 0.5 ? 'var(--nd-green)' : 'var(--nd-text-1)'} />
+            <LStat label="Memory cases" value={(learning.memoryCases ?? 0).toLocaleString()} />
+          </div>
+          {/* Per-agent weights/accuracy */}
+          {Array.isArray(learning.agents) && learning.agents.length > 0 && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 12 }}>
+              {learning.agents.map((a: any) => (
+                <div key={a.agent} style={{ fontSize: 11, color: 'var(--nd-text-2)', background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 8, padding: '6px 10px' }}>
+                  <span style={{ fontWeight: 600, color: 'var(--nd-text-1)', textTransform: 'capitalize' }}>{a.agent}</span>
+                  <span style={{ color: 'var(--nd-text-3)' }}> · w{a.weight} · {(a.accuracy * 100).toFixed(0)}% ({a.correct}/{a.total})</span>
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{ marginTop: 12, fontSize: 12, color: 'var(--nd-text-3)' }}>
+            Every <strong>backtest</strong>, <strong>paper trade</strong> and <strong>live session</strong> updates these agent
+            weights, the RL policy, and the memory bank — so future predictions get more accurate over time.
+          </div>
+        </div>
+      )}
 
       {/* Headline stats */}
       <div className="nd-grid-3" style={{ marginBottom: 16 }}>
