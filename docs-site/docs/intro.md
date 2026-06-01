@@ -20,8 +20,12 @@ NeuradeX is a full-stack, AI-powered intraday stock trading platform built on a 
 | **Ensemble decisions** | Confidence-weighted vote aggregation with dynamic weight learning |
 | **Risk management** | ATR-based stop-loss, position-size caps, per-trade risk % enforcement (Java) |
 | **Trade execution** | Paper-trading mode (default) and live Groww API order placement (Java) |
-| **Backtesting** | Candle-by-candle historical replay with real Groww data + agent simulation |
+| **Backtesting** | Candle-by-candle historical replay with real market data + agent simulation |
 | **Strategy backtesting** | SMA Crossover, RSI Mean Reversion, MACD Crossover, Bollinger Bands |
+| **Pattern Memory** | Case-based reasoning — fingerprints every setup and recalls how similar ones turned out ([details](./ai-engine/learning-loop)) |
+| **Continuous learning** | Every backtest, paper trade and live session trains agent weights + RL + memory |
+| **Live Sessions** | Server-backed AI Live Trading & Paper Trading that survive refresh and run in the background ([details](./ai-engine/live-sessions)) |
+| **Multi-provider data** | Pluggable Groww / Yahoo / Alpha Vantage with automatic fallback ([details](./ai-engine/data-providers)) |
 | **Portfolio tracking** | Real-time P&L, unrealised positions, closed trades, equity curve |
 | **Model training** | Scheduled retraining via MLflow + Stable-Baselines3 RL |
 | **Feedback loop** | Trade outcomes feed back into ensemble weight updates |
@@ -143,12 +147,15 @@ Groww API / News Sources
 | `/neuradex` | Dashboard | Live index ticker, portfolio summary, top movers, market overview |
 | `/neuradex/predictions` | Predictions | AI signal table with confidence scores for all watchlist stocks |
 | `/neuradex/portfolio` | Portfolio | Holdings, unrealised P&L, closed trades, equity curve |
-| `/neuradex/ai-engine/live` | AI Live Analysis | Per-stock agent breakdown with indicator values |
-| `/neuradex/ai-engine/backtest` | Backtesting & Day Trading | Candle-by-candle live replay with AI decision overlay |
+| `/neuradex/ai-engine` | AI Live Analysis | Per-stock agent breakdown with indicator values |
+| `/neuradex/ai-engine/backtest` | Backtesting & Day Trading | AI Live Trading replay + strategy backtest (persists last result) |
+| `/neuradex/ai-engine/paper-trading` | Paper Trading | Server-backed live paper session |
+| `/neuradex/ai-engine/sessions` | Live Sessions | Background-persistent sessions — run many, reopen any as a live chart |
+| `/neuradex/ai-engine/memory` | Pattern Memory | Memory bank stats + live Agent Learning panel |
 | `/neuradex/ai-engine/agents` | Agent Status | Health and last-signal status for each AI agent |
-| `/neuradex/ai-engine/paper` | Paper Trading | Simulated live portfolio with real-time agent trades |
 | `/neuradex/models` | Models | MLflow experiment list, model metrics, training history |
-| `/neuradex/orders` | Orders | Order blotter with status, fill price, and P&L |
+| `/neuradex/orders` | Orders | Order blotter with status, fill price, P&L, and per-trade chart |
+| `/neuradex/settings` | Settings | Market-data provider priority, enable/disable, API keys |
 
 ---
 
@@ -187,6 +194,9 @@ Collects all five agent signals within a 5-second window. Applies per-agent weig
 
 ## Quick Links
 
+- [Continuous Learning & Pattern Memory](./ai-engine/learning-loop) — how every trade trains the agents
+- [Live Trading Sessions](./ai-engine/live-sessions) — server-backed, background-persistent sessions
+- [Market-Data Providers](./ai-engine/data-providers) — Groww / Yahoo / Alpha Vantage fallback + rate limiting
 - [End-to-End Data Flow](./architecture/data-flow) — sequence diagram from tick to trade
 - [Dependency Matrix](./architecture/dependency-matrix) — which service talks to which
 - [Backend API Reference](./api/auth) — every HTTP endpoint documented

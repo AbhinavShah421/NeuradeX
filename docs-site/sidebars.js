@@ -25,6 +25,16 @@ const sidebars = {
     },
     {
       type: 'category',
+      label: '🧠 AI Engine & Learning',
+      collapsed: false,
+      items: [
+        'ai-engine/learning-loop',
+        'ai-engine/live-sessions',
+        'ai-engine/data-providers',
+      ],
+    },
+    {
+      type: 'category',
       label: '🏗️ Architecture',
       collapsed: false,
       items: ['architecture/data-flow', 'architecture/dependency-matrix'],
