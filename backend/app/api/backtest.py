@@ -144,6 +144,7 @@ def _build_trade_record(
     agent_signals: dict,
     market_context: dict,
     confidence: float = 0.75,
+    trade_source: str = "BACKTEST",
 ) -> dict:
     outcome = "WIN" if pnl_abs > 0 else "LOSS"
     return {
@@ -162,7 +163,7 @@ def _build_trade_record(
         "outcome": outcome,
         "timestamp_open": timestamp_open,
         "timestamp_close": timestamp_close,
-        "trade_source": "BACKTEST",
+        "trade_source": trade_source,
     }
 
 
@@ -1085,10 +1086,24 @@ async def day_autopilot(req: DayAutopilotRequest):
 #  PROGRESSIVE AUTOPILOT — candles + per-step agent decisions (no lookahead)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _no_real_intraday_msg(symbol: str, date: str) -> str:
+    return (
+        f"No real Groww intraday data for {symbol} on {date}. Groww only serves "
+        f"5-min intraday history for recent trading days (roughly the last 2–3 months), "
+        f"and this may also be a market holiday. Pick a recent weekday — e.g. the last "
+        f"few trading days — or try a more liquid stock."
+    )
+
+
 @router.get("/intraday-candles/{symbol}")
-async def get_intraday_candles(symbol: str, date: str = Query(...)):
+async def get_intraday_candles(
+    symbol: str,
+    date: str = Query(...),
+    real_only: bool = Query(False, description="If true, 422 instead of simulating when Groww has no data"),
+):
     """Return all 5-min candles for one trading day (Groww or simulated).
-    No LLM involved — the frontend drives the progressive replay."""
+    No LLM involved — the frontend drives the progressive replay.
+    With real_only=true the endpoint refuses to simulate."""
     symbol = symbol.upper()
     try:
         datetime.strptime(date, "%Y-%m-%d")
@@ -1132,6 +1147,8 @@ async def get_intraday_candles(symbol: str, date: str = Query(...)):
             )
 
     if not candles:
+        if real_only:
+            raise HTTPException(422, _no_real_intraday_msg(symbol, date))
         candles = _simulate_intraday_5min(symbol, date)
 
     return {
@@ -1357,6 +1374,7 @@ class ProgressiveStartRequest(BaseModel):
     start_time: str = "09:15"
     capital:    float = Field(default=50_000.0, ge=5_000, le=10_000_000)
     model:      Optional[str] = None
+    real_only:  bool = False     # refuse to simulate when Groww has no data
 
 
 class ProgressiveStepRequest(BaseModel):
@@ -1371,6 +1389,7 @@ class ProgressiveStepRequest(BaseModel):
     entry_time:   Optional[str] = None
     trades:       list[dict] = []
     model:        Optional[str] = None
+    real_only:    bool = False
 
 
 @router.post("/progressive/start")
@@ -1403,6 +1422,8 @@ async def progressive_start(req: ProgressiveStartRequest):
     candles, data_source = await _fetch_candles_up_to(symbol, req.date, start_time_str)
     if not candles:
         raise HTTPException(500, "Could not fetch candle data")
+    if req.real_only and data_source != "groww":
+        raise HTTPException(422, _no_real_intraday_msg(symbol, req.date))
 
     # Fetch previous trading day's full candles for background chart display only.
     # Failures are silent — an empty list is fine.
@@ -1516,6 +1537,8 @@ async def progressive_step(req: ProgressiveStepRequest):
     candles, data_source = await _fetch_candles_up_to(symbol, req.date, next_time_str)
     if not candles:
         raise HTTPException(500, "Could not fetch candle data")
+    if req.real_only and data_source != "groww":
+        raise HTTPException(422, _no_real_intraday_msg(symbol, req.date))
 
     model       = req.model or getattr(settings, "LLM_MODEL", "llama3.2")
     cash        = req.cash
