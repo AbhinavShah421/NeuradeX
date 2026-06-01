@@ -2,6 +2,20 @@
 
 An advanced AI-powered stock prediction system combining machine learning, deep learning, NLP, and large language models for real-time market analysis.
 
+## ✨ Key AI Capabilities
+
+NeuradeX runs a **7-agent ensemble** (technical · pattern · momentum · volatility · sentiment · RL · memory) that **learns continuously** from every trade.
+
+| Capability | What it does |
+|---|---|
+| **Continuous learning** | Every backtest, paper trade and live session trains the agent **weights**, the **RL Q-table**, and the **Pattern Memory** bank. The *more* you trade, the more accurate predictions get. |
+| **Pattern Memory** | Case-based reasoning — fingerprints each market setup into a vector and only acts when *similar past cases* won often enough (otherwise it abstains). |
+| **Live Sessions** | AI Live Trading (historical replay) & Paper Trading run **server-side in the background** — they survive a page refresh, run many at once, and can be reopened as live charts. |
+| **Multi-provider data** | Pluggable market-data layer (**Groww → Yahoo → Alpha Vantage**) with automatic fallback to real data when one source is rate-limited or down. Configurable from the **Settings** page. |
+| **Groww rate-limiter** | Client-side token-bucket + backoff so the system never trips Groww's per-type API limits. |
+
+Full developer documentation: the **Docusaurus dev portal** (`docs-site/`, served at `/neuradex/dev/docs/`) — see **AI Engine & Learning →** Learning & Pattern Memory, Live Sessions, and Data Providers.
+
 ## 🎯 System Architecture
 
 ```
