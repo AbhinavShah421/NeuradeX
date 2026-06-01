@@ -27,8 +27,9 @@ loop**, the **AI watchlist + autopilot**, and **Pattern Memory**.
 |---|---|---|
 | `GET` | `/api/ai-engine/watchlist` | Live ranked AI watchlist (read from Redis, produced by the [stock-scanner](../microservices/stock-scanner.md)) |
 | `POST` | `/api/ai-engine/watchlist/scan` | Proxy a manual full sweep to the scanner service |
-| `GET` | `/api/ai-engine/autopilot` | Autopilot status (enabled, market, watchlist size, started today, running sessions) |
-| `POST` | `/api/ai-engine/autopilot` | Enable / disable autopilot (`{ "enabled": true }`) |
+| `GET` | `/api/ai-engine/autopilot` | Combined autopilot status — `paper` + `backtest` (proxied from autopilot-service) |
+| `POST` | `/api/ai-engine/autopilot` | Enable / disable a mode (`{ "mode": "paper"\|"backtest", "enabled": true }`) |
+| `GET` | `/api/ai-engine/llm-status` | Active LLM provider (Anthropic vs Ollama), model, and a live probe |
 | `GET` | `/api/ai-engine/scan-evaluation` | Latest post-market signal-score grade + per-day accuracy trend |
 | `POST` | `/api/ai-engine/scan-feedback` | (Internal) the scanner pushes its post-market grade here → persisted to `scan_evaluations` |
 

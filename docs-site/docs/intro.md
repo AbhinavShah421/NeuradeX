@@ -60,8 +60,10 @@ Groww API / News Sources
                     │ RabbitMQ: trade.outcome
              model-trainer (8013)
 
-  stock-scanner (8014) ── continuous market sweep ──→ Redis: ai_engine:watchlist
-  backend (8000) ← REST API + WebSocket gateway (reads watchlist, runs autopilot)
+  stock-scanner    (8014) ── continuous market sweep ──→ Redis: ai_engine:watchlist
+  sentiment-service(8016) ── Google-News + LLM ────────→ Redis: ai_engine:sentiment:{SYMBOL}
+  autopilot-service(8015) ── paper + backtest training ─→ sessions via backend API
+  backend (8000) ← REST API + WebSocket gateway (reads watchlist/sentiment, proxies autopilot)
   frontend (3000) ← React / Vite dashboard
 ```
 
@@ -84,6 +86,8 @@ Groww API / News Sources
 | `feedback-service` | **8012** | Python · FastAPI | Trade outcome recording, weight updates |
 | `model-trainer` | **8013** | Python · FastAPI | Scheduled model retraining, MLflow logging |
 | `stock-scanner` | **8014** | Python · FastAPI | Independent market sweep — continuously scores the universe for intraday fitness and maintains the AI watchlist |
+| `autopilot-service` | **8015** | Python · FastAPI | Auto-trades the watchlist to train the agents — paper (market hours) + backtest (1× replay, off-hours) |
+| `sentiment-service` | **8016** | Python · FastAPI · LLM | Google-News + LLM news sentiment per watchlist stock → independent ensemble signal |
 | `frontend` | **3000** | React 18 · Vite · TypeScript | Dashboard, backtesting UI, portfolio |
 | `docs` | **3001** | Docusaurus 3 | This developer portal |
 | `postgres` | **5432** | TimescaleDB (PG 15) | Time-series OHLCV, trades, portfolio |
