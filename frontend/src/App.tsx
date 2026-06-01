@@ -17,6 +17,7 @@ import PatternMemory from './pages/PatternMemory';
 import LiveSessions from './pages/LiveSessions';
 import ModelRegistry from './pages/ModelRegistry';
 import Orders from './pages/Orders';
+import Settings from './pages/Settings';
 import './styles/globals.css';
 
 const App: React.FC = () => {
@@ -57,6 +58,7 @@ const App: React.FC = () => {
 
                   <Route path="/models" element={<ModelRegistry />} />
                   <Route path="/orders" element={<Orders />} />
+                  <Route path="/settings" element={<Settings />} />
                 </Routes>
               </Layout>
             </ProtectedRoute>

@@ -256,6 +256,16 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
                       </div>
                     </div>
                     <div style={{ padding: '6px' }}>
+                      <Link
+                        to="/settings"
+                        onClick={() => setUserDropdownOpen(false)}
+                        style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', borderRadius: 8, textDecoration: 'none', color: 'var(--nd-text-1)', fontSize: 13, fontWeight: 500, transition: 'background 0.12s' }}
+                        onMouseEnter={e => (e.currentTarget.style.background = 'var(--nd-bg)')}
+                        onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                      >
+                        <span className="material-icons" style={{ fontSize: 16, color: 'var(--nd-text-3)' }}>settings</span>
+                        Settings
+                      </Link>
                       <button
                         onClick={handleLogout}
                         style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', borderRadius: 8, border: 'none', background: 'none', cursor: 'pointer', color: 'var(--nd-red)', fontSize: 13, fontWeight: 500, transition: 'background 0.12s' }}
@@ -331,6 +341,10 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
                     <div style={{ fontSize: 11, color: 'var(--nd-green)' }}>● Connected</div>
                   </div>
                 </div>
+                <Link to="/settings" onClick={() => setMobileMenuOpen(false)} style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', borderRadius: 10, textDecoration: 'none', background: 'var(--nd-surface)', color: 'var(--nd-text-1)', fontSize: 14, fontWeight: 500, marginBottom: 8, boxSizing: 'border-box' }}>
+                  <span className="material-icons" style={{ fontSize: 18, color: 'var(--nd-text-3)' }}>settings</span>
+                  Settings
+                </Link>
                 <button onClick={handleLogout} style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', borderRadius: 10, border: 'none', background: 'var(--nd-red-50)', cursor: 'pointer', color: 'var(--nd-red)', fontSize: 14, fontWeight: 500 }}>
                   <span className="material-icons" style={{ fontSize: 18 }}>logout</span>
                   Disconnect Broker
