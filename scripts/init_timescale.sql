@@ -61,8 +61,10 @@ CREATE TABLE IF NOT EXISTS trade_records (
     timestamp_open      TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
     timestamp_close     TIMESTAMPTZ,
     trade_source        TEXT            DEFAULT 'LIVE',  -- LIVE/PAPER/BACKTEST
-    paper_trade         BOOLEAN         DEFAULT FALSE
+    paper_trade         BOOLEAN         DEFAULT FALSE,
+    created_at          TIMESTAMPTZ     NOT NULL DEFAULT NOW()  -- when the run was executed
 );
+ALTER TABLE trade_records ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
 CREATE INDEX IF NOT EXISTS idx_trade_records_symbol ON trade_records (symbol, timestamp_open DESC);
 CREATE INDEX IF NOT EXISTS idx_trade_records_outcome ON trade_records (outcome, timestamp_open DESC);

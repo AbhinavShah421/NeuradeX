@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import apiService from '../services/api';
 import { useAppStore } from '../stores/appStore';
-import TradeChart, { TradeMarker } from '../components/TradeChart';
+import TradingChart from '../components/TradingChart';
 
 interface AgentSignals {
   technical?: string;
@@ -38,6 +38,7 @@ interface TradeRecord {
   timestampOpen: string;
   timestampClose?: string;
   durationMinutes?: number;
+  createdAt?: string;   // when the backtest/session was actually run
 }
 
 interface Stats {
@@ -156,67 +157,30 @@ const ACTION_COLOR: Record<string, string> = {
   BUY: '#22c55e', SELL: '#ef4444', HOLD: '#f59e0b',
 };
 
-// ── Trade chart block: candles for the trade's day + entry/exit markers ───────
+// ── Trade chart block: thin wrapper over the shared TradingChart ──────────────
+// Shows the trade's day; if the trade belongs to a session, all the session's
+// trades are passed so the whole session's entry/exit markers are drawn.
 function TradeChartBlock({ trade, allTrades = [] }: { trade: TradeRecord; allTrades?: TradeRecord[] }) {
   const { theme } = useAppStore();
-  const [candles, setCandles] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [note, setNote] = useState<string | null>(null);
-
   const date = trade.timestampOpen ? trade.timestampOpen.slice(0, 10) : '';
-
-  // If this trade belongs to a session, show ALL the session's trades together
-  // so you see the full execution of that trading session, not just one entry/exit.
   const sessionId = trade.marketContext?.sessionId;
   const sessionTrades = sessionId
     ? allTrades.filter(t => t.marketContext?.sessionId === sessionId && (t.timestampOpen || '').slice(0, 10) === date)
     : [trade];
 
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      if (!date) { setLoading(false); setNote('No date on this trade.'); return; }
-      try {
-        const r = await apiService.getIntradayCandles(trade.symbol, date);
-        const cs = (r as any).data?.candles ?? [];
-        if (!alive) return;
-        if (!cs.length) setNote('No intraday chart available for this date.');
-        setCandles(cs);
-      } catch {
-        if (alive) setNote('Chart unavailable for this date (older than Groww intraday history).');
-      } finally {
-        if (alive) setLoading(false);
-      }
-    })();
-    return () => { alive = false; };
-  }, [trade.symbol, date]);
-
-  // Snap entry/exit to the nearest candle so the markers render on a real bar
-  const snap = (iso?: string): number | null => {
-    if (!iso || !candles.length) return null;
-    const target = Math.floor(new Date(iso).getTime() / 1000);
-    let best = candles[0].timestamp, bestD = Infinity;
-    for (const c of candles) { const d = Math.abs(c.timestamp - target); if (d < bestD) { bestD = d; best = c.timestamp; } }
-    return best;
-  };
-
-  const markers: TradeMarker[] = [];
-  for (const t of sessionTrades) {
-    const entryTs = snap(t.timestampOpen);
-    const exitTs = snap(t.timestampClose);
-    if (entryTs) markers.push({ timestamp: entryTs, action: 'BUY', price: t.entryPrice, text: `BUY ₹${t.entryPrice?.toFixed(2)}` });
-    if (exitTs && t.exitPrice) markers.push({ timestamp: exitTs, action: 'SELL', price: t.exitPrice, text: `SELL ₹${t.exitPrice.toFixed(2)}` });
-  }
-
-  if (loading) return <div style={{ padding: 24, textAlign: 'center', color: 'var(--nd-text-3)', fontSize: 13 }}>Loading chart…</div>;
-  if (note && !candles.length) return <div style={{ padding: 20, textAlign: 'center', color: 'var(--nd-text-3)', fontSize: 12, background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 10 }}>{note}</div>;
-
   return (
     <div style={{ border: '1px solid var(--nd-border)', borderRadius: 10, overflow: 'hidden' }}>
-      <TradeChart candles={candles} markers={markers} height={300} isDark={theme === 'dark'} />
+      <TradingChart symbol={trade.symbol} date={date} trades={sessionTrades} height={300} isDark={theme === 'dark'} />
     </div>
   );
 }
+
+const FField: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
+  <div style={{ display: 'flex', flexDirection: 'column', gap: 5, minWidth: 0 }}>
+    <label style={{ fontSize: 11, fontWeight: 500, color: 'var(--nd-text-3)' }}>{label}</label>
+    {children}
+  </div>
+);
 
 function ExecutionModal({ trade, allTrades = [], onClose }: { trade: TradeRecord; allTrades?: TradeRecord[]; onClose: () => void }) {
   const steps = buildExecutionSteps(trade);
@@ -321,8 +285,20 @@ const Orders: React.FC = () => {
   const [error,   setError]   = useState<string | null>(null);
   const [selected, setSelected] = useState<TradeRecord | null>(null);
   const [filter,   setFilter]   = useState<'ALL' | 'LIVE' | 'PAPER' | 'BACKTEST'>('ALL');
-  const [sortKey,  setSortKey]  = useState<string>('opened');
+  const [sortKey,  setSortKey]  = useState<string>('created');
   const [sortDir,  setSortDir]  = useState<'asc' | 'desc'>('desc');
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+  // Column filters
+  const [showFilters,  setShowFilters]  = useState(false);
+  const [fSymbol,      setFSymbol]      = useState('');
+  const [fPnl,         setFPnl]         = useState<'ALL' | 'PROFIT' | 'LOSS'>('ALL');
+  const [fMinTrades,   setFMinTrades]   = useState('');
+  const [fMinWin,      setFMinWin]      = useState('');
+  const [fTradeFrom,   setFTradeFrom]   = useState('');
+  const [fTradeTo,     setFTradeTo]     = useState('');
+  const [fCreatedFrom, setFCreatedFrom] = useState('');
+  const [fCreatedTo,   setFCreatedTo]   = useState('');
 
   useEffect(() => {
     const load = async () => {
@@ -351,33 +327,72 @@ const Orders: React.FC = () => {
     return src === filter;
   });
 
-  // Sortable columns — `get` returns the comparable value for each row
-  const COLUMNS: { label: string; key: string; get: (t: TradeRecord) => string | number }[] = [
-    { label: 'Symbol',     key: 'symbol',     get: t => t.symbol ?? '' },
-    { label: 'Action',     key: 'action',     get: t => t.action ?? '' },
-    { label: 'Mode',       key: 'mode',       get: t => t.tradeSource ?? (t.paperTrade ? 'PAPER' : 'LIVE') },
-    { label: 'Entry',      key: 'entry',      get: t => t.entryPrice ?? 0 },
-    { label: 'Exit',       key: 'exit',       get: t => t.exitPrice ?? 0 },
-    { label: 'P&L',        key: 'pnl',        get: t => t.pnlAbs ?? 0 },
-    { label: 'P&L %',      key: 'pnlPct',     get: t => t.pnlPct ?? 0 },
-    { label: 'Confidence', key: 'confidence', get: t => t.ensembleConfidence ?? 0 },
-    { label: 'Outcome',    key: 'outcome',    get: t => t.outcome ?? '' },
-    { label: 'Date & Time', key: 'opened',    get: t => (t.timestampOpen ? new Date(t.timestampOpen).getTime() : 0) },
-  ];
+  // ── Group trades into sessions ────────────────────────────────────────────
+  // Trades sharing a session id collapse into one row; trades without a session
+  // (e.g. an individual live order) stand alone as a single-trade session.
+  const groups = new Map<string, TradeRecord[]>();
+  for (const t of filteredTrades) {
+    const sid = t.marketContext?.sessionId;
+    const key = sid ? `s:${sid}` : `t:${t.tradeId}`;
+    (groups.get(key) ?? groups.set(key, []).get(key)!).push(t);
+  }
+  const sessions = Array.from(groups.entries()).map(([key, ts]) => {
+    const trades = [...ts].sort((a, b) => new Date(a.timestampOpen).getTime() - new Date(b.timestampOpen).getTime());
+    const totalPnl = trades.reduce((s, t) => s + (t.pnlAbs ?? 0), 0);
+    const closed = trades.filter(t => t.outcome === 'WIN' || t.outcome === 'LOSS').length;
+    const wins = trades.filter(t => (t.pnlAbs ?? 0) > 0).length;
+    return {
+      key, isSession: key.startsWith('s:'),
+      symbol: trades[0].symbol,
+      source: trades[0].tradeSource ?? (trades[0].paperTrade ? 'PAPER' : 'LIVE'),
+      mode: (trades[0].marketContext?.sessionMode as string) || '',
+      tradeDate: trades[0].timestampOpen ? new Date(trades[0].timestampOpen).getTime() : 0,
+      createdAt: trades[0].createdAt ? new Date(trades[0].createdAt).getTime() : 0,
+      count: trades.length, totalPnl, wins, closed, trades,
+    };
+  });
 
-  const sortCol = COLUMNS.find(c => c.key === sortKey) ?? COLUMNS[COLUMNS.length - 1];
-  const sortedTrades = [...filteredTrades].sort((a, b) => {
-    const va = sortCol.get(a), vb = sortCol.get(b);
-    const cmp = typeof va === 'number' && typeof vb === 'number'
-      ? va - vb
-      : String(va).localeCompare(String(vb));
+  type SGroup = typeof sessions[number];
+  const SCOLS: { label: string; key: string; get: (s: SGroup) => string | number }[] = [
+    { label: 'Symbol',     key: 'symbol',  get: s => s.symbol },
+    { label: 'Mode',       key: 'mode',    get: s => s.source },
+    { label: 'Trades',     key: 'trades',  get: s => s.count },
+    { label: 'P&L',        key: 'pnl',     get: s => s.totalPnl },
+    { label: 'Win %',      key: 'win',     get: s => (s.closed ? s.wins / s.closed : 0) },
+    { label: 'Trade Date', key: 'opened',  get: s => s.tradeDate },
+    { label: 'Created On', key: 'created', get: s => s.createdAt },
+  ];
+  const scol = SCOLS.find(c => c.key === sortKey) ?? SCOLS.find(c => c.key === 'created')!;
+  const sortedSessions = [...sessions].sort((a, b) => {
+    const va = scol.get(a), vb = scol.get(b);
+    const cmp = typeof va === 'number' && typeof vb === 'number' ? va - vb : String(va).localeCompare(String(vb));
     return sortDir === 'asc' ? cmp : -cmp;
   });
 
   const onSort = (key: string) => {
     if (key === sortKey) setSortDir(d => (d === 'asc' ? 'desc' : 'asc'));
-    else { setSortKey(key); setSortDir(key === 'opened' ? 'desc' : 'asc'); }
+    else { setSortKey(key); setSortDir(key === 'symbol' || key === 'mode' ? 'asc' : 'desc'); }
   };
+  const toggle = (key: string) => setExpanded(prev => {
+    const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n;
+  });
+
+  // Apply the per-column filters to the (already mode-filtered, sorted) sessions
+  const DAY = 86_400_000;
+  const visibleSessions = sortedSessions.filter(s => {
+    if (fSymbol && !s.symbol.toLowerCase().includes(fSymbol.toLowerCase())) return false;
+    if (fPnl === 'PROFIT' && s.totalPnl <= 0) return false;
+    if (fPnl === 'LOSS'   && s.totalPnl >= 0) return false;
+    if (fMinTrades && s.count < Number(fMinTrades)) return false;
+    if (fMinWin && (!s.closed || (s.wins / s.closed * 100) < Number(fMinWin))) return false;
+    if (fTradeFrom   && s.tradeDate && s.tradeDate < Date.parse(fTradeFrom)) return false;
+    if (fTradeTo     && s.tradeDate && s.tradeDate > Date.parse(fTradeTo) + DAY) return false;
+    if (fCreatedFrom && s.createdAt && s.createdAt < Date.parse(fCreatedFrom)) return false;
+    if (fCreatedTo   && s.createdAt && s.createdAt > Date.parse(fCreatedTo) + DAY) return false;
+    return true;
+  });
+  const filtersActive = !!(fSymbol || fPnl !== 'ALL' || fMinTrades || fMinWin || fTradeFrom || fTradeTo || fCreatedFrom || fCreatedTo);
+  const clearFilters = () => { setFSymbol(''); setFPnl('ALL'); setFMinTrades(''); setFMinWin(''); setFTradeFrom(''); setFTradeTo(''); setFCreatedFrom(''); setFCreatedTo(''); };
 
   const totalTrades  = stats?.tradeStats?.reduce((s, r) => s + Number(r.count), 0) ?? 0;
   const winningTrades = stats?.tradeStats?.find(r => r.outcome === 'WIN')?.count ?? 0;
@@ -452,10 +467,52 @@ const Orders: React.FC = () => {
             {f}
           </button>
         ))}
+        <button onClick={() => setShowFilters(v => !v)}
+          style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '5px 12px', borderRadius: 20, border: `1px solid ${filtersActive ? 'var(--nd-green)' : 'var(--nd-border)'}`, cursor: 'pointer', fontSize: 12, fontWeight: 500, background: 'var(--nd-surface)', color: filtersActive ? 'var(--nd-green)' : 'var(--nd-text-2)' }}>
+          <span className="material-icons" style={{ fontSize: 15 }}>tune</span>
+          Filters{filtersActive ? ' •' : ''}
+        </button>
+        {filtersActive && (
+          <button onClick={clearFilters} style={{ padding: '5px 10px', borderRadius: 20, border: '1px solid var(--nd-border)', cursor: 'pointer', fontSize: 12, background: 'var(--nd-surface)', color: 'var(--nd-text-3)' }}>Clear</button>
+        )}
         <span style={{ marginLeft: 4, fontSize: 12, color: 'var(--nd-text-3)', alignSelf: 'center' }}>
-          {filteredTrades.length} trade{filteredTrades.length !== 1 ? 's' : ''}
+          {visibleSessions.length} session{visibleSessions.length !== 1 ? 's' : ''}
         </span>
       </div>
+
+      {/* Column filters panel */}
+      {showFilters && (
+        <div style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 12, padding: 16, marginBottom: 14 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12 }}>
+            <FField label="Symbol">
+              <input className="nd-input" placeholder="e.g. SBIN" value={fSymbol} onChange={e => setFSymbol(e.target.value)} style={{ width: '100%', boxSizing: 'border-box' }} />
+            </FField>
+            <FField label="P&L">
+              <select className="nd-select" value={fPnl} onChange={e => setFPnl(e.target.value as any)} style={{ width: '100%', boxSizing: 'border-box' }}>
+                <option value="ALL">All</option><option value="PROFIT">Profit only</option><option value="LOSS">Loss only</option>
+              </select>
+            </FField>
+            <FField label="Min trades">
+              <input className="nd-input" type="number" inputMode="numeric" placeholder="0" value={fMinTrades} onChange={e => setFMinTrades(e.target.value)} style={{ width: '100%', boxSizing: 'border-box' }} />
+            </FField>
+            <FField label="Min win %">
+              <input className="nd-input" type="number" inputMode="numeric" placeholder="0" value={fMinWin} onChange={e => setFMinWin(e.target.value)} style={{ width: '100%', boxSizing: 'border-box' }} />
+            </FField>
+            <FField label="Trade date from">
+              <input className="nd-input" type="date" value={fTradeFrom} onChange={e => setFTradeFrom(e.target.value)} style={{ width: '100%', boxSizing: 'border-box' }} />
+            </FField>
+            <FField label="Trade date to">
+              <input className="nd-input" type="date" value={fTradeTo} onChange={e => setFTradeTo(e.target.value)} style={{ width: '100%', boxSizing: 'border-box' }} />
+            </FField>
+            <FField label="Created from">
+              <input className="nd-input" type="date" value={fCreatedFrom} onChange={e => setFCreatedFrom(e.target.value)} style={{ width: '100%', boxSizing: 'border-box' }} />
+            </FField>
+            <FField label="Created to">
+              <input className="nd-input" type="date" value={fCreatedTo} onChange={e => setFCreatedTo(e.target.value)} style={{ width: '100%', boxSizing: 'border-box' }} />
+            </FField>
+          </div>
+        </div>
+      )}
 
       {/* Trade list */}
       {filteredTrades.length === 0 ? (
@@ -465,10 +522,11 @@ const Orders: React.FC = () => {
       ) : (
         <div style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 12, overflow: 'hidden' }}>
           <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' as any }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, minWidth: 760 }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, minWidth: 820 }}>
             <thead>
               <tr style={{ borderBottom: '1px solid var(--nd-border)', background: 'var(--nd-bg)' }}>
-                {COLUMNS.map(c => (
+                <th style={{ width: 34 }} />
+                {SCOLS.map(c => (
                   <th key={c.key} onClick={() => onSort(c.key)}
                     style={{ padding: '10px 14px', textAlign: 'left', color: sortKey === c.key ? 'var(--nd-text-1)' : 'var(--nd-text-3)', fontWeight: 600, fontSize: 11, cursor: 'pointer', whiteSpace: 'nowrap', userSelect: 'none' }}>
                     {c.label}
@@ -480,47 +538,65 @@ const Orders: React.FC = () => {
               </tr>
             </thead>
             <tbody>
-              {sortedTrades.map((t, i) => {
-                const src = t.tradeSource ?? (t.paperTrade ? 'PAPER' : 'LIVE');
+              {visibleSessions.map(s => {
+                const open = expanded.has(s.key);
+                const fmt = (ms: number) => ms ? new Date(ms).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—';
                 return (
-                  <tr
-                    key={t.tradeId}
-                    onClick={() => setSelected(t)}
-                    style={{ borderBottom: i < sortedTrades.length - 1 ? '1px solid var(--nd-border)' : 'none', cursor: 'pointer', transition: 'background 0.1s' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--nd-bg)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                  >
-                    <td style={{ padding: '10px 14px', fontWeight: 700, color: 'var(--nd-text-1)' }}>{t.symbol}</td>
-                    <td style={{ padding: '10px 14px' }}>
-                      <span style={{ padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 700, background: `${ACTION_COLOR[t.action] ?? '#888'}18`, color: ACTION_COLOR[t.action] ?? 'var(--nd-text-1)' }}>
-                        {t.action}
-                      </span>
-                    </td>
-                    <td style={{ padding: '10px 14px' }}>
-                      <span style={{ fontSize: 10, padding: '2px 7px', borderRadius: 4, fontWeight: 600, background: `${modeColor[src] ?? '#888'}18`, color: modeColor[src] ?? 'var(--nd-text-3)' }}>
-                        {src}
-                      </span>
-                    </td>
-                    <td style={{ padding: '10px 14px', color: 'var(--nd-text-1)' }}>₹{t.entryPrice?.toFixed(2)}</td>
-                    <td style={{ padding: '10px 14px', color: 'var(--nd-text-2)' }}>{t.exitPrice ? `₹${t.exitPrice.toFixed(2)}` : '—'}</td>
-                    <td style={{ padding: '10px 14px', fontWeight: 600, color: pnlColor(t.pnlAbs ?? 0) }}>
-                      {t.pnlAbs != null ? `₹${t.pnlAbs.toFixed(2)}` : '—'}
-                    </td>
-                    <td style={{ padding: '10px 14px', fontWeight: 600, color: pnlColor(t.pnlPct ?? 0) }}>
-                      {t.pnlPct != null ? `${(t.pnlPct * 100).toFixed(2)}%` : '—'}
-                    </td>
-                    <td style={{ padding: '10px 14px', color: 'var(--nd-text-2)' }}>
-                      {t.ensembleConfidence ? `${(t.ensembleConfidence * 100).toFixed(0)}%` : '—'}
-                    </td>
-                    <td style={{ padding: '10px 14px' }}>
-                      <span style={{ fontSize: 11, fontWeight: 600, color: t.outcome === 'WIN' ? 'var(--nd-green)' : t.outcome === 'LOSS' ? 'var(--nd-red)' : 'var(--nd-text-3)' }}>
-                        {t.outcome ?? 'OPEN'}
-                      </span>
-                    </td>
-                    <td style={{ padding: '10px 14px', color: 'var(--nd-text-3)', fontSize: 11 }}>
-                      {t.timestampOpen ? new Date(t.timestampOpen).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'}
-                    </td>
-                  </tr>
+                  <React.Fragment key={s.key}>
+                    {/* Session header row — row click opens the modal; only the arrow toggles expand */}
+                    <tr onClick={() => setSelected(s.trades[0])}
+                      style={{ borderBottom: '1px solid var(--nd-border)', cursor: 'pointer', background: open ? 'var(--nd-bg)' : 'transparent', transition: 'background 0.1s' }}
+                      onMouseEnter={e => (e.currentTarget.style.background = 'var(--nd-bg)')}
+                      onMouseLeave={e => (e.currentTarget.style.background = open ? 'var(--nd-bg)' : 'transparent')}>
+                      <td onClick={e => { e.stopPropagation(); toggle(s.key); }}
+                        title={open ? 'Collapse' : 'Expand trades'}
+                        style={{ padding: '10px 0 10px 14px', color: 'var(--nd-text-3)', cursor: 'pointer' }}>
+                        <span className="material-icons" style={{ fontSize: 18, transition: 'transform 0.15s', transform: open ? 'rotate(90deg)' : 'none' }}>chevron_right</span>
+                      </td>
+                      <td style={{ padding: '10px 14px', fontWeight: 700, color: 'var(--nd-text-1)' }}>{s.symbol}</td>
+                      <td style={{ padding: '10px 14px' }}>
+                        <span style={{ fontSize: 10, padding: '2px 7px', borderRadius: 4, fontWeight: 600, background: `${modeColor[s.source] ?? '#888'}18`, color: modeColor[s.source] ?? 'var(--nd-text-3)' }}>{s.source}</span>
+                      </td>
+                      <td style={{ padding: '10px 14px', color: 'var(--nd-text-2)' }}>{s.count}{s.isSession ? ' · session' : ''}</td>
+                      <td style={{ padding: '10px 14px', fontWeight: 600, color: pnlColor(s.totalPnl) }}>₹{s.totalPnl.toFixed(2)}</td>
+                      <td style={{ padding: '10px 14px', color: 'var(--nd-text-2)' }}>{s.closed ? `${Math.round(s.wins / s.closed * 100)}% (${s.wins}/${s.closed})` : '—'}</td>
+                      <td style={{ padding: '10px 14px', color: 'var(--nd-text-3)', fontSize: 11 }}>{fmt(s.tradeDate)}</td>
+                      <td style={{ padding: '10px 14px', color: 'var(--nd-text-3)', fontSize: 11 }}>{fmt(s.createdAt)}</td>
+                    </tr>
+
+                    {/* Expanded: the session's trade rows only (chart lives in the modal) */}
+                    {open && (
+                      <tr style={{ background: 'var(--nd-bg)' }}>
+                        <td colSpan={SCOLS.length + 1} style={{ padding: '8px 16px 16px' }}>
+                          <div style={{ overflowX: 'auto' }}>
+                            <table style={{ width: '100%', minWidth: 560, borderCollapse: 'collapse', fontSize: 12 }}>
+                              <thead>
+                                <tr style={{ color: 'var(--nd-text-3)', textAlign: 'left' }}>
+                                  {['Time', 'Action', 'Entry', 'Exit', 'P&L', 'P&L %', 'Conf', 'Outcome'].map(h => (
+                                    <th key={h} style={{ padding: '6px 10px', fontWeight: 500 }}>{h}</th>
+                                  ))}
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {s.trades.map(t => (
+                                  <tr key={t.tradeId} style={{ borderTop: '1px solid var(--nd-border)' }}>
+                                    <td style={{ padding: '7px 10px', color: 'var(--nd-text-3)' }}>{t.timestampOpen ? new Date(t.timestampOpen).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : '—'}</td>
+                                    <td style={{ padding: '7px 10px' }}><span style={{ fontWeight: 700, color: ACTION_COLOR[t.action] ?? 'var(--nd-text-1)' }}>{t.action}</span></td>
+                                    <td style={{ padding: '7px 10px', color: 'var(--nd-text-1)' }}>₹{t.entryPrice?.toFixed(2)}</td>
+                                    <td style={{ padding: '7px 10px', color: 'var(--nd-text-2)' }}>{t.exitPrice ? `₹${t.exitPrice.toFixed(2)}` : '—'}</td>
+                                    <td style={{ padding: '7px 10px', fontWeight: 600, color: pnlColor(t.pnlAbs ?? 0) }}>{t.pnlAbs != null ? `₹${t.pnlAbs.toFixed(2)}` : '—'}</td>
+                                    <td style={{ padding: '7px 10px', fontWeight: 600, color: pnlColor(t.pnlPct ?? 0) }}>{t.pnlPct != null ? `${(t.pnlPct * 100).toFixed(2)}%` : '—'}</td>
+                                    <td style={{ padding: '7px 10px', color: 'var(--nd-text-2)' }}>{t.ensembleConfidence ? `${(t.ensembleConfidence * 100).toFixed(0)}%` : '—'}</td>
+                                    <td style={{ padding: '7px 10px' }}><span style={{ fontWeight: 600, color: t.outcome === 'WIN' ? 'var(--nd-green)' : t.outcome === 'LOSS' ? 'var(--nd-red)' : 'var(--nd-text-3)' }}>{t.outcome ?? 'OPEN'}</span></td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
                 );
               })}
             </tbody>
