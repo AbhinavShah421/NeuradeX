@@ -64,15 +64,9 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning("Could not start session runner: %s", exc)
 
-        # Autopilot trader (the AI watchlist is produced by the stock-scanner
-        # microservice, which writes it to Redis; the backend just reads + trades it).
-        try:
-            from app.agents.autopilot import autopilot_loop
-            app.state.autopilot_task = asyncio.create_task(autopilot_loop())
-            logger.info("Autopilot scheduled",
-                        extra={"log_type": "app_lifecycle", "event": "autopilot_scheduled"})
-        except Exception as exc:
-            logger.warning("Could not start autopilot: %s", exc)
+        # Autopilot now runs as its own microservice (autopilot-service:8015) — it
+        # owns the paper + backtest training loops and starts sessions via the API.
+        # The backend only reads/writes the enable flags and serves status.
 
         logger.info(
             "Application startup complete",

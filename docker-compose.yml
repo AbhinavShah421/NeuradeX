@@ -426,6 +426,32 @@ services:
     networks:
       - stock-prediction-network
 
+  # ── Autopilot Service (independent paper + backtest training loops) ──────────
+
+  autopilot-service:
+    build:
+      context: ./autopilot-service
+      dockerfile: Dockerfile
+    container_name: stock-prediction-autopilot
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      BACKEND_URL: "http://backend:8000"
+      AUTOPILOT_MAX_SESSIONS: "15"          # paper: cover the whole watchlist
+      AUTOPILOT_CAPITAL: "50000"
+      AUTOPILOT_TICK_SECS: "60"             # paper check cadence
+      AUTOPILOT_BACKTEST_SPEED: "1"         # 1x — dense, real-like training
+      AUTOPILOT_BACKTEST_MAX: "15"          # sessions per day queue
+      AUTOPILOT_BACKTEST_POLL: "15"         # queue completion poll
+      AUTOPILOT_BACKTEST_MAX_DAYS_BACK: "30"  # walk back N trading days, then wrap
+    ports:
+      - "8015:8015"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - stock-prediction-network
+
   # ── Phase 2 (cont): Model Trainer ────────────────────────────────────────────
 
   model-trainer:
