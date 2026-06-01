@@ -321,6 +321,8 @@ const Orders: React.FC = () => {
   const [error,   setError]   = useState<string | null>(null);
   const [selected, setSelected] = useState<TradeRecord | null>(null);
   const [filter,   setFilter]   = useState<'ALL' | 'LIVE' | 'PAPER' | 'BACKTEST'>('ALL');
+  const [sortKey,  setSortKey]  = useState<string>('opened');
+  const [sortDir,  setSortDir]  = useState<'asc' | 'desc'>('desc');
 
   useEffect(() => {
     const load = async () => {
@@ -348,6 +350,34 @@ const Orders: React.FC = () => {
     const src = t.tradeSource ?? (t.paperTrade ? 'PAPER' : 'LIVE');
     return src === filter;
   });
+
+  // Sortable columns — `get` returns the comparable value for each row
+  const COLUMNS: { label: string; key: string; get: (t: TradeRecord) => string | number }[] = [
+    { label: 'Symbol',     key: 'symbol',     get: t => t.symbol ?? '' },
+    { label: 'Action',     key: 'action',     get: t => t.action ?? '' },
+    { label: 'Mode',       key: 'mode',       get: t => t.tradeSource ?? (t.paperTrade ? 'PAPER' : 'LIVE') },
+    { label: 'Entry',      key: 'entry',      get: t => t.entryPrice ?? 0 },
+    { label: 'Exit',       key: 'exit',       get: t => t.exitPrice ?? 0 },
+    { label: 'P&L',        key: 'pnl',        get: t => t.pnlAbs ?? 0 },
+    { label: 'P&L %',      key: 'pnlPct',     get: t => t.pnlPct ?? 0 },
+    { label: 'Confidence', key: 'confidence', get: t => t.ensembleConfidence ?? 0 },
+    { label: 'Outcome',    key: 'outcome',    get: t => t.outcome ?? '' },
+    { label: 'Date & Time', key: 'opened',    get: t => (t.timestampOpen ? new Date(t.timestampOpen).getTime() : 0) },
+  ];
+
+  const sortCol = COLUMNS.find(c => c.key === sortKey) ?? COLUMNS[COLUMNS.length - 1];
+  const sortedTrades = [...filteredTrades].sort((a, b) => {
+    const va = sortCol.get(a), vb = sortCol.get(b);
+    const cmp = typeof va === 'number' && typeof vb === 'number'
+      ? va - vb
+      : String(va).localeCompare(String(vb));
+    return sortDir === 'asc' ? cmp : -cmp;
+  });
+
+  const onSort = (key: string) => {
+    if (key === sortKey) setSortDir(d => (d === 'asc' ? 'desc' : 'asc'));
+    else { setSortKey(key); setSortDir(key === 'opened' ? 'desc' : 'asc'); }
+  };
 
   const totalTrades  = stats?.tradeStats?.reduce((s, r) => s + Number(r.count), 0) ?? 0;
   const winningTrades = stats?.tradeStats?.find(r => r.outcome === 'WIN')?.count ?? 0;
@@ -438,19 +468,25 @@ const Orders: React.FC = () => {
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, minWidth: 760 }}>
             <thead>
               <tr style={{ borderBottom: '1px solid var(--nd-border)', background: 'var(--nd-bg)' }}>
-                {['Symbol', 'Action', 'Mode', 'Entry', 'Exit', 'P&L', 'P&L %', 'Confidence', 'Outcome', 'Opened'].map(h => (
-                  <th key={h} style={{ padding: '10px 14px', textAlign: 'left', color: 'var(--nd-text-3)', fontWeight: 500, fontSize: 11 }}>{h}</th>
+                {COLUMNS.map(c => (
+                  <th key={c.key} onClick={() => onSort(c.key)}
+                    style={{ padding: '10px 14px', textAlign: 'left', color: sortKey === c.key ? 'var(--nd-text-1)' : 'var(--nd-text-3)', fontWeight: 600, fontSize: 11, cursor: 'pointer', whiteSpace: 'nowrap', userSelect: 'none' }}>
+                    {c.label}
+                    <span style={{ marginLeft: 4, opacity: sortKey === c.key ? 1 : 0.25 }}>
+                      {sortKey === c.key ? (sortDir === 'asc' ? '▲' : '▼') : '↕'}
+                    </span>
+                  </th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {filteredTrades.map((t, i) => {
+              {sortedTrades.map((t, i) => {
                 const src = t.tradeSource ?? (t.paperTrade ? 'PAPER' : 'LIVE');
                 return (
                   <tr
                     key={t.tradeId}
                     onClick={() => setSelected(t)}
-                    style={{ borderBottom: i < filteredTrades.length - 1 ? '1px solid var(--nd-border)' : 'none', cursor: 'pointer', transition: 'background 0.1s' }}
+                    style={{ borderBottom: i < sortedTrades.length - 1 ? '1px solid var(--nd-border)' : 'none', cursor: 'pointer', transition: 'background 0.1s' }}
                     onMouseEnter={e => (e.currentTarget.style.background = 'var(--nd-bg)')}
                     onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                   >
