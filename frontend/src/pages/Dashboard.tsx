@@ -364,10 +364,10 @@ const AutopilotBanner: React.FC = () => {
           <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>Autopilot {on ? 'ON' : 'OFF'}</div>
           <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>
             {on
-              ? (ap.market_status === 'open'
-                  ? `Paper-trading ${ap.running_paper_sessions}/${ap.max_concurrent} top watchlist picks`
-                  : `Market ${ap.market_status} — will trade the watchlist at open`)
-              : 'Auto paper-trades the AI watchlist during market hours and learns from each trade'}
+              ? (ap.marketStatus === 'open'
+                  ? `Paper-trading ${ap.runningPaperSessions} of ${ap.watchlistSize ?? 0} watchlist stocks · ${ap.startedToday ?? 0} opened today`
+                  : `Market ${ap.marketStatus} — will paper-trade all ${ap.watchlistSize ?? 0} watchlist stocks at open`)
+              : 'Auto paper-trades every AI watchlist stock during market hours and learns from each trade'}
           </div>
         </div>
       </div>
