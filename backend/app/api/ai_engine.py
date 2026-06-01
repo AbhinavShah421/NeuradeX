@@ -191,6 +191,83 @@ async def learning_summary():
     }
 
 
+# ── AI Watchlist (self-running market scanner) ────────────────────────────────
+
+@router.get("/watchlist")
+async def get_watchlist():
+    """The live AI-selected watchlist with full evidence per stock."""
+    from app.agents.market_scanner import get_watchlist as _gw
+    return {"status": "success", "data": await _gw()}
+
+
+@router.post("/watchlist/scan")
+async def scan_watchlist():
+    """Trigger an immediate market rescan (also runs every 30 min in the background)."""
+    from app.agents.market_scanner import scan_market
+    import asyncio
+    asyncio.create_task(scan_market())
+    return {"status": "started"}
+
+
+# ── Autopilot ─────────────────────────────────────────────────────────────────
+
+class AutopilotRequest(BaseModel):
+    enabled: bool
+
+
+@router.get("/autopilot")
+async def get_autopilot():
+    from app.agents.autopilot import status
+    return {"status": "success", "data": await status()}
+
+
+@router.post("/autopilot")
+async def set_autopilot(req: AutopilotRequest):
+    from app.agents.autopilot import set_enabled, status
+    await set_enabled(req.enabled)
+    return {"status": "success", "data": await status()}
+
+
+# ── Learning curve (system getting smarter over time) ─────────────────────────
+
+@router.get("/learning-curve")
+async def learning_curve():
+    """Cumulative win-rate as the system accumulates experience (trades ordered by
+    time). Shows the system stabilising/improving as it learns from paper trading,
+    sessions and backtests — and extends as the autopilot trades more."""
+    await _db_once()
+    from app.database.postgres import engine
+    from sqlalchemy import text
+    try:
+        async with engine.begin() as conn:
+            rows = (await conn.execute(text("""
+                SELECT outcome, pnl_pct, created_at FROM trade_records
+                WHERE outcome IN ('WIN','LOSS') ORDER BY created_at ASC, id ASC
+            """))).fetchall()
+    except Exception as exc:
+        logger.warning("learning_curve failed: %s", exc)
+        rows = []
+
+    n = len(rows)
+    points: list[dict] = []
+    if n:
+        # ~40 evenly-spaced samples of the running cumulative win-rate
+        step = max(1, n // 40)
+        cum_wins = cum_ret = 0.0
+        for i, r in enumerate(rows, start=1):
+            if r[0] == "WIN":
+                cum_wins += 1
+            cum_ret += float(r[1] or 0.0)
+            if i % step == 0 or i == n:
+                points.append({
+                    "trade_no": i,
+                    "cum_win_rate": round(cum_wins / i, 4),
+                    "cum_avg_return": round(cum_ret / i * 100, 2),
+                    "date": r[2].strftime("%Y-%m-%d") if r[2] else None,
+                })
+    return {"status": "success", "data": {"points": points, "total_trades": n}}
+
+
 # ── Pattern Memory ────────────────────────────────────────────────────────────
 
 class SeedMemoryRequest(BaseModel):

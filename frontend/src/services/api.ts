@@ -663,6 +663,28 @@ class ApiService {
     return response.data;
   }
 
+  // ── AI watchlist (self-running scanner) + autopilot + learning curve ────────
+  async aiWatchlist(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/ai-engine/watchlist');
+    return response.data;
+  }
+  async scanWatchlist(): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/ai-engine/watchlist/scan');
+    return response.data;
+  }
+  async getAutopilot(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/ai-engine/autopilot');
+    return response.data;
+  }
+  async setAutopilot(enabled: boolean): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/ai-engine/autopilot', { enabled });
+    return response.data;
+  }
+  async learningCurve(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/ai-engine/learning-curve');
+    return response.data;
+  }
+
   async memoryQuery(payload: { symbol: string; candles: any[] }): Promise<ApiResponse<any>> {
     const response = await this.api.post('/api/ai-engine/memory/query', payload);
     return response.data;
