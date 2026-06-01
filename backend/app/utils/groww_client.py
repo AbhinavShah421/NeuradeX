@@ -296,6 +296,9 @@ class GrowwClient:
             self._token_expiry = None
             self._failure_count = 0
             self._failure_reason = ""
+            # A manual refresh always bypasses the auto-retry cooldown
+            self._status = STATUS_UNKNOWN
+            self._last_refresh_fail = 0.0
             await self._redis_clear()
         try:
             await self._token()
