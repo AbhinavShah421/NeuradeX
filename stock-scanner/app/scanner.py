@@ -36,6 +36,8 @@ IST = timezone(timedelta(hours=5, minutes=30))
 _YAHOO = "https://query1.finance.yahoo.com/v8/finance/chart/"
 _UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Accept": "application/json"}
 _WATCHLIST_KEY   = "ai_engine:watchlist"
+_CANDIDATES_KEY  = "ai_engine:scan_candidates"           # candidate pool for the sentiment-service
+_SENTIMENT_KEY   = "ai_engine:sentiment:{}"              # per-symbol news signal (sentiment-service)
 _PREMARKET_KEY   = "ai_engine:watchlist:premarket"   # snapshot graded after close
 _CALIBRATION_KEY = "ai_engine:scan_calibration"       # learned confidence multipliers
 _EVAL_KEY        = "ai_engine:scan_eval:latest"       # last post-market grade
@@ -45,6 +47,7 @@ MIN_AVG_VOLUME = float(os.getenv("SCAN_MIN_VOLUME", "300000"))   # liquidity
 MIN_ATR_PCT    = float(os.getenv("SCAN_MIN_ATR_PCT", "1.2"))     # daily true range %
 MIN_PRICE      = float(os.getenv("SCAN_MIN_PRICE", "30"))        # avoid illiquid penny stocks
 TOP_N          = int(os.getenv("SCAN_TOP_N", "15"))
+CANDIDATE_POOL_N = int(os.getenv("SCAN_CANDIDATE_POOL", "30"))   # names the sentiment-service covers
 SCAN_INTERVAL  = int(os.getenv("SCAN_INTERVAL", str(20 * 60)))   # intraday sweep cadence
 FETCH_DELAY    = float(os.getenv("SCAN_FETCH_DELAY", "0.25"))    # be gentle on Yahoo
 
@@ -171,10 +174,12 @@ def _analyze(candles: list[dict], regime: int = 0, calib: dict | None = None) ->
         action = "HOLD"
 
     # ── Intraday-suitability score: tradability + directional conviction ──
+    # Volatility (ATR) is weighted highest: only stocks that actually move enough
+    # intraday can clear transaction costs, so we fish where the big moves are.
     liq_score = min(1.0, avg_vol / 3_000_000)
     vol_score = max(0.0, min(1.0, (atr_pct - MIN_ATR_PCT) / 3.0 + 0.3))
     relvol_score = min(1.0, rel_vol / 2.0)
-    tradability = liq_score * 0.45 + vol_score * 0.40 + relvol_score * 0.15
+    tradability = liq_score * 0.35 + vol_score * 0.50 + relvol_score * 0.15
     raw_score = round((tradability * 0.55 + conviction * 0.45), 4)
 
     # Learned calibration: scale confidence by how accurate this action has been
@@ -310,8 +315,41 @@ async def scan_once(phase: str = "intraday") -> dict:
                 candidates.append({"symbol": sym, "name": name, "source": "scanner", **res})
             await asyncio.sleep(FETCH_DELAY)
 
-    candidates.sort(key=lambda r: (r["action"] != "BUY", -r["signal_score"]))
+    # ── News-catalyst boost ───────────────────────────────────────────────────
+    # Pull the LLM news signal (written by the sentiment-service) for each
+    # candidate and let a fresh, high-conviction, directional catalyst lift the
+    # ranking — so high-ATR names *with* a real news catalyst float to the top
+    # (that's where moves big enough to clear costs happen). Long-only, so
+    # positive news boosts and negative news is penalised.
+    r = await _get_redis()
+    for c in candidates:
+        boost = 0.0
+        try:
+            raw_s = await r.get(_SENTIMENT_KEY.format(c["symbol"]))
+            if raw_s:
+                nd = json.loads(raw_s)
+                if int(nd.get("headlines_count", 0)) > 0 and float(nd.get("confidence", 0) or 0) >= 0.6:
+                    score = float(nd.get("score", 0) or 0)        # -1..1
+                    conf  = float(nd.get("confidence", 0) or 0)
+                    boost = max(-0.30, min(0.50, score * conf * 0.6))
+                    c["catalyst"] = nd.get("catalyst") or nd.get("summary")
+                    c["news_sentiment"] = nd.get("sentiment")
+        except Exception:
+            pass
+        c["catalyst_boost"] = round(boost, 3)
+        c["rank_score"] = round(c["signal_score"] * (1 + boost), 2)
+
+    candidates.sort(key=lambda r: (r["action"] != "BUY", -r["rank_score"]))
     watchlist = candidates[:TOP_N]
+
+    # Publish the candidate pool so the sentiment-service analyses the names just
+    # below the cut too — that's how a fresh catalyst can pull a stock *into* the
+    # watchlist next cycle (otherwise news would only ever reinforce incumbents).
+    try:
+        pool = [{"symbol": c["symbol"], "name": c["name"]} for c in candidates[:CANDIDATE_POOL_N]]
+        await r.set(_CANDIDATES_KEY, json.dumps({"updated_at": _ist_now().isoformat(), "items": pool}), ex=86400)
+    except Exception as exc:
+        logger.debug("candidate pool write failed: %s", exc)
 
     now = _ist_now()
     payload = {

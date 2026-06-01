@@ -58,12 +58,25 @@ async def _ollama(prompt: str, temperature: float, timeout: float) -> str | None
 
 async def llm_chat(prompt: str, *, temperature: float = 0.1, max_tokens: int = 256,
                    timeout: float = 20.0) -> str | None:
+    """Anthropic if selected, falling back to Ollama on any failure (no credits,
+    rate limit, network) so the sentiment worker keeps producing signals."""
     provider = resolve_provider()
-    try:
-        if provider == "anthropic":
-            return await _anthropic(prompt, temperature, max_tokens, timeout)
-        if provider == "ollama":
+    if provider == "off":
+        return None
+    if provider == "anthropic":
+        try:
+            out = await _anthropic(prompt, temperature, max_tokens, timeout)
+            if out:
+                return out
+        except Exception as exc:
+            logger.debug("anthropic failed, falling back to ollama: %s", exc)
+        try:
             return await _ollama(prompt, temperature, timeout)
+        except Exception as exc:
+            logger.debug("ollama fallback failed: %s", exc)
+            return None
+    try:
+        return await _ollama(prompt, temperature, timeout)
     except Exception as exc:
-        logger.debug("llm_chat (%s) failed: %s", provider, exc)
-    return None
+        logger.debug("ollama failed: %s", exc)
+        return None

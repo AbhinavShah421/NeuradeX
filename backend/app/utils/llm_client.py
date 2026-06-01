@@ -87,16 +87,30 @@ async def llm_chat(prompt: str, system: str | None = None, *,
                    temperature: float = 0.1, max_tokens: int = 512,
                    timeout: float = 12.0) -> str | None:
     """Send a single-turn prompt to the active provider. Returns the text reply,
-    or None if the LLM is disabled/unavailable (caller should fall back)."""
+    or None if the LLM is disabled/unavailable (caller should fall back).
+
+    If Anthropic is selected but a call fails (no credits, rate limit, network),
+    it falls back to Ollama automatically — so a flaky/empty Anthropic account
+    never takes the system's LLM features down."""
     provider = resolve_provider()
-    try:
-        if provider == "anthropic":
-            return await _anthropic_chat(prompt, system, temperature, max_tokens, timeout)
-        if provider == "ollama":
+    if provider == "off":
+        return None
+    if provider == "anthropic":
+        try:
+            out = await _anthropic_chat(prompt, system, temperature, max_tokens, timeout)
+            if out:
+                return out
+        except Exception as exc:
+            logger.debug("anthropic failed, falling back to ollama: %s", exc)
+        try:
             return await _ollama_chat(prompt, system, temperature, timeout)
-        return None  # "off"
+        except Exception as exc:
+            logger.debug("ollama fallback failed: %s", exc)
+            return None
+    try:
+        return await _ollama_chat(prompt, system, temperature, timeout)
     except Exception as exc:
-        logger.debug("llm_chat (%s) failed: %s", provider, exc)
+        logger.debug("ollama failed: %s", exc)
         return None
 
 
@@ -112,6 +126,16 @@ async def llm_status(probe: bool = True) -> dict:
         "available": False,
     }
     if probe and provider != "off":
+        # When Anthropic is selected, probe it directly so the status tells the
+        # truth about Anthropic itself (vs. the Ollama fallback that llm_chat uses).
+        if provider == "anthropic":
+            try:
+                a = await _anthropic_chat("Reply with: ok", None, 0.0, 10, 8.0)
+                info["anthropic_ok"] = bool(a)
+            except Exception as exc:
+                info["anthropic_ok"] = False
+                info["anthropic_error"] = str(exc)[:140]
+                info["effective_provider"] = "ollama (fallback)"
         try:
             out = await llm_chat("Reply with exactly: ok", temperature=0.0,
                                  max_tokens=10, timeout=8.0)
