@@ -185,25 +185,93 @@ async def get_prediction_history(symbol: str = "AAPL", limit: int = 10):
 
 @router.get("/accuracy/stats")
 async def get_accuracy_stats():
-    """Get overall model accuracy statistics"""
+    """Real, evidence-backed system metrics computed live from actual trades
+    (trade_records) and the agent learning loop (ai_engine_outcomes).
+    No hard-coded or random values — every number is derived from stored data."""
+    import math
+    from sqlalchemy import text
+    from app.database.postgres import engine
+
     try:
+        async with engine.begin() as conn:
+            # ── Closed trades (the evidence for win-rate / return / sharpe) ──────
+            rows = (await conn.execute(text(
+                "SELECT pnl_pct, pnl_abs, outcome, trade_source "
+                "FROM trade_records WHERE outcome IN ('WIN','LOSS') ORDER BY created_at ASC"
+            ))).fetchall()
+
+            # ── Agent prediction accuracy (the learning loop) ───────────────────
+            acc_row = (await conn.execute(text(
+                "SELECT COUNT(*), SUM(CASE WHEN outcome='correct' THEN 1 ELSE 0 END) "
+                "FROM ai_engine_outcomes"
+            ))).fetchone()
+
+        total_preds   = int(acc_row[0] or 0) if acc_row else 0
+        correct_preds = int(acc_row[1] or 0) if acc_row else 0
+        accuracy_rate = (correct_preds / total_preds) if total_preds else 0.0
+
+        # pnl_pct is stored as a fraction (0.0245 = 2.45%)
+        returns = [float(r[0]) for r in rows if r[0] is not None]
+        pnls    = [float(r[1]) for r in rows if r[1] is not None]
+        wins    = sum(1 for r in rows if r[2] == 'WIN')
+        losses  = sum(1 for r in rows if r[2] == 'LOSS')
+        total   = wins + losses
+
+        win_rate   = (wins / total) if total else 0.0
+        avg_ret    = (sum(returns) / len(returns) * 100) if returns else 0.0     # %
+        std_ret    = (math.sqrt(sum((x*100 - avg_ret) ** 2 for x in returns) / len(returns))
+                      if len(returns) > 1 else 0.0)
+        sharpe     = (avg_ret / std_ret) if std_ret > 0 else 0.0                  # per-trade Sharpe
+        best_pct   = max(returns) * 100 if returns else 0.0
+        worst_pct  = min(returns) * 100 if returns else 0.0
+
+        # Max drawdown from the running cumulative P&L curve
+        max_dd = 0.0
+        if pnls:
+            cum = peak = 0.0
+            for p in pnls:
+                cum += p
+                peak = max(peak, cum)
+                max_dd = min(max_dd, cum - peak)
+
+        # Win-rate / return broken down by source (evidence)
+        by_source = {}
+        for r in rows:
+            src = r[3] or 'LIVE'
+            d = by_source.setdefault(src, {"trades": 0, "wins": 0, "ret_sum": 0.0})
+            d["trades"] += 1
+            d["wins"] += 1 if r[2] == 'WIN' else 0
+            d["ret_sum"] += float(r[0] or 0.0)
+        by_source_list = [
+            {"source": s, "trades": d["trades"],
+             "win_rate": round(d["wins"] / d["trades"], 4) if d["trades"] else 0.0,
+             "avg_return": round(d["ret_sum"] / d["trades"] * 100, 2) if d["trades"] else 0.0}
+            for s, d in sorted(by_source.items())
+        ]
+
         stats = {
-            "total_predictions": random.randint(1000, 10000),
-            "accurate_predictions": random.randint(500, 7000),
-            "accuracy_rate": round(random.uniform(0.55, 0.75), 4),
-            "winning_trades": random.randint(400, 6000),
-            "losing_trades": random.randint(100, 2000),
-            "win_rate": round(random.uniform(0.55, 0.75), 4),
-            "average_return": round(random.uniform(0.5, 5.0), 2),
-            "sharpe_ratio": round(random.uniform(0.5, 2.5), 2),
-            "max_drawdown": round(random.uniform(-20, -5), 2),
-            "updated_at": datetime.now().isoformat()
+            "accuracy_rate":       round(accuracy_rate, 4),
+            "total_predictions":   total_preds,
+            "correct_predictions": correct_preds,
+
+            "win_rate":            round(win_rate, 4),
+            "winning_trades":      wins,
+            "losing_trades":       losses,
+            "total_trades":        total,
+
+            "average_return":      round(avg_ret, 2),
+            "return_std":          round(std_ret, 2),
+            "best_trade_pct":      round(best_pct, 2),
+            "worst_trade_pct":     round(worst_pct, 2),
+
+            "sharpe_ratio":        round(sharpe, 2),
+            "max_drawdown":        round(max_dd, 2),
+
+            "by_source":           by_source_list,
+            "has_data":            total > 0 or total_preds > 0,
+            "updated_at":          datetime.now().isoformat(),
         }
-        
-        return {
-            "status": "success",
-            "data": stats
-        }
+        return {"status": "success", "data": stats}
     except Exception as e:
         logger.error(f"Error fetching accuracy stats: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to fetch accuracy stats")

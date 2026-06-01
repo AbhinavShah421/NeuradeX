@@ -103,6 +103,7 @@ class Settings(BaseSettings):
 
     # Internal service URLs
     FEEDBACK_SERVICE_URL: str = "http://feedback-service:8012"
+    SCANNER_SERVICE_URL: str = "http://stock-scanner:8014"
 
     # Pattern-memory nightly refresh (replays real backtests to keep the bank fresh)
     MEMORY_SWEEP_ENABLED: bool = True

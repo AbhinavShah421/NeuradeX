@@ -1,7 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import apiService from '../services/api';
-import { Stock, Prediction } from '../types';
 
 const inr = (v: number) =>
   `₹${v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -40,92 +39,6 @@ const ExBadge = ({ ex }: { ex: string }) => {
     }}>{ex}</span>
   );
 };
-
-// ── AI Watchlist Tab ──────────────────────────────────────────────────────────
-
-const WatchlistTab = ({ stocks, predictions, loading, error }: {
-  stocks: Stock[];
-  predictions: Record<string, Prediction>;
-  loading: boolean;
-  error: string | null;
-}) => (
-  <div>
-    {error && (
-      <div className="nd-alert nd-alert-error" style={{ marginBottom: 12 }}>
-        <span className="material-icons">error_outline</span> {error}
-      </div>
-    )}
-
-    {loading ? (
-      <div style={{ padding: 48, textAlign: 'center', color: 'var(--nd-text-3)' }}>
-        <span className="material-icons nd-spin" style={{ fontSize: 22, verticalAlign: 'middle', marginRight: 8 }}>autorenew</span>
-        Loading market data…
-      </div>
-    ) : (
-      <div style={{ overflowX: 'auto' }}>
-        <table className="nd-table">
-          <thead>
-            <tr>
-              <th>Company</th>
-              <th className="text-right">Price</th>
-              <th className="text-right">Day Change</th>
-              <th className="text-right">High</th>
-              <th className="text-right">Low</th>
-              <th className="text-right">Volume</th>
-              <th className="text-right">AI Signal</th>
-              <th className="text-right">Confidence</th>
-              <th className="text-right">Target</th>
-            </tr>
-          </thead>
-          <tbody>
-            {stocks.map(stock => {
-              const pred = predictions[stock.symbol];
-              return (
-                <tr key={stock.symbol}>
-                  <td>
-                    <Link to={`/stocks/${stock.symbol}`} style={{ textDecoration: 'none' }}>
-                      <p style={{ fontWeight: 600, color: 'var(--nd-text-1)', fontSize: 13.5 }}>{stock.name}</p>
-                      <p style={{ fontSize: 11.5, color: 'var(--nd-text-2)', marginTop: 2 }}>
-                        {stock.symbol}{stock.sector && <span> · {stock.sector}</span>}
-                      </p>
-                    </Link>
-                  </td>
-                  <td className="text-right" style={{ fontWeight: 600, fontSize: 13.5 }}>{inr(stock.price)}</td>
-                  <td className="text-right">
-                    <p style={{ fontSize: 13, fontWeight: 500, color: stock.change >= 0 ? 'var(--nd-green)' : 'var(--nd-red)' }}>
-                      {stock.change >= 0 ? '+' : ''}{inr(Math.abs(stock.change))}
-                    </p>
-                    <p style={{ fontSize: 11.5, color: stock.change >= 0 ? 'var(--nd-green)' : 'var(--nd-red)' }}>
-                      ({stock.change >= 0 ? '+' : ''}{stock.changePercent.toFixed(2)}%)
-                    </p>
-                  </td>
-                  <td className="text-right" style={{ fontSize: 13, color: 'var(--nd-text-2)' }}>{inr(stock.high)}</td>
-                  <td className="text-right" style={{ fontSize: 13, color: 'var(--nd-text-2)' }}>{inr(stock.low)}</td>
-                  <td className="text-right" style={{ fontSize: 12.5, color: 'var(--nd-text-2)' }}>
-                    {(stock.volume / 1_000_000).toFixed(2)}M
-                  </td>
-                  <td className="text-right">
-                    {pred ? (
-                      <span className={`nd-badge ${pred.prediction === 'UP' ? 'nd-badge-green' : pred.prediction === 'DOWN' ? 'nd-badge-red' : 'nd-badge-gray'}`}>
-                        {pred.prediction === 'UP' ? '▲' : pred.prediction === 'DOWN' ? '▼' : '—'} {pred.prediction}
-                      </span>
-                    ) : <span style={{ color: 'var(--nd-text-3)' }}>—</span>}
-                  </td>
-                  <td className="text-right" style={{ fontWeight: 500, fontSize: 13 }}>
-                    {pred ? `${(pred.confidence * 100).toFixed(0)}%` : '—'}
-                  </td>
-                  <td className="text-right" style={{ fontWeight: 500, fontSize: 13 }}>
-                    {pred ? inr(pred.targetPrice) : '—'}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    )}
-  </div>
-);
 
 // ── All Stocks Directory Tab ───────────────────────────────────────────────────
 
@@ -334,40 +247,311 @@ const DirectoryTab: React.FC = () => {
   );
 };
 
+// ── Metric evidence modal ─────────────────────────────────────────────────────
+// Shows exactly how each headline number is derived from real stored data.
+
+const MetricModal: React.FC<{ cardId: string; stats: any; onClose: () => void }> = ({ cardId, stats, onClose }) => {
+  const pct = (v: number) => `${(v * 100).toFixed(1)}%`;
+  const Row: React.FC<{ k: string; v: React.ReactNode; c?: string }> = ({ k, v, c }) => (
+    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '9px 0', borderBottom: '1px solid var(--nd-border)', fontSize: 13 }}>
+      <span style={{ color: 'var(--nd-text-3)' }}>{k}</span>
+      <span style={{ color: c || 'var(--nd-text-1)', fontWeight: 600, textAlign: 'right' }}>{v}</span>
+    </div>
+  );
+
+  const META: Record<string, { title: string; icon: string; how: string; rows: () => React.ReactNode }> = {
+    accuracy: {
+      title: 'Model Accuracy', icon: 'psychology',
+      how: 'Share of the AI engine’s recorded predictions whose outcome was correct (from the agent learning loop). It rises as the agents learn from each backtest, paper trade and live session.',
+      rows: () => (<>
+        <Row k="Correct predictions" v={stats.correctPredictions} c="var(--nd-green)" />
+        <Row k="Total predictions" v={stats.totalPredictions} />
+        <Row k="Accuracy" v={pct(stats.accuracyRate)} c="var(--nd-green)" />
+      </>),
+    },
+    win: {
+      title: 'Win Rate', icon: 'emoji_events',
+      how: 'Share of closed trades that were profitable, computed from every recorded trade (Live, Paper, Backtest).',
+      rows: () => (<>
+        <Row k="Winning trades" v={stats.winningTrades} c="var(--nd-green)" />
+        <Row k="Losing trades" v={stats.losingTrades} c="var(--nd-red)" />
+        <Row k="Total closed trades" v={stats.totalTrades} />
+        <Row k="Win rate" v={pct(stats.winRate)} c="var(--nd-green)" />
+        {Array.isArray(stats.bySource) && stats.bySource.length > 0 && (
+          <div style={{ marginTop: 10 }}>
+            <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginBottom: 6 }}>By source</div>
+            {stats.bySource.map((b: any) => (
+              <Row key={b.source} k={`${b.source} (${b.trades})`} v={`${(b.winRate * 100).toFixed(1)}% · ${b.avgReturn >= 0 ? '+' : ''}${b.avgReturn}%`} />
+            ))}
+          </div>
+        )}
+      </>),
+    },
+    return: {
+      title: 'Average Return', icon: 'trending_up',
+      how: 'Mean P&L % across all closed trades. Best/worst show the spread the average is drawn from.',
+      rows: () => (<>
+        <Row k="Average return / trade" v={`${stats.averageReturn >= 0 ? '+' : ''}${stats.averageReturn}%`} c={stats.averageReturn >= 0 ? 'var(--nd-green)' : 'var(--nd-red)'} />
+        <Row k="Std deviation" v={`${stats.returnStd}%`} />
+        <Row k="Best trade" v={`+${stats.bestTradePct}%`} c="var(--nd-green)" />
+        <Row k="Worst trade" v={`${stats.worstTradePct}%`} c="var(--nd-red)" />
+        <Row k="Across" v={`${stats.totalTrades} trades`} />
+      </>),
+    },
+    sharpe: {
+      title: 'Sharpe Ratio', icon: 'analytics',
+      how: 'Risk-adjusted return = mean return ÷ standard deviation of returns (per trade). Higher means more consistent returns for the risk taken.',
+      rows: () => (<>
+        <Row k="Sharpe (mean ÷ std)" v={stats.sharpeRatio} c="var(--nd-purple)" />
+        <Row k="Mean return" v={`${stats.averageReturn}%`} />
+        <Row k="Return std" v={`${stats.returnStd}%`} />
+        <Row k="Max drawdown (₹)" v={`₹${stats.maxDrawdown?.toLocaleString('en-IN')}`} c="var(--nd-red)" />
+      </>),
+    },
+  };
+  const m = META[cardId];
+  if (!m) return null;
+
+  return (
+    <div onClick={e => { if (e.target === e.currentTarget) onClose(); }}
+      style={{ position: 'fixed', inset: 0, background: '#00000080', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 12 }}>
+      <div style={{ background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 16, width: '100%', maxWidth: 460, maxHeight: '88vh', overflow: 'auto', boxShadow: '0 24px 64px #00000060' }}>
+        <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--nd-border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span className="material-icons" style={{ color: 'var(--nd-green)' }}>{m.icon}</span>
+            <span style={{ fontSize: 16, fontWeight: 700, color: 'var(--nd-text-1)' }}>{m.title}</span>
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer' }}>
+            <span className="material-icons" style={{ color: 'var(--nd-text-3)', fontSize: 20 }}>close</span>
+          </button>
+        </div>
+        <div style={{ padding: '14px 20px' }}>
+          <p style={{ margin: '0 0 14px', fontSize: 12.5, lineHeight: 1.6, color: 'var(--nd-text-2)' }}>{m.how}</p>
+          {m.rows()}
+          <div style={{ marginTop: 14, fontSize: 11, color: 'var(--nd-text-3)', background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 8, padding: '8px 12px' }}>
+            Computed live from <strong>{stats.totalTrades}</strong> closed trades and <strong>{stats.totalPredictions}</strong> predictions — no hard-coded values.
+            {!stats.hasData && ' Run a backtest or session to start populating these.'}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ── Autopilot banner ──────────────────────────────────────────────────────────
+
+const AutopilotBanner: React.FC = () => {
+  const [ap, setAp] = useState<any>(null);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(async () => {
+    try { const r = await apiService.getAutopilot(); setAp((r as any).data); } catch {}
+  }, []);
+  useEffect(() => { load(); const t = setInterval(load, 12000); return () => clearInterval(t); }, [load]);
+  const toggle = async () => {
+    if (!ap) return;
+    setBusy(true);
+    try { const r = await apiService.setAutopilot(!ap.enabled); setAp((r as any).data); } catch {} finally { setBusy(false); }
+  };
+  if (!ap) return null;
+  const on = ap.enabled;
+  return (
+    <div className="nd-card" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '14px 18px', marginBottom: 20, flexWrap: 'wrap', borderLeft: `3px solid ${on ? 'var(--nd-green)' : 'var(--nd-border)'}` }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
+        <div className="nd-icon-chip" style={{ background: on ? 'var(--nd-green-50)' : 'var(--nd-surface)' }}>
+          <span className="material-icons" style={{ color: on ? 'var(--nd-green)' : 'var(--nd-text-3)' }}>smart_toy</span>
+        </div>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>Autopilot {on ? 'ON' : 'OFF'}</div>
+          <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>
+            {on
+              ? (ap.market_status === 'open'
+                  ? `Paper-trading ${ap.running_paper_sessions}/${ap.max_concurrent} top watchlist picks`
+                  : `Market ${ap.market_status} — will trade the watchlist at open`)
+              : 'Auto paper-trades the AI watchlist during market hours and learns from each trade'}
+          </div>
+        </div>
+      </div>
+      <button onClick={toggle} disabled={busy}
+        style={{ width: 52, height: 28, borderRadius: 16, border: 'none', cursor: busy ? 'wait' : 'pointer', position: 'relative', background: on ? 'var(--nd-green)' : 'var(--nd-border)', transition: 'background 0.2s', flexShrink: 0 }}>
+        <span style={{ position: 'absolute', top: 3, left: on ? 27 : 3, width: 22, height: 22, borderRadius: '50%', background: '#fff', transition: 'left 0.2s', boxShadow: '0 1px 3px #0003' }} />
+      </button>
+    </div>
+  );
+};
+
+// ── Learning curve ────────────────────────────────────────────────────────────
+
+const LearningCurveCard: React.FC = () => {
+  const [data, setData] = useState<any>(null);
+  useEffect(() => { apiService.learningCurve().then(r => setData((r as any).data)).catch(() => {}); }, []);
+  const pts: any[] = data?.points ?? [];
+  if (pts.length < 2) return null;
+
+  const W = 600, H = 160, PL = 36, PR = 12, PT = 12, PB = 22;
+  const xs = pts.map((_, i) => i);
+  const ys = pts.map(p => p.cum_win_rate * 100);
+  const yMin = Math.max(0, Math.min(...ys) - 5), yMax = Math.min(100, Math.max(...ys) + 5);
+  const sx = (i: number) => PL + (i / (xs.length - 1)) * (W - PL - PR);
+  const sy = (v: number) => PT + (1 - (v - yMin) / (yMax - yMin || 1)) * (H - PT - PB);
+  const line = pts.map((p, i) => `${sx(i).toFixed(1)},${sy(p.cum_win_rate * 100).toFixed(1)}`).join(' ');
+  const last = pts[pts.length - 1];
+
+  return (
+    <div className="nd-card" style={{ padding: '16px 18px', marginBottom: 20 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>System Learning Curve</div>
+          <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>Cumulative win-rate as the AI accumulates experience from every trade</div>
+        </div>
+        <div style={{ textAlign: 'right' }}>
+          <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--nd-green)' }}>{(last.cum_win_rate * 100).toFixed(1)}%</div>
+          <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>{data.total_trades} trades</div>
+        </div>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 150 }} preserveAspectRatio="none">
+        {[yMin, (yMin + yMax) / 2, yMax].map((v, i) => (
+          <g key={i}>
+            <line x1={PL} y1={sy(v)} x2={W - PR} y2={sy(v)} stroke="var(--nd-border)" strokeWidth="0.5" />
+            <text x={4} y={sy(v) + 3} fontSize="9" fill="var(--nd-text-3)">{v.toFixed(0)}%</text>
+          </g>
+        ))}
+        <polyline points={line} fill="none" stroke="var(--nd-green)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+        <circle cx={sx(pts.length - 1)} cy={sy(last.cum_win_rate * 100)} r="3.5" fill="var(--nd-green)" />
+      </svg>
+    </div>
+  );
+};
+
+// ── AI Watchlist tab (self-running scanner output + evidence) ──────────────────
+
+const ACTION_BG: Record<string, string> = { BUY: '#22c55e', SELL: '#ef4444', HOLD: '#f59e0b' };
+
+const AiWatchlistTab: React.FC = () => {
+  const [data, setData] = useState<any>(null);
+  const [sel, setSel] = useState<any>(null);
+  const [scanning, setScanning] = useState(false);
+  const load = useCallback(async () => {
+    try { const r = await apiService.aiWatchlist(); setData((r as any).data); } catch {}
+  }, []);
+  useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, [load]);
+  const rescan = async () => {
+    setScanning(true);
+    try { await apiService.scanWatchlist(); setTimeout(() => { load(); setScanning(false); }, 35000); }
+    catch { setScanning(false); }
+  };
+  const items: any[] = data?.items ?? [];
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
+        <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>
+          AI-selected from a live scan of {data?.scanned ?? 0}/{data?.universe ?? 0} stocks
+          {data?.updated_at ? ` · updated ${new Date(data.updated_at).toLocaleTimeString()}` : ''}
+        </div>
+        <button onClick={rescan} disabled={scanning}
+          style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '5px 12px', borderRadius: 8, border: '1px solid var(--nd-border)', background: 'var(--nd-surface)', cursor: scanning ? 'wait' : 'pointer', fontSize: 12, color: 'var(--nd-text-2)' }}>
+          <span className="material-icons" style={{ fontSize: 15 }}>{scanning ? 'hourglass_top' : 'refresh'}</span>
+          {scanning ? 'Scanning…' : 'Rescan'}
+        </button>
+      </div>
+      {items.length === 0 ? (
+        <div style={{ padding: 40, textAlign: 'center', color: 'var(--nd-text-3)', fontSize: 13 }}>
+          The market scanner is warming up — the AI watchlist will appear shortly.
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column' }}>
+          {items.map((w, i) => (
+            <div key={w.symbol} onClick={() => setSel(w)}
+              style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 4px', borderTop: i ? '1px solid var(--nd-border)' : 'none', cursor: 'pointer' }}>
+              <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--nd-text-3)', width: 20 }}>#{i + 1}</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>{w.symbol}</div>
+                <div style={{ fontSize: 11, color: 'var(--nd-text-3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{w.name}</div>
+              </div>
+              <div style={{ textAlign: 'right' }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--nd-text-1)' }}>₹{w.price?.toLocaleString('en-IN')}</div>
+                <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>conf {(w.confidence * 100).toFixed(0)}%</div>
+              </div>
+              <span style={{ fontSize: 11, fontWeight: 700, padding: '3px 9px', borderRadius: 5, background: `${ACTION_BG[w.action]}1a`, color: ACTION_BG[w.action] }}>{w.action}</span>
+              <span className="material-icons" style={{ fontSize: 16, color: 'var(--nd-text-3)' }}>chevron_right</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {sel && <WatchlistEvidence stock={sel} scannedAt={data?.updated_at} onClose={() => setSel(null)} />}
+    </div>
+  );
+};
+
+const WatchlistEvidence: React.FC<{ stock: any; scannedAt?: string; onClose: () => void }> = ({ stock, scannedAt, onClose }) => (
+  <div onClick={e => { if (e.target === e.currentTarget) onClose(); }}
+    style={{ position: 'fixed', inset: 0, background: '#00000080', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 12 }}>
+    <div style={{ background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 16, width: '100%', maxWidth: 500, maxHeight: '88vh', overflow: 'auto', boxShadow: '0 24px 64px #00000060' }}>
+      <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--nd-border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ fontSize: 16, fontWeight: 700, color: 'var(--nd-text-1)' }}>{stock.symbol}</span>
+          <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 9px', borderRadius: 5, background: `${ACTION_BG[stock.action]}1a`, color: ACTION_BG[stock.action] }}>{stock.action}</span>
+        </div>
+        <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer' }}><span className="material-icons" style={{ color: 'var(--nd-text-3)', fontSize: 20 }}>close</span></button>
+      </div>
+      <div style={{ padding: '14px 20px' }}>
+        <p style={{ margin: '0 0 12px', fontSize: 12.5, color: 'var(--nd-text-2)', lineHeight: 1.6 }}>
+          Why the AI picked this for <strong>intraday</strong>: the scanner judged a
+          <strong> {stock.action}</strong> view at <strong>{(stock.confidence * 100).toFixed(0)}%</strong> confidence
+          (intraday-fit score {stock.score}). Only stocks that clear the liquidity + volatility bar make the list.
+        </p>
+        <div style={{ fontSize: 12, color: 'var(--nd-text-3)', background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 8, padding: '8px 12px', marginBottom: 12 }}>{stock.reasoning}</div>
+        {stock.metrics && (<>
+          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--nd-text-3)', marginBottom: 8 }}>INTRADAY-FIT EVIDENCE</div>
+          {[
+            ['Avg daily volume', `${(stock.metrics.avgVolume / 1e6).toFixed(2)}M`],
+            ['Volatility (ATR)', `${stock.metrics.atrPct}%`],
+            ['Avg daily range', `${stock.metrics.rangePct}%`],
+            ['RSI (14)', `${stock.metrics.rsi}`],
+            ['Momentum (10d)', `${stock.metrics.momentumPct >= 0 ? '+' : ''}${stock.metrics.momentumPct}%`],
+            ['Liquidity score', `${(stock.metrics.liquidityScore * 100).toFixed(0)}%`],
+            ['Volatility score', `${(stock.metrics.volatilityScore * 100).toFixed(0)}%`],
+          ].map(([k, v]) => (
+            <div key={k} style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 0', borderBottom: '1px solid var(--nd-border)', fontSize: 12 }}>
+              <span style={{ color: 'var(--nd-text-3)' }}>{k}</span>
+              <span style={{ color: 'var(--nd-text-1)', fontWeight: 600 }}>{v}</span>
+            </div>
+          ))}
+        </>)}
+        {Array.isArray(stock.agents) && stock.agents.length > 0 && (<>
+          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--nd-text-3)', margin: '12px 0 8px' }}>AGENT BREAKDOWN</div>
+          {stock.agents.map((a: any) => (
+            <div key={a.agent} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: '1px solid var(--nd-border)' }}>
+              <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--nd-text-1)', textTransform: 'capitalize', width: 84 }}>{a.agent}</span>
+              <span style={{ fontSize: 11, fontWeight: 700, color: ACTION_BG[a.action] ?? 'var(--nd-text-2)', width: 40 }}>{a.action}</span>
+              <span style={{ fontSize: 11, color: 'var(--nd-text-3)', flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.reasoning}</span>
+            </div>
+          ))}
+        </>)}
+        <div style={{ marginTop: 12, fontSize: 11, color: 'var(--nd-text-3)' }}>
+          Live scan from the stock-scanner service · {scannedAt ? new Date(scannedAt).toLocaleString() : ''}. No hard-coded values.
+        </div>
+      </div>
+    </div>
+  </div>
+);
+
 // ── Dashboard Page ────────────────────────────────────────────────────────────
 
 const Dashboard: React.FC = () => {
   const [activeTab, setActiveTab]     = useState<TabId>('watchlist');
-  const [stocks, setStocks]           = useState<Stock[]>([]);
-  const [loading, setLoading]         = useState(true);
-  const [error, setError]             = useState<string | null>(null);
-  const [predictions, setPredictions] = useState<Record<string, Prediction>>({});
   const [accuracyStats, setAccuracyStats] = useState<any>(null);
+  const [selectedCard, setSelectedCard] = useState<string | null>(null);
 
   useEffect(() => {
-    (async () => {
-      try {
-        const res = await apiService.getStocks();
-        if (res.data) {
-          setStocks(res.data);
-          for (const stock of res.data) {
-            try {
-              const pr = await apiService.getPrediction(stock.symbol);
-              if (pr.data) setPredictions(prev => ({ ...prev, [stock.symbol]: pr.data! }));
-            } catch { /* skip */ }
-          }
-        }
-      } catch { setError('Failed to fetch market data'); }
-      finally   { setLoading(false); }
-    })();
     apiService.getAccuracyStats().then(r => { if (r.data) setAccuracyStats(r.data); }).catch(() => {});
   }, []);
 
   const STAT_CARDS = accuracyStats ? [
-    { label: 'Model Accuracy', value: `${(accuracyStats.accuracyRate * 100).toFixed(1)}%`, icon: 'psychology',    color: 'var(--nd-green)',  bg: 'var(--nd-green-50)' },
-    { label: 'Win Rate',       value: `${(accuracyStats.winRate * 100).toFixed(1)}%`,        icon: 'emoji_events', color: 'var(--nd-green)',  bg: 'var(--nd-green-50)' },
-    { label: 'Avg Return',     value: `${accuracyStats.averageReturn?.toFixed(2)}%`,          icon: 'trending_up',  color: 'var(--nd-blue)',   bg: '#e3f2fd'            },
-    { label: 'Sharpe Ratio',   value: accuracyStats.sharpeRatio?.toFixed(2),                  icon: 'analytics',    color: 'var(--nd-purple)', bg: '#f5f3ff'            },
+    { id: 'accuracy', label: 'Model Accuracy', value: `${(accuracyStats.accuracyRate * 100).toFixed(1)}%`, icon: 'psychology',    color: 'var(--nd-green)',  bg: 'var(--nd-green-50)' },
+    { id: 'win',      label: 'Win Rate',       value: `${(accuracyStats.winRate * 100).toFixed(1)}%`,        icon: 'emoji_events', color: 'var(--nd-green)',  bg: 'var(--nd-green-50)' },
+    { id: 'return',   label: 'Avg Return',     value: `${accuracyStats.averageReturn?.toFixed(2)}%`,          icon: 'trending_up',  color: 'var(--nd-blue)',   bg: '#e3f2fd'            },
+    { id: 'sharpe',   label: 'Sharpe Ratio',   value: accuracyStats.sharpeRatio?.toFixed(2),                  icon: 'analytics',    color: 'var(--nd-purple)', bg: '#f5f3ff'            },
   ] : [];
 
   return (
@@ -378,15 +562,20 @@ const Dashboard: React.FC = () => {
         <p className="nd-page-sub">Real-time NSE · BSE stock data with AI-generated predictions</p>
       </div>
 
-      {/* Accuracy stat cards */}
+      {/* Accuracy stat cards — click any to see the evidence */}
       {STAT_CARDS.length > 0 && (
         <div className="nd-grid-4" style={{ gap: 12, marginBottom: 20 }}>
           {STAT_CARDS.map(s => (
-            <div key={s.label} className="nd-card" style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '14px 18px' }}>
+            <div key={s.label} className="nd-card" onClick={() => setSelectedCard(s.id)}
+              style={{ position: 'relative', display: 'flex', alignItems: 'center', gap: 14, padding: '14px 18px', cursor: 'pointer', transition: 'box-shadow 0.15s' }}
+              onMouseEnter={e => (e.currentTarget.style.boxShadow = 'var(--nd-shadow-md)')}
+              onMouseLeave={e => (e.currentTarget.style.boxShadow = 'none')}>
+              <span className="material-icons" title="See how this is calculated"
+                style={{ position: 'absolute', top: 8, right: 8, fontSize: 16, color: 'var(--nd-text-3)' }}>info</span>
               <div className="nd-icon-chip" style={{ background: s.bg }}>
                 <span className="material-icons" style={{ color: s.color }}>{s.icon}</span>
               </div>
-              <div>
+              <div style={{ flex: 1, minWidth: 0 }}>
                 <p className="nd-label">{s.label}</p>
                 <p style={{ fontSize: 18, fontWeight: 700, color: s.color }}>{s.value}</p>
               </div>
@@ -394,6 +583,14 @@ const Dashboard: React.FC = () => {
           ))}
         </div>
       )}
+
+      {selectedCard && accuracyStats && (
+        <MetricModal cardId={selectedCard} stats={accuracyStats} onClose={() => setSelectedCard(null)} />
+      )}
+
+      {/* Self-running autopilot + the system's learning curve */}
+      <AutopilotBanner />
+      <LearningCurveCard />
 
       {/* Tabbed card */}
       <div className="nd-card" style={{ padding: 0 }}>
@@ -419,7 +616,7 @@ const Dashboard: React.FC = () => {
                 {tab.label}
                 {tab.id === 'watchlist' && (
                   <span style={{ fontSize: 11, background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 10, padding: '1px 7px', color: 'var(--nd-text-3)', fontWeight: 400 }}>
-                    {stocks.length}
+                    AI
                   </span>
                 )}
               </button>
@@ -429,14 +626,7 @@ const Dashboard: React.FC = () => {
 
         {/* Tab content */}
         <div style={{ padding: '16px 20px 20px' }}>
-          {activeTab === 'watchlist' && (
-            <WatchlistTab
-              stocks={stocks}
-              predictions={predictions}
-              loading={loading}
-              error={error}
-            />
-          )}
+          {activeTab === 'watchlist' && <AiWatchlistTab />}
           {activeTab === 'directory' && <DirectoryTab />}
         </div>
       </div>
