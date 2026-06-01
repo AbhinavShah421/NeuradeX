@@ -680,8 +680,8 @@ class ApiService {
     const response = await this.api.get('/api/ai-engine/autopilot');
     return response.data;
   }
-  async setAutopilot(enabled: boolean): Promise<ApiResponse<any>> {
-    const response = await this.api.post('/api/ai-engine/autopilot', { enabled });
+  async setAutopilot(enabled: boolean, mode: 'paper' | 'backtest' = 'paper'): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/ai-engine/autopilot', { enabled, mode });
     return response.data;
   }
   async learningCurve(): Promise<ApiResponse<any>> {

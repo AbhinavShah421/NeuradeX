@@ -343,19 +343,55 @@ async def scan_evaluation():
 
 class AutopilotRequest(BaseModel):
     enabled: bool
+    mode: Optional[str] = "paper"     # "paper" | "backtest"
+
+
+# Autopilot runs as its own microservice (autopilot-service:8015) which owns the
+# paper + backtest training loops. The backend proxies status/control to it, and
+# always writes the enable flags to Redis too so the toggle works even if the
+# service is briefly restarting.
+
+async def _autopilot_status() -> dict:
+    import httpx
+    from app.config import settings
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(f"{settings.AUTOPILOT_SERVICE_URL}/status")
+            if r.status_code == 200:
+                return r.json().get("data", {})
+    except Exception as exc:
+        logger.debug("autopilot status proxy failed: %s", exc)
+    # Fallback: at least report the flags from Redis so the UI stays accurate.
+    from app.utils.redis_client import cache_get
+    paper = (await cache_get("ai_engine:autopilot_enabled")) == "1"
+    bt    = (await cache_get("ai_engine:autopilot_backtest_enabled")) == "1"
+    return {"paper": {"enabled": paper}, "backtest": {"enabled": bt}, "service_unavailable": True}
 
 
 @router.get("/autopilot")
 async def get_autopilot():
-    from app.agents.autopilot import status
-    return {"status": "success", "data": await status()}
+    return {"status": "success", "data": await _autopilot_status()}
 
 
 @router.post("/autopilot")
 async def set_autopilot(req: AutopilotRequest):
-    from app.agents.autopilot import set_enabled, status
-    await set_enabled(req.enabled)
-    return {"status": "success", "data": await status()}
+    mode = req.mode if req.mode in ("paper", "backtest") else "paper"
+    flag = "ai_engine:autopilot_backtest_enabled" if mode == "backtest" else "ai_engine:autopilot_enabled"
+    # Write the flag directly (robust), and notify the service so it reacts now.
+    try:
+        from app.utils.redis_client import cache_set
+        await cache_set(flag, "1" if req.enabled else "0", expire=86400 * 30)
+    except Exception as exc:
+        logger.warning("autopilot flag write failed: %s", exc)
+    try:
+        import httpx
+        from app.config import settings
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(f"{settings.AUTOPILOT_SERVICE_URL}/control",
+                              json={"mode": mode, "enabled": req.enabled})
+    except Exception as exc:
+        logger.debug("autopilot control proxy failed: %s", exc)
+    return {"status": "success", "data": await _autopilot_status()}
 
 
 # ── Learning curve (system getting smarter over time) ─────────────────────────
