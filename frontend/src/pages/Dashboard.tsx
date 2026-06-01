@@ -475,9 +475,11 @@ const Dashboard: React.FC = () => {
         <div className="nd-grid-4" style={{ gap: 12, marginBottom: 20 }}>
           {STAT_CARDS.map(s => (
             <div key={s.label} className="nd-card" onClick={() => setSelectedCard(s.id)}
-              style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '14px 18px', cursor: 'pointer', transition: 'box-shadow 0.15s' }}
+              style={{ position: 'relative', display: 'flex', alignItems: 'center', gap: 14, padding: '14px 18px', cursor: 'pointer', transition: 'box-shadow 0.15s' }}
               onMouseEnter={e => (e.currentTarget.style.boxShadow = 'var(--nd-shadow-md)')}
               onMouseLeave={e => (e.currentTarget.style.boxShadow = 'none')}>
+              <span className="material-icons" title="See how this is calculated"
+                style={{ position: 'absolute', top: 8, right: 8, fontSize: 16, color: 'var(--nd-text-3)' }}>info</span>
               <div className="nd-icon-chip" style={{ background: s.bg }}>
                 <span className="material-icons" style={{ color: s.color }}>{s.icon}</span>
               </div>
@@ -485,7 +487,6 @@ const Dashboard: React.FC = () => {
                 <p className="nd-label">{s.label}</p>
                 <p style={{ fontSize: 18, fontWeight: 700, color: s.color }}>{s.value}</p>
               </div>
-              <span className="material-icons" style={{ fontSize: 16, color: 'var(--nd-text-3)' }}>info</span>
             </div>
           ))}
         </div>
