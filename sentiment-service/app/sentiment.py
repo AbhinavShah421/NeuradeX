@@ -24,7 +24,8 @@ from .news import fetch_headlines, headlines_block, now_iso
 logger = logging.getLogger("sentiment-service")
 IST = timezone(timedelta(hours=5, minutes=30))
 
-WATCHLIST_KEY = "ai_engine:watchlist"
+WATCHLIST_KEY  = "ai_engine:watchlist"
+CANDIDATES_KEY = "ai_engine:scan_candidates"   # broader pool the scanner ranks over
 def _sentiment_key(sym: str) -> str:
     return f"ai_engine:sentiment:{sym.upper()}"
 
@@ -47,8 +48,16 @@ async def _get_redis() -> redis.Redis:
 
 
 async def _watchlist() -> list[dict]:
+    """Symbols to analyse: prefer the scanner's broader candidate pool (so a fresh
+    catalyst can pull a stock *into* the watchlist), falling back to the live
+    watchlist."""
     try:
         r = await _get_redis()
+        raw = await r.get(CANDIDATES_KEY)
+        if raw:
+            items = json.loads(raw).get("items", [])
+            if items:
+                return items
         raw = await r.get(WATCHLIST_KEY)
         if raw:
             return json.loads(raw).get("items", [])
