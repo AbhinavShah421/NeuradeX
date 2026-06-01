@@ -29,6 +29,7 @@ const sidebars = {
       collapsed: false,
       items: [
         'ai-engine/learning-loop',
+        'ai-engine/watchlist-autopilot',
         'ai-engine/live-sessions',
         'ai-engine/data-providers',
       ],
@@ -66,6 +67,7 @@ const sidebars = {
         'microservices/ensemble-engine',
         'microservices/risk-trade',
         'microservices/feedback-trainer',
+        'microservices/stock-scanner',
       ],
     },
     {

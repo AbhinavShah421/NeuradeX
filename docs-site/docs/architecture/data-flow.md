@@ -67,6 +67,37 @@ A price tick from the broker API travels through 7 stages before becoming an exe
 
 ---
 
+## The self-improving loop (scanner → autopilot → learning)
+
+Running alongside the trade pipeline above is the loop that makes the system
+**smarter every day**:
+
+```
+  stock-scanner :8014  ──▶  AI watchlist (Redis: ai_engine:watchlist)
+   (pre-open + intraday)            │
+        ▲                           ▼
+        │                  autopilot (if ON, market open)
+        │                  opens a paper session per watchlist stock
+        │                           │
+        │                  7-agent ensemble decides on real data
+        │                           │
+        │                  closed trades → train weights + RL + memory
+        │                           │
+        │                  ┌────────┴─────────┐
+        │                  ▼                  ▼
+        │        System Learning Curve   Orders / trade_records
+        │
+        └── post-market signal score grades the morning picks ──┐
+                  (scanner /evaluate → /api/ai-engine/scan-feedback)
+                  accuracy ──▶ calibration ──▶ sharper next scan ─┘
+```
+
+See [Stock Scanner](../microservices/stock-scanner.md),
+[Watchlist & Autopilot](../ai-engine/watchlist-autopilot.md), and
+[Learning & Pattern Memory](../ai-engine/learning-loop.md).
+
+---
+
 ## Stage-by-Stage Breakdown
 
 ### Stage 1 — Market Data Ingestion
