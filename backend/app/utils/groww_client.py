@@ -18,6 +18,7 @@ update_credentials() to recover.
 import asyncio
 import hashlib
 import time
+from collections import deque
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -30,6 +31,15 @@ logger = get_logger(__name__)
 BASE_URL = "https://api.groww.in/v1"
 _REDIS_TOKEN_KEY = "groww:access_token"
 _REDIS_EXPIRY_KEY = "groww:token_expiry"
+
+# Client-side rate limit — kept safely UNDER Groww's published limits so we never
+# get a 429. Groww limits are per *type* and shared (Live Data: 10/s, 300/min;
+# Non-Trading: 20/s, 500/min). A single conservative global budget covers all.
+_RL_PER_SEC = 5
+_RL_PER_MIN = 200
+# Don't retry a failing token refresh more often than this (avoids hammering the
+# token endpoint when Groww is throttling or credentials are bad).
+_TOKEN_RETRY_COOLDOWN = 30.0
 
 STATUS_OK = "ok"
 STATUS_FAILED = "failed"
@@ -78,6 +88,33 @@ class GrowwClient:
         self._failure_reason: str = ""
         self._failure_count: int = 0
         self._last_attempt: Optional[datetime] = None
+        # Rate limiter state
+        self._req_times: deque = deque()
+        self._rl_lock = asyncio.Lock()
+        self._last_refresh_fail: float = 0.0
+
+    # ── Rate limiter ───────────────────────────────────────────────────────────
+
+    async def _acquire(self) -> None:
+        """Block until a request slot is free, keeping us under Groww's limits.
+        Serialised so bursts are smoothed into a steady, compliant rate."""
+        async with self._rl_lock:
+            while True:
+                now = time.monotonic()
+                while self._req_times and now - self._req_times[0] > 60.0:
+                    self._req_times.popleft()
+                in_min = len(self._req_times)
+                in_sec = sum(1 for t in self._req_times if now - t < 1.0)
+                if in_sec < _RL_PER_SEC and in_min < _RL_PER_MIN:
+                    self._req_times.append(now)
+                    return
+                wait = 0.05
+                if in_sec >= _RL_PER_SEC:
+                    oldest_sec = min(t for t in self._req_times if now - t < 1.0)
+                    wait = max(wait, 1.0 - (now - oldest_sec))
+                if in_min >= _RL_PER_MIN:
+                    wait = max(wait, 60.0 - (now - self._req_times[0]))
+                await asyncio.sleep(min(wait, 2.0))
 
     # ── Redis token persistence ───────────────────────────────────────────────
 
@@ -135,6 +172,7 @@ class GrowwClient:
         error: Optional[str] = None
 
         try:
+            await self._acquire()
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(
                     f"{BASE_URL}{endpoint}",
@@ -192,6 +230,7 @@ class GrowwClient:
             self._status = STATUS_FAILED
             self._failure_count += 1
             self._failure_reason = str(exc)
+            self._last_refresh_fail = time.monotonic()
             error = str(exc)
             raise
         finally:
@@ -215,6 +254,13 @@ class GrowwClient:
             if not self._access_token or (
                 self._token_expiry and datetime.now() >= self._token_expiry
             ):
+                # After a failed refresh, back off (exponentially) instead of
+                # hammering the token endpoint — repeated hits keep its shared,
+                # per-type penalty window from ever resetting.
+                cooldown = min(_TOKEN_RETRY_COOLDOWN * max(1, self._failure_count), 600.0)
+                if (self._status == STATUS_FAILED
+                        and (time.monotonic() - self._last_refresh_fail) < cooldown):
+                    raise RuntimeError(f"Groww token refresh on cooldown ({cooldown:.0f}s): {self._failure_reason}")
                 await self._refresh_token()
 
             return self._access_token  # type: ignore[return-value]
@@ -280,21 +326,26 @@ class GrowwClient:
 
     # ── HTTP helpers ──────────────────────────────────────────────────────────
 
-    async def _get(self, path: str, params: Optional[dict] = None) -> dict:
+    async def _get(self, path: str, params: Optional[dict] = None,
+                   refresh_on_401: bool = True) -> dict:
         token = await self._token()
         start = time.monotonic()
         status_code: Optional[int] = None
         error: Optional[str] = None
 
         try:
+            await self._acquire()
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.get(
                     f"{BASE_URL}{path}", headers=self._headers(token), params=params
                 )
-                if resp.status_code == 401:
+                # A 401 on entitlement-gated endpoints (live data) is NOT a token
+                # expiry — don't wipe the shared token in that case.
+                if resp.status_code == 401 and refresh_on_401:
                     async with self._lock:
                         self._access_token = None
                     token = await self._token()
+                    await self._acquire()
                     resp = await client.get(
                         f"{BASE_URL}{path}", headers=self._headers(token), params=params
                     )
@@ -321,6 +372,7 @@ class GrowwClient:
         error: Optional[str] = None
 
         try:
+            await self._acquire()
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(
                     f"{BASE_URL}{path}", headers=self._headers(token), json=body
@@ -329,6 +381,7 @@ class GrowwClient:
                     async with self._lock:
                         self._access_token = None
                     token = await self._token()
+                    await self._acquire()
                     resp = await client.post(
                         f"{BASE_URL}{path}", headers=self._headers(token), json=body
                     )
@@ -355,6 +408,7 @@ class GrowwClient:
         data = await self._get(
             "/live-data/ltp",
             {"segment": "CASH", "exchange_symbols": exchange_symbols},
+            refresh_on_401=False,
         )
         return data.get("payload", data)
 
@@ -362,6 +416,7 @@ class GrowwClient:
         data = await self._get(
             "/live-data/quote",
             {"exchange": exchange, "segment": "CASH", "trading_symbol": symbol},
+            refresh_on_401=False,
         )
         return data.get("payload", data)
 

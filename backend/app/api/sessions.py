@@ -317,28 +317,93 @@ async def _advance_replay(s: dict) -> None:
         s["status"] = "done"
 
 
+_PAPER_POLL_SECS = 8   # how often a paper session refreshes its live market data
+
+
+async def _try_groww_ltp(symbol: str) -> float:
+    """Best-effort real-time price from Groww. Returns 0.0 if the key lacks the
+    live-data entitlement (401) — we swallow it quietly so it never triggers a
+    token-refresh storm. When/if the live-data subscription is enabled, paper
+    sessions automatically start using real Groww ticks."""
+    from app.utils.groww_client import get_groww_client
+    groww = get_groww_client()
+    if not groww or groww.get_status().get("status") != "ok":
+        return 0.0
+    try:
+        raw = await groww.get_quote(symbol)
+        for k in ("ltp", "lastPrice", "last_price", "lastTradedPrice"):
+            v = raw.get(k)
+            if v:
+                return float(v)
+    except Exception:
+        return 0.0
+    return 0.0
+
+
 async def _advance_paper(s: dict) -> None:
-    from app.api.paper_trading import (
-        _market_status_label, _current_candle_time, _fetch_candles_for_start,
-    )
-    mstatus = _market_status_label()
-    cur     = _current_candle_time()
+    """Real-time-ish paper trading on live market data.
+
+    Today's intraday comes from Yahoo Finance (real NSE prices, ~1–2 min delay) —
+    Groww's API key here only has historical access (live quotes return 401, and
+    Groww historical doesn't serve the in-progress day). We refresh every
+    _PAPER_POLL_SECS, opportunistically overlay a real Groww tick if the live-data
+    entitlement is present, and let the ensemble decide once per completed candle.
+    """
+    from app.api import paper_trading as pt
+
+    mstatus = pt._market_status_label()
+    symbol  = s["symbol"]
+    now     = pt._now_ist()
+    ts      = now.timestamp()
+    cur     = pt._current_candle_time()
     next_m  = _time_to_minutes(cur) + 1
     ended   = next_m > _SQUAREOFF_MINUTES or mstatus != "open"
 
-    # Nothing new to do unless a fresh candle appeared or we must square off
-    if cur <= (s.get("current_time") or "09:15") and not (ended and s["position"]["status"] == "LONG"):
-        if ended:
-            s["status"] = "done"
-        return
+    # Throttle external fetches so we never hammer the data sources
+    last_poll = float(s.get("_last_poll_ts") or 0)
+    if (ts - last_poll) >= _PAPER_POLL_SECS or not s.get("candles"):
+        s["_last_poll_ts"] = ts
+        # Try Groww live ticks, but give up after a few failures so a key without
+        # the live-data entitlement doesn't keep churning token refreshes.
+        ltp = 0.0
+        if not s.get("_groww_live_off"):
+            ltp = await _try_groww_ltp(symbol)
+            if ltp > 0:
+                pt._accumulate_tick(symbol, ltp, ts)
+                s["_groww_live_fails"] = 0
+            else:
+                fails = int(s.get("_groww_live_fails") or 0) + 1
+                s["_groww_live_fails"] = fails
+                if fails >= 3:
+                    s["_groww_live_off"] = True   # no live-data → use Yahoo only
+        if symbol not in pt._yahoo_candles:
+            try:
+                await pt._get_yahoo_cached(symbol, cur)
+            except Exception:
+                pass
+        candles = pt._get_merged_candles(symbol, ltp, ts)
+        if candles:
+            s["candles"]      = candles
+            s["data_source"]  = "groww_live" if ltp > 0 else "yahoo_live"
+            s["current_time"] = candles[-1].get("time", cur)
 
-    candles, src = await _fetch_candles_for_start(s["symbol"], cur)
-    if not candles:
-        return
-    s["candles"]     = candles
-    s["data_source"] = src
-    await _step(s, candles, force_close=ended)
-    if ended:
+    candles = s.get("candles") or []
+
+    # Refresh live unrealised P&L every tick
+    if candles and s["position"]["status"] == "LONG":
+        last_px = float(candles[-1]["close"])
+        s["position"]["current_pnl"] = round(
+            (last_px - s["position"]["entry_price"]) * s["position"]["quantity"], 2)
+
+    # Decide/trade once per completed candle, or square off at close
+    new_candle = cur > (s.get("last_decided") or "00:00")
+    must_close = ended and s["position"]["status"] == "LONG"
+    if candles and (new_candle or must_close):
+        await _step(s, candles, force_close=ended)
+        s["last_decided"] = cur
+
+    s["updated_at"] = now.isoformat()
+    if ended and s["position"]["status"] != "LONG":
         s["status"] = "done"
 
 
