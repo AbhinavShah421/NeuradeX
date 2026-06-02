@@ -1,13 +1,28 @@
-"""Sentiment Agent — reads the LLM news-sentiment signal (produced off the hot
-path by the sentiment-service from Google-News headlines), with a rule-based
-price fallback. This is the one agent driven by information that is genuinely
-independent of price, which is what gives the ensemble real diversity."""
+"""Sentiment Agent — the ensemble's one price-independent voice.
+
+It reads the LLM news signal produced off the hot path by the sentiment-service
+and only votes directionally (BUY/SELL) when there is a genuinely strong,
+*catalyst-backed* news signal. Otherwise it ABSTAINS (HOLD).
+
+Why the high bar: a weak local model (e.g. llama3.2) tends to rate almost every
+stock vaguely "positive". If the agent passed that through as BUY it would
+constantly nudge the ensemble to BUY and defeat the conviction gate (which only
+enters when the ensemble actually agrees BUY) — i.e. overtrade and bleed. So
+without a real catalyst the agent stays silent rather than guessing from price.
+"""
 from __future__ import annotations
 import json
+import os
 from .base import AgentSignal, BaseAgent
 from app.utils.elk_logger import get_logger
 
 logger = get_logger(__name__)
+
+# Bars a news signal must clear to be allowed to move the ensemble.
+NEWS_MIN_CONFIDENCE = float(os.getenv("NEWS_MIN_CONFIDENCE", "0.7"))
+NEWS_MIN_SCORE      = float(os.getenv("NEWS_MIN_SCORE", "0.4"))   # |score|, score is -1..1
+_VAGUE_CATALYSTS = {"", "none", "n/a", "na", "no catalyst", "no specific catalyst",
+                    "no clear catalyst", "mixed", "unclear", "-"}
 
 
 class SentimentAgent(BaseAgent):
@@ -17,62 +32,49 @@ class SentimentAgent(BaseAgent):
         if len(candles) < 5:
             return AgentSignal(agent_name=self.name, action="HOLD", confidence=0.3,
                                reasoning="Insufficient data")
-        # 1) News-driven LLM sentiment, cached in Redis by the sentiment-service.
-        sig = await self._cached_news_signal(symbol)
-        if sig is not None:
-            return sig
-        # 2) Fallback (cold start / off-watchlist): rule-based price trend.
-        return self._rule_based(candles)
+        return await self._news_signal(symbol)
 
-    async def _cached_news_signal(self, symbol: str) -> AgentSignal | None:
+    async def _news_signal(self, symbol: str) -> AgentSignal:
+        abstain = AgentSignal(
+            agent_name=self.name, action="HOLD", confidence=0.4,
+            reasoning="No strong news catalyst — abstaining",
+            indicators={"source": "news_llm", "status": "abstain"},
+        )
         try:
             from app.utils.redis_client import cache_get
             raw = await cache_get(f"ai_engine:sentiment:{symbol.upper()}")
             if not raw:
-                return None
+                return abstain
             d = json.loads(raw)
         except Exception as exc:
             logger.debug("news sentiment read failed for %s: %s", symbol, exc)
-            return None
+            return abstain
 
-        # If the worker found no news, don't override the price fallback.
         if int(d.get("headlines_count", 0)) <= 0:
-            return None
+            return abstain
 
-        action = str(d.get("action", "HOLD")).upper()
-        if action not in ("BUY", "SELL", "HOLD"):
-            action = "HOLD"
-        confidence = float(max(0.10, min(0.95, d.get("confidence", 0.50))))
-        return AgentSignal(
-            agent_name=self.name, action=action, confidence=confidence,
-            reasoning=str(d.get("summary", "News sentiment"))[:160],
-            indicators={
-                "source": "news_llm",
-                "sentiment": d.get("sentiment"),
-                "score": d.get("score"),
-                "catalyst": d.get("catalyst"),
-                "headlines": d.get("headlines_count"),
-                "provider": d.get("provider"),
-            },
-        )
+        sentiment = str(d.get("sentiment", "neutral")).lower()
+        try:
+            score = abs(float(d.get("score", 0) or 0))
+            conf  = float(d.get("confidence", 0) or 0)
+        except (TypeError, ValueError):
+            return abstain
+        catalyst = str(d.get("catalyst", "") or "").strip().lower()
+        has_catalyst = catalyst not in _VAGUE_CATALYSTS
 
-    @staticmethod
-    def _rule_based(candles: list[dict]) -> AgentSignal:
-        """Fallback when LLM is unavailable — simple price-trend analysis."""
-        closes = [c["close"] for c in candles[-10:]]
-        pct    = (closes[-1] - closes[0]) / closes[0] * 100 if closes[0] > 0 else 0
-
-        bullish_bars = sum(1 for i in range(1, len(closes)) if closes[i] > closes[i - 1])
-        bull_ratio   = bullish_bars / (len(closes) - 1) if len(closes) > 1 else 0.5
-
-        if pct > 1.5 and bull_ratio > 0.6:
-            return AgentSignal(agent_name="sentiment", action="BUY",
-                               confidence=0.55, reasoning=f"Positive trend +{pct:.1f}%",
-                               indicators={"price_change_10c": round(pct, 2), "source": "rule"})
-        elif pct < -1.5 and bull_ratio < 0.4:
-            return AgentSignal(agent_name="sentiment", action="SELL",
-                               confidence=0.55, reasoning=f"Negative trend {pct:.1f}%",
-                               indicators={"price_change_10c": round(pct, 2), "source": "rule"})
-        return AgentSignal(agent_name="sentiment", action="HOLD",
-                           confidence=0.50, reasoning="No clear sentiment signal",
-                           indicators={"price_change_10c": round(pct, 2), "source": "rule"})
+        # Vote only on a genuinely strong, directional, catalyst-backed signal.
+        if (sentiment in ("positive", "negative")
+                and conf >= NEWS_MIN_CONFIDENCE
+                and score >= NEWS_MIN_SCORE
+                and has_catalyst):
+            action = "BUY" if sentiment == "positive" else "SELL"
+            return AgentSignal(
+                agent_name=self.name, action=action, confidence=min(0.90, conf),
+                reasoning=str(d.get("summary") or d.get("catalyst") or "News catalyst")[:160],
+                indicators={
+                    "source": "news_llm", "sentiment": sentiment,
+                    "score": d.get("score"), "catalyst": d.get("catalyst"),
+                    "headlines": d.get("headlines_count"), "provider": d.get("provider"),
+                },
+            )
+        return abstain

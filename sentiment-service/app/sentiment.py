@@ -66,18 +66,27 @@ async def _watchlist() -> list[dict]:
     return []
 
 
-_PROMPT = """You are a financial news analyst. Judge the SHORT-TERM (intraday to 3-day) \
-sentiment for the NSE stock {name} ({symbol}) based ONLY on these recent headlines:
+_PROMPT = """You are a hard-to-impress financial news analyst. Judge the SHORT-TERM \
+(intraday to 3-day) sentiment for the NSE stock {name} ({symbol}) from ONLY these headlines:
 
 {headlines}
 
+DEFAULT TO NEUTRAL. Most days a stock has no actionable news. Only return
+positive/negative when there is a SPECIFIC, MATERIAL, recent catalyst —
+e.g. earnings beat/miss, guidance change, a large order/contract, regulatory
+action, M&A, management change, analyst upgrade/downgrade with a clear reason.
+Generic "share price", "stock to watch", "technical chart", listing pages or
+vague commentary are NOT catalysts → neutral, catalyst "none".
+
 Respond with EXACTLY this JSON and nothing else:
-{{"sentiment":"positive|negative|neutral","score":0.0,"action":"BUY|SELL|HOLD","confidence":0.0,"catalyst":"short phrase or none","summary":"one line under 16 words"}}
+{{"sentiment":"positive|negative|neutral","score":0.0,"action":"BUY|SELL|HOLD","confidence":0.0,"catalyst":"specific catalyst or none","summary":"one line under 16 words"}}
 
 Rules:
-- score: -1.0 (very bearish) to 1.0 (very bullish).
-- confidence: 0.0-1.0; if headlines are irrelevant, stale or absent, use neutral / HOLD with low confidence.
-- Base it on the news only, not on guesses."""
+- score: -1.0 (very bearish) to 1.0 (very bullish); near 0 when neutral.
+- confidence: 0.0-1.0. Only exceed 0.7 when a concrete catalyst clearly drives it.
+- If there is no specific catalyst, return sentiment "neutral", action "HOLD",
+  score ~0, low confidence, catalyst "none".
+- Base it on the news only, never guess."""
 
 
 async def analyze_symbol(symbol: str, name: str) -> dict:
