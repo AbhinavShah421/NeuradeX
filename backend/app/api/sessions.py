@@ -188,15 +188,16 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
     if force_close and pos_status == "LONG":
         action, conf, reason = "SELL", 0.99, "Session end — squared off automatically."
     elif pos_status == "NONE":
-        # Entry conviction. The bare timing signal trades far too often to beat
-        # costs (measured net-negative), so by default we require the FULL
-        # ensemble — which already folds in the pattern-memory evidence gate and
-        # the LLM news agent — to actually agree (BUY), plus a confidence floor.
-        # Set SELECTIVE_ENTRIES=false to fall back to the looser "not bearish".
+        # Enter when the intraday timing signal fires on a setup the ensemble
+        # does NOT oppose, above a confidence floor. Requiring the full ensemble
+        # to vote BUY was too strict — the ensemble is usually HOLD even on good
+        # setups, so it produced ~zero trades. "not bearish + confidence floor"
+        # trades the genuine setups (the timing signal already fires only a few
+        # times a day) while still filtering out low-conviction / bearish ones.
         from app.config import settings
         if getattr(settings, "SELECTIVE_ENTRIES", True):
             conf_floor = float(getattr(settings, "ENTRY_MIN_CONFIDENCE", 0.55))
-            enter = tsig == 1 and ens_action == "BUY" and conf >= conf_floor
+            enter = tsig == 1 and ens_action != "SELL" and conf >= conf_floor
         else:
             enter = tsig == 1 and ens_action != "SELL"
         action = "BUY" if enter else "HOLD"
