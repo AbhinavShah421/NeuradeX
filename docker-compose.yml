@@ -177,6 +177,11 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-haiku-4-5-20251001}
       LLM_MODEL: ${OLLAMA_MODEL:-llama3.2}
+      # Angel One (SmartAPI) real-time NSE data — optional; Yahoo is used if unset.
+      ANGEL_API_KEY: ${ANGEL_API_KEY:-}
+      ANGEL_CLIENT_CODE: ${ANGEL_CLIENT_CODE:-}
+      ANGEL_PIN: ${ANGEL_PIN:-}
+      ANGEL_TOTP_SECRET: ${ANGEL_TOTP_SECRET:-}
     ports:
       - "8000:8000"
     volumes:

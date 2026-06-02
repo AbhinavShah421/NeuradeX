@@ -429,6 +429,17 @@ async def get_llm_status():
     return {"status": "success", "data": await llm_status(probe=True)}
 
 
+@router.get("/angel-status")
+async def get_angel_status():
+    """Angel One real-time feed status (configured? logged in? symbols live?)."""
+    from app.utils.angel_client import get_angel_client
+    client = get_angel_client()
+    if not client:
+        return {"status": "success", "data": {"configured": False,
+                "note": "Set ANGEL_API_KEY / ANGEL_CLIENT_CODE / ANGEL_PIN / ANGEL_TOTP_SECRET to enable real-time broker data."}}
+    return {"status": "success", "data": {"configured": True, **client.get_status()}}
+
+
 @router.get("/autopilot")
 async def get_autopilot():
     return {"status": "success", "data": await _autopilot_status()}

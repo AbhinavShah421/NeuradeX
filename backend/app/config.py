@@ -73,6 +73,14 @@ class Settings(BaseSettings):
     ANTHROPIC_MODEL: str = "claude-haiku-4-5-20251001"
     ANTHROPIC_BASE_URL: str = "https://api.anthropic.com"
 
+    # Angel One (SmartAPI) — real-time NSE LTP for paper trading. Optional; when
+    # unset, live data uses the Yahoo feed. Get these at smartapi.angelbroking.com.
+    ANGEL_API_KEY: str = ""
+    ANGEL_CLIENT_CODE: str = ""
+    ANGEL_PIN: str = ""
+    ANGEL_TOTP_SECRET: str = ""
+    ANGEL_POLL_SECS: int = 3
+
     # Ollama (local) — runs on the host; host.docker.internal reaches it from Docker
     LLM_MODEL: str = "llama3.2"          # ollama model
     LLM_API_URL: str = "http://host.docker.internal:11434"

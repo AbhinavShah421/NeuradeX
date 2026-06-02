@@ -68,6 +68,17 @@ async def lifespan(app: FastAPI):
         # owns the paper + backtest training loops and starts sessions via the API.
         # The backend only reads/writes the enable flags and serves status.
 
+        # Angel One (SmartAPI) real-time LTP feed for paper trading (optional —
+        # only starts if ANGEL_* credentials are configured; else Yahoo is used).
+        try:
+            from app.utils.angel_client import init_angel_client, angel_poll_loop
+            if init_angel_client():
+                app.state.angel_task = asyncio.create_task(angel_poll_loop())
+                logger.info("Angel One live feed scheduled",
+                            extra={"log_type": "app_lifecycle", "event": "angel_scheduled"})
+        except Exception as exc:
+            logger.warning("Could not start Angel One feed: %s", exc)
+
         logger.info(
             "Application startup complete",
             extra={"log_type": "app_lifecycle", "event": "startup_complete"},
@@ -84,7 +95,7 @@ async def lifespan(app: FastAPI):
 
     logger.info("Shutting down application", extra={"log_type": "app_lifecycle", "event": "shutdown"})
     try:
-        for _attr in ("memory_sweep_task", "session_runner_task", "scanner_task", "autopilot_task"):
+        for _attr in ("memory_sweep_task", "session_runner_task", "scanner_task", "autopilot_task", "angel_task"):
             task = getattr(app.state, _attr, None)
             if task:
                 task.cancel()

@@ -407,12 +407,22 @@ async def _advance_paper(s: dict) -> None:
     last_poll = float(s.get("_last_poll_ts") or 0)
     if (ts - last_poll) >= _PAPER_POLL_SECS or not s.get("candles"):
         s["_last_poll_ts"] = ts
-        # Try Groww live ticks, but give up after a few failures so a key without
-        # the live-data entitlement doesn't keep churning token refreshes.
+        # Real-time LTP overlay, best source first:
+        #   1. Angel One (broker feed, refreshed ~every 3s by the poll loop — no HTTP here)
+        #   2. Groww live ticks (only if the key has the live-data entitlement)
+        #   3. none → Yahoo's current-minute candle (already near real-time)
         ltp = 0.0
-        if not s.get("_groww_live_off"):
+        src = "yahoo_live"
+        from app.utils.angel_client import angel_get_ltp
+        a_ltp = angel_get_ltp(symbol)
+        if a_ltp > 0:
+            ltp = a_ltp
+            src = "angel_live"
+            pt._accumulate_tick(symbol, ltp, ts)
+        elif not s.get("_groww_live_off"):
             ltp = await _try_groww_ltp(symbol)
             if ltp > 0:
+                src = "groww_live"
                 pt._accumulate_tick(symbol, ltp, ts)
                 s["_groww_live_fails"] = 0
             else:
@@ -428,7 +438,7 @@ async def _advance_paper(s: dict) -> None:
         candles = pt._get_merged_candles(symbol, ltp, ts)
         if candles:
             s["candles"]      = candles
-            s["data_source"]  = "groww_live" if ltp > 0 else "yahoo_live"
+            s["data_source"]  = src
             s["current_time"] = candles[-1].get("time", cur)
 
     candles = s.get("candles") or []
