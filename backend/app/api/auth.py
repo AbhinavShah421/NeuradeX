@@ -401,6 +401,10 @@ async def groww_refresh(user: dict = Depends(get_current_user)):
     result = await client.force_refresh()
     if result["success"]:
         return {"status": "success", "data": result}
+    # Rate-limited or transient — surface the clean message gracefully (no raw
+    # httpx error, no scary 502 that the UI would keep retrying).
+    if result.get("rate_limited"):
+        return {"status": "rate_limited", "data": {**client.get_status(), **result}}
     raise HTTPException(502, f"Groww token refresh failed: {result.get('error')}")
 
 
