@@ -39,7 +39,11 @@ _RL_PER_SEC = 5
 _RL_PER_MIN = 200
 # Don't retry a failing token refresh more often than this (avoids hammering the
 # token endpoint when Groww is throttling or credentials are bad).
-_TOKEN_RETRY_COOLDOWN = 30.0
+_TOKEN_RETRY_COOLDOWN = 60.0
+# A 429 on the token endpoint means Groww is hard-throttling it — short retries
+# only keep its shared penalty window from ever resetting. Back off long.
+_TOKEN_RATELIMIT_COOLDOWN = 1800.0   # 30 min after a 429
+_MAX_TOKEN_COOLDOWN = 1800.0
 
 STATUS_OK = "ok"
 STATUS_FAILED = "failed"
@@ -92,6 +96,8 @@ class GrowwClient:
         self._req_times: deque = deque()
         self._rl_lock = asyncio.Lock()
         self._last_refresh_fail: float = 0.0
+        self._cooldown_until: float = 0.0     # monotonic time before which we won't retry
+        self._rate_limited: bool = False      # last failure was a 429 (hard throttle)
 
     # ── Rate limiter ───────────────────────────────────────────────────────────
 
@@ -190,6 +196,8 @@ class GrowwClient:
                     body = resp.text[:300]
                     self._status = STATUS_FAILED
                     self._failure_count += 1
+                    self._rate_limited = False
+                    self._cooldown_until = time.monotonic() + _MAX_TOKEN_COOLDOWN  # bad creds → long backoff
                     self._failure_reason = f"403 — {body}"
                     error = f"403 — {body}"
                     raise ValueError(f"Groww session not approved (403): {body}")
@@ -229,8 +237,18 @@ class GrowwClient:
         except Exception as exc:
             self._status = STATUS_FAILED
             self._failure_count += 1
-            self._failure_reason = str(exc)
             self._last_refresh_fail = time.monotonic()
+            is_429 = status_code == 429 or "429" in str(exc) or "Too Many Requests" in str(exc)
+            if is_429:
+                self._rate_limited = True
+                self._cooldown_until = time.monotonic() + _TOKEN_RATELIMIT_COOLDOWN
+                self._failure_reason = ("Groww token endpoint rate-limited (429) — backing off ~30 min; "
+                                        "live data uses the Yahoo fallback meanwhile.")
+            else:
+                self._rate_limited = False
+                cd = min(_TOKEN_RETRY_COOLDOWN * self._failure_count, _MAX_TOKEN_COOLDOWN)
+                self._cooldown_until = time.monotonic() + cd
+                self._failure_reason = str(exc)
             error = str(exc)
             raise
         finally:
@@ -254,13 +272,12 @@ class GrowwClient:
             if not self._access_token or (
                 self._token_expiry and datetime.now() >= self._token_expiry
             ):
-                # After a failed refresh, back off (exponentially) instead of
+                # After a failed refresh, wait out the cooldown instead of
                 # hammering the token endpoint — repeated hits keep its shared,
-                # per-type penalty window from ever resetting.
-                cooldown = min(_TOKEN_RETRY_COOLDOWN * max(1, self._failure_count), 600.0)
-                if (self._status == STATUS_FAILED
-                        and (time.monotonic() - self._last_refresh_fail) < cooldown):
-                    raise RuntimeError(f"Groww token refresh on cooldown ({cooldown:.0f}s): {self._failure_reason}")
+                # per-type penalty window from ever resetting (esp. after a 429).
+                if self._status == STATUS_FAILED and time.monotonic() < self._cooldown_until:
+                    remaining = int(self._cooldown_until - time.monotonic())
+                    raise RuntimeError(f"Groww token refresh on cooldown ({remaining}s): {self._failure_reason}")
                 await self._refresh_token()
 
             return self._access_token  # type: ignore[return-value]
@@ -280,25 +297,42 @@ class GrowwClient:
         remaining = None
         if self._token_expiry and self._status == STATUS_OK:
             remaining = max(0, int((self._token_expiry - now).total_seconds()))
+        cooldown_remaining = (max(0, int(self._cooldown_until - time.monotonic()))
+                              if self._status == STATUS_FAILED else 0)
         return {
             "status": self._status,
             "token_expiry": self._token_expiry.isoformat() if self._token_expiry else None,
             "time_remaining_seconds": remaining,
             "failure_count": self._failure_count,
             "failure_reason": self._failure_reason,
+            "rate_limited": self._rate_limited,
+            "cooldown_remaining_seconds": cooldown_remaining,
             "last_attempt": self._last_attempt.isoformat() if self._last_attempt else None,
             "has_token": bool(self._access_token),
         }
 
     async def force_refresh(self) -> dict:
         async with self._lock:
+            # Respect a 429 backoff even on a manual refresh — forcing it only
+            # re-triggers Groww's throttle and keeps its penalty window from ever
+            # resetting. Tell the user to wait it out (live data uses Yahoo).
+            if self._rate_limited and time.monotonic() < self._cooldown_until:
+                remaining = int(self._cooldown_until - time.monotonic())
+                return {
+                    "success": False, "rate_limited": True,
+                    "cooldown_remaining_seconds": remaining,
+                    "error": (f"Groww is rate-limiting the token endpoint (429). "
+                              f"Auto-retry in ~{max(1, remaining // 60)} min; live data "
+                              f"uses the Yahoo fallback meanwhile."),
+                }
             self._access_token = None
             self._token_expiry = None
             self._failure_count = 0
             self._failure_reason = ""
-            # A manual refresh always bypasses the auto-retry cooldown
             self._status = STATUS_UNKNOWN
             self._last_refresh_fail = 0.0
+            self._cooldown_until = 0.0
+            self._rate_limited = False
             await self._redis_clear()
         try:
             await self._token()
@@ -307,7 +341,7 @@ class GrowwClient:
                 "expires": self._token_expiry.isoformat() if self._token_expiry else None,
             }
         except Exception as exc:
-            return {"success": False, "error": str(exc)}
+            return {"success": False, "error": self._failure_reason or str(exc)}
 
     async def update_credentials(self, api_key: str, api_secret: str) -> dict:
         async with self._lock:
