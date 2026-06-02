@@ -676,6 +676,14 @@ class ApiService {
     const response = await this.api.get('/api/ai-engine/scan-evaluation');
     return response.data;
   }
+  async getTradeGate(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/ai-engine/trade-gate');
+    return response.data;
+  }
+  async setTradeGate(mode: string): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/ai-engine/trade-gate', { mode });
+    return response.data;
+  }
   async getAutopilot(): Promise<ApiResponse<any>> {
     const response = await this.api.get('/api/ai-engine/autopilot');
     return response.data;

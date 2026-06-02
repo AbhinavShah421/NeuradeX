@@ -36,6 +36,39 @@ router = APIRouter()
 _TICK_SECONDS = 2          # background loop cadence
 SPEEDS        = (1, 2, 5, 10)
 
+# ── Trade gate ────────────────────────────────────────────────────────────────
+# How selective session entries are; switchable at runtime from the dashboard.
+TRADE_GATE_KEY = "ai_engine:trade_gate"
+TRADE_GATES = {
+    "strict": {"label": "Strict", "require_buy": True,  "min_conf": 0.62,
+               "desc": "Only enters when the full 7-agent ensemble votes BUY. Fewest, highest-conviction trades."},
+    "gentle": {"label": "Gentle", "require_buy": False, "min_conf": 0.55,
+               "desc": "Enters on an intraday setup the ensemble doesn't oppose, above a confidence floor. Balanced."},
+    "loose":  {"label": "Loose",  "require_buy": False, "min_conf": 0.0,
+               "desc": "Enters on any intraday setup the ensemble isn't bearish on. Most trades."},
+}
+_gate_cache = {"mode": "", "ts": 0.0}
+
+
+async def get_trade_gate() -> str:
+    """Current gate mode (cached ~15s to avoid a Redis read per candle)."""
+    import time
+    now = time.monotonic()
+    if _gate_cache["mode"] and (now - _gate_cache["ts"]) < 15:
+        return _gate_cache["mode"]
+    mode = getattr(settings, "TRADE_GATE", "gentle")
+    try:
+        from app.utils.redis_client import cache_get
+        v = await cache_get(TRADE_GATE_KEY)
+        if v in TRADE_GATES:
+            mode = v
+    except Exception:
+        pass
+    if mode not in TRADE_GATES:
+        mode = "gentle"
+    _gate_cache.update({"mode": mode, "ts": now})
+    return mode
+
 
 # ── Models ────────────────────────────────────────────────────────────────────
 
@@ -188,18 +221,12 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
     if force_close and pos_status == "LONG":
         action, conf, reason = "SELL", 0.99, "Session end — squared off automatically."
     elif pos_status == "NONE":
-        # Enter when the intraday timing signal fires on a setup the ensemble
-        # does NOT oppose, above a confidence floor. Requiring the full ensemble
-        # to vote BUY was too strict — the ensemble is usually HOLD even on good
-        # setups, so it produced ~zero trades. "not bearish + confidence floor"
-        # trades the genuine setups (the timing signal already fires only a few
-        # times a day) while still filtering out low-conviction / bearish ones.
-        from app.config import settings
-        if getattr(settings, "SELECTIVE_ENTRIES", True):
-            conf_floor = float(getattr(settings, "ENTRY_MIN_CONFIDENCE", 0.55))
-            enter = tsig == 1 and ens_action != "SELL" and conf >= conf_floor
+        # Entry is governed by the selected trade gate (strict / gentle / loose).
+        gate = TRADE_GATES[await get_trade_gate()]
+        if gate["require_buy"]:
+            enter = tsig == 1 and ens_action == "BUY" and conf >= gate["min_conf"]
         else:
-            enter = tsig == 1 and ens_action != "SELL"
+            enter = tsig == 1 and ens_action != "SELL" and conf >= gate["min_conf"]
         action = "BUY" if enter else "HOLD"
         if action == "BUY":
             reason = f"Entry: intraday signal + ensemble {ens_action} ({conf:.0%}). {reason}".strip()
