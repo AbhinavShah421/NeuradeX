@@ -25,6 +25,32 @@ if (-not $dockerReady) {
     exit 1
 }
 
+# ── Start Ollama if not already running ─────────────────────────────────────
+$ollamaReady = $false
+try {
+    Invoke-RestMethod "http://localhost:11434/api/tags" -ErrorAction Stop | Out-Null
+    $ollamaReady = $true
+    Write-Host "Ollama already running." -ForegroundColor DarkGray
+} catch {}
+
+if (-not $ollamaReady) {
+    Write-Host "Starting Ollama..." -ForegroundColor Yellow
+    $ollamaExe = "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe"
+    Start-Process -FilePath $ollamaExe -ArgumentList "serve" -WindowStyle Hidden
+    for ($i = 0; $i -lt 15; $i++) {
+        Start-Sleep -Seconds 2
+        try {
+            Invoke-RestMethod "http://localhost:11434/api/tags" -ErrorAction Stop | Out-Null
+            $ollamaReady = $true
+            Write-Host "Ollama ready." -ForegroundColor Green
+            break
+        } catch {}
+    }
+    if (-not $ollamaReady) {
+        Write-Host "Warning: Ollama did not start — LLM will fall back to Anthropic or be unavailable." -ForegroundColor Yellow
+    }
+}
+
 if ($Build) {
     Write-Host "Building images..." -ForegroundColor Yellow
     docker compose up -d --build
