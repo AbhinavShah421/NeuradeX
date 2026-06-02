@@ -393,6 +393,35 @@ async def _autopilot_status() -> dict:
     return {"paper": {"enabled": paper}, "backtest": {"enabled": bt}, "service_unavailable": True}
 
 
+class TradeGateRequest(BaseModel):
+    mode: str   # "strict" | "gentle" | "loose"
+
+
+@router.get("/trade-gate")
+async def get_trade_gate_endpoint():
+    """Current trade-gate mode + the available presets (for the dashboard)."""
+    from app.api.sessions import get_trade_gate, TRADE_GATES
+    mode = await get_trade_gate()
+    return {"status": "success", "data": {
+        "mode": mode,
+        "options": [{"id": k, "label": v["label"], "desc": v["desc"]} for k, v in TRADE_GATES.items()],
+    }}
+
+
+@router.post("/trade-gate")
+async def set_trade_gate_endpoint(req: TradeGateRequest):
+    """Switch how selective session entries are (applies to paper, replay & autopilot)."""
+    from app.api.sessions import TRADE_GATES, TRADE_GATE_KEY, _gate_cache
+    mode = req.mode if req.mode in TRADE_GATES else "gentle"
+    try:
+        from app.utils.redis_client import cache_set
+        await cache_set(TRADE_GATE_KEY, mode, expire=86400 * 365)
+        _gate_cache.update({"mode": mode, "ts": 0.0})   # force re-read next tick
+    except Exception as exc:
+        logger.warning("trade-gate set failed: %s", exc)
+    return {"status": "success", "data": {"mode": mode, "applied": TRADE_GATES[mode]["label"]}}
+
+
 @router.get("/llm-status")
 async def get_llm_status():
     """Which LLM provider is active (Anthropic vs Ollama) and whether it responds."""

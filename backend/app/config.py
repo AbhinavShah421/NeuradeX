@@ -128,11 +128,12 @@ class Settings(BaseSettings):
     TRADE_FEE_BPS: float = 3.0        # per side — brokerage + exchange + GST
     TRADE_STT_BPS: float = 2.5        # sell side — Securities Transaction Tax
 
-    # Entry conviction. The bare timing signal overtrades and loses to costs, so
-    # require the full ensemble (memory gate + news agent included) to agree BUY
-    # above a confidence floor. Set false to revert to "timing + not-bearish".
-    SELECTIVE_ENTRIES: bool = True
-    ENTRY_MIN_CONFIDENCE: float = 0.55
+    # Trade gate — how selective session entries are. Switchable at runtime from
+    # the dashboard (stored in Redis); this is the default.
+    #   strict → fewest trades, highest conviction (ensemble must vote BUY)
+    #   gentle → balanced (timing setup + ensemble not bearish + confidence floor)
+    #   loose  → most trades (timing setup + ensemble not bearish)
+    TRADE_GATE: str = "gentle"
 
     # Pattern-memory nightly refresh (replays real backtests to keep the bank fresh)
     MEMORY_SWEEP_ENABLED: bool = True
