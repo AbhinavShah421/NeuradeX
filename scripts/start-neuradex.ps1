@@ -1,13 +1,29 @@
-# NeuradeX startup script — launches all Docker services and prints the ngrok public URL
+# NeuradeX startup script - launches all Docker services, prints the ngrok public
+# URL, and publishes it to LIVE_URL.txt (committed to the repo so it's visible
+# from anywhere). Safe to run manually or at logon/boot (see install-autostart.ps1).
 
 param(
     [switch]$Build  # pass -Build to rebuild images before starting
 )
 
 $ErrorActionPreference = "Continue"
+Set-Location (Split-Path -Parent $PSScriptRoot)   # repo root
 
 Write-Host ""
 Write-Host "Starting NeuradeX..." -ForegroundColor Cyan
+
+# Wait for the Docker engine - at boot, Docker Desktop may still be starting.
+$dockerReady = $false
+for ($i = 0; $i -lt 60; $i++) {
+    docker info *> $null
+    if ($LASTEXITCODE -eq 0) { $dockerReady = $true; break }
+    if ($i -eq 0) { Write-Host "Waiting for Docker engine..." -ForegroundColor Yellow }
+    Start-Sleep -Seconds 5
+}
+if (-not $dockerReady) {
+    Write-Host "Docker engine not ready. Enable 'Start Docker Desktop when you log in'." -ForegroundColor Red
+    exit 1
+}
 
 if ($Build) {
     Write-Host "Building images..." -ForegroundColor Yellow
@@ -27,7 +43,7 @@ Write-Host "Waiting for ngrok tunnel..." -ForegroundColor Yellow
 $url    = $null
 $waited = 0
 
-while (-not $url -and $waited -lt 60) {
+while (-not $url -and $waited -lt 90) {
     Start-Sleep -Seconds 2
     $waited += 2
     try {
@@ -57,7 +73,6 @@ if ($url) {
 
     # Copy app URL to clipboard silently
     try { $url + "/neuradex" | Set-Clipboard } catch {}
-
     Write-Host "  (App URL copied to clipboard)" -ForegroundColor DarkGray
     Write-Host ""
 } else {
@@ -66,3 +81,6 @@ if ($url) {
     Write-Host "Check the inspector at http://localhost:4040" -ForegroundColor Yellow
     Write-Host ""
 }
+
+# Publish the live URL to LIVE_URL.txt and push it to the repo (visible anywhere).
+& (Join-Path $PSScriptRoot 'publish-live-url.ps1')
