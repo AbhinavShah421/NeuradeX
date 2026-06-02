@@ -793,6 +793,11 @@ class ApiService {
     return response.data;
   }
 
+  async getLlmStatus(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/ai-engine/llm-status');
+    return response.data;
+  }
+
   // Feedback-service proxy (browser cannot reach Docker-internal port 8012)
   async getFeedbackStats(): Promise<any> {
     const response = await this.api.get('/api/orders/feedback/stats');
