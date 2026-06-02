@@ -56,7 +56,8 @@ _tick_candles: dict[str, list[dict]] = {}
 # Used as the historical base; Groww tick candles override recent minutes.
 # symbol → (candles: list[dict], cached_at: float)
 _yahoo_candles: dict[str, tuple[list, float]] = {}
-_YAHOO_CACHE_TTL = 60  # seconds — refresh today's live intraday at most once a minute
+_YAHOO_CACHE_TTL = 15  # seconds — Yahoo's 1-min data is current-minute fresh, so
+                       # refresh it every ~15s to keep the live candle gap small
 
 
 # ── Time helpers ───────────────────────────────────────────────────────────────
