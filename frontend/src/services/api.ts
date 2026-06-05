@@ -768,6 +768,19 @@ class ApiService {
     return response.data;
   }
 
+  async getPaperConfig(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/sessions/paper-config');
+    return response.data;
+  }
+
+  async setPaperConfig(noEntryAfter: string, squareoffAfter: string): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/sessions/paper-config', {
+      no_entry_after: noEntryAfter,
+      squareoff_after: squareoffAfter,
+    });
+    return response.data;
+  }
+
   // Market-data providers (Groww, Yahoo, Alpha Vantage, …) and their availability
   async getDataProviders(): Promise<ApiResponse<any>> {
     const response = await this.api.get('/api/backtest/providers');

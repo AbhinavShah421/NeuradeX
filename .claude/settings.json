@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Test-Path \"$env:APPDATA\\\\Docker\\\\settings-store.json\"; Test-Path \"$env:APPDATA\\\\Docker\\\\settings.json\")",
+      "PowerShell(Get-Content \"$env:APPDATA\\\\Docker\\\\settings-store.json\" | ConvertFrom-Json | Select-Object AutoStart, autoStart, startAtLogin, StartAtLogin)",
+      "PowerShell(Get-Content \"$env:APPDATA\\\\Docker\\\\settings-store.json\" | ConvertFrom-Json | ConvertTo-Json -Depth 5 | Select-String -Pattern \"AutoStart|StartAtLogin|autoStart\" -Context 2)",
+      "PowerShell(Get-Process \"Docker Desktop\" -ErrorAction SilentlyContinue)",
+      "PowerShell(\\(Get-Content \"$env:APPDATA\\\\Docker\\\\settings-store.json\" | ConvertFrom-Json\\).AutoStart)",
+      "PowerShell(Get-ScheduledTask -TaskName \"NeuradeX-AutoStart\" -ErrorAction SilentlyContinue)",
+      "PowerShell(docker info; echo \"---EXITCODE: $LASTEXITCODE\")",
+      "PowerShell(schtasks /query /tn \"NeuradeX-AutoStart\" /fo LIST 2>&1)",
+      "PowerShell(powershell -ExecutionPolicy Bypass -File \"c:\\\\Users\\\\Abhin\\\\backbone\\\\projects\\\\NeuradeX\\\\scripts\\\\install-autostart.ps1\")",
+      "PowerShell(try { $r = Invoke-RestMethod \"http://localhost:4040/api/tunnels\" -ErrorAction Stop; $t = $r.tunnels | Where-Object { $_.proto -eq \"https\" } | Select-Object -First 1; Write-Host \"Live URL: $\\($t.public_url\\)/neuradex\" -ForegroundColor Green } catch { Write-Host \"ngrok not ready yet — check http://localhost:4040\" -ForegroundColor Yellow })",
+      "Bash(curl -s http://localhost:8000/api/ai-engine/llm-status)",
+      "Bash(curl -s http://localhost:11434/api/tags)",
+      "Bash(where.exe ollama *)",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\Abhin\\\\backbone\\\\projects\\\\NeuradeX\" -Directory)",
+      "Bash(curl -s http://localhost:8000/api/agent/services/health)",
+      "Bash(npx tsc *)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000)",
+      "Bash(gh auth *)",
+      "PowerShell(Get-ScheduledTask -TaskName 'NeuradeX-AutoStart' -ErrorAction SilentlyContinue | Select-Object TaskName, State, @{N='LastRunTime';E={\\(Get-ScheduledTaskInfo -TaskName $_.TaskName\\).LastRunTime}}, @{N='LastTaskResult';E={\\(Get-ScheduledTaskInfo -TaskName $_.TaskName\\).LastTaskResult}}, @{N='NextRunTime';E={\\(Get-ScheduledTaskInfo -TaskName $_.TaskName\\).NextRunTime}})"
+    ]
+  }
+}

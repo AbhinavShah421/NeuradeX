@@ -17,9 +17,9 @@ $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
     -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$script`"" `
     -WorkingDirectory $repo
 
-# At logon, with a short delay so the network and Docker have a moment to come up.
+# At logon, delay so Docker Desktop has time to fully initialize its engine.
 $trigger = New-ScheduledTaskTrigger -AtLogOn
-$trigger.Delay = 'PT30S'
+$trigger.Delay = 'PT60S'
 
 $settings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable `

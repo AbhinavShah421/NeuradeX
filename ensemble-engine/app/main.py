@@ -171,7 +171,16 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(min(2 ** attempt, 30))
 
     _redis = redis_async.from_url(settings.REDIS_URL, decode_responses=True)
-    _publisher = await aio_pika.connect_robust(settings.RABBITMQ_URL)
+
+    for attempt in range(1, 11):
+        try:
+            _publisher = await aio_pika.connect_robust(settings.RABBITMQ_URL)
+            break
+        except Exception:
+            if attempt == 10:
+                raise
+            await asyncio.sleep(min(2 ** attempt, 30))
+
     _pub_channel = await _publisher.channel()
 
     collector = AgentSignalCollector(timeout_seconds=settings.AGENT_SIGNAL_TIMEOUT_SECONDS)

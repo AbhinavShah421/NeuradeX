@@ -34,14 +34,26 @@ async def lifespan(app: FastAPI):
         await init_mongodb()
         await init_redis()
 
-        if settings.GROWW_API_KEY and settings.GROWW_API_SECRET:
-            init_groww_client(settings.GROWW_API_KEY, settings.GROWW_API_SECRET)
-            logger.info("Groww API client ready", extra={"log_type": "app_lifecycle", "event": "groww_init"})
-        else:
-            logger.warning(
-                "GROWW_API_KEY not set — stock data will use simulation",
-                extra={"log_type": "app_lifecycle", "event": "groww_skipped"},
-            )
+        # Load Groww credentials from DB (set via the UI). Never from .env.
+        try:
+            from sqlalchemy import text
+            from app.database.postgres import AsyncSessionLocal
+            async with AsyncSessionLocal() as _db:
+                row = await _db.execute(
+                    text("SELECT broker_api_key, broker_api_secret FROM users WHERE broker_api_key IS NOT NULL AND broker_api_key != '' LIMIT 1")
+                )
+                db_creds = row.fetchone()
+            if db_creds and db_creds[0] and db_creds[1]:
+                init_groww_client(db_creds[0], db_creds[1])
+                logger.info("Groww API client ready (credentials from DB)", extra={"log_type": "app_lifecycle", "event": "groww_init"})
+            else:
+                logger.warning(
+                    "No Groww credentials in DB — update them via the UI. Stock data will use simulation.",
+                    extra={"log_type": "app_lifecycle", "event": "groww_skipped"},
+                )
+        except Exception as exc:
+            logger.warning("Could not load Groww credentials from DB: %s", exc,
+                           extra={"log_type": "app_lifecycle", "event": "groww_skipped"})
 
         logger.info("Loading ML models", extra={"log_type": "app_lifecycle", "event": "ml_init"})
         await initialize_ml_models()

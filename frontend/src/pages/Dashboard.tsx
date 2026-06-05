@@ -568,30 +568,73 @@ const SignalScorePanel: React.FC<{ ev: any }> = ({ ev }) => {
   );
 };
 
+// ── Shared stock row used across all watchlist tabs ───────────────────────────
+const WatchlistRow: React.FC<{ w: any; i: number; onClick: () => void; badge?: React.ReactNode }> = ({ w, i, onClick, badge }) => (
+  <div onClick={onClick}
+    style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 4px', borderTop: i ? '1px solid var(--nd-border)' : 'none', cursor: 'pointer' }}>
+    <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--nd-text-3)', width: 20 }}>#{i + 1}</span>
+    <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>{w.symbol}</span>
+        {badge}
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--nd-text-3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{w.name}</div>
+      {w.news && ((w.news.catalyst && w.news.catalyst !== 'none') || w.news.summary) && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 2, fontSize: 10.5, fontWeight: 600, color: ACTION_BG[w.news.action] ?? 'var(--nd-text-3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          <span className="material-icons" style={{ fontSize: 12, flexShrink: 0 }}>article</span>
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            {(w.news.catalyst && w.news.catalyst !== 'none') ? w.news.catalyst : w.news.summary}
+          </span>
+        </div>
+      )}
+    </div>
+    <div style={{ textAlign: 'right', flexShrink: 0 }}>
+      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--nd-text-1)' }}>₹{w.price?.toLocaleString('en-IN')}</div>
+      <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>conf {(w.confidence * 100).toFixed(0)}%</div>
+    </div>
+    <span style={{ fontSize: 11, fontWeight: 700, padding: '3px 9px', borderRadius: 5, background: `${ACTION_BG[w.action]}1a`, color: ACTION_BG[w.action] }}>{w.action}</span>
+    <span className="material-icons" style={{ fontSize: 16, color: 'var(--nd-text-3)' }}>chevron_right</span>
+  </div>
+);
+
 const AiWatchlistTab: React.FC = () => {
-  const [data, setData] = useState<any>(null);
+  const [data, setData]         = useState<any>(null);
   const [evalData, setEvalData] = useState<any>(null);
-  const [sel, setSel] = useState<any>(null);
+  const [sel, setSel]           = useState<any>(null);
   const [scanning, setScanning] = useState(false);
+  const [tab, setTab]           = useState<'intraday' | 'delivery' | 'fno'>('intraday');
+
   const load = useCallback(async () => {
     try { const r = await apiService.aiWatchlist(); setData((r as any).data); } catch {}
     try { const e = await apiService.scanEvaluation(); setEvalData((e as any).data); } catch {}
   }, []);
   useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, [load]);
+
   const rescan = async () => {
     setScanning(true);
     try { await apiService.scanWatchlist(); setTimeout(() => { load(); setScanning(false); }, 35000); }
     catch { setScanning(false); }
   };
-  const items: any[] = data?.items ?? [];
+
+  const intraday: any[] = data?.intraday ?? data?.items ?? [];
+  const delivery: any[] = data?.delivery ?? [];
+  const fno: any[]      = data?.fno ?? [];
+
+  const tabs = [
+    { key: 'intraday', label: 'Best Intraday',  icon: 'bolt',       count: intraday.length },
+    { key: 'delivery', label: 'Best Delivery',  icon: 'calendar_month', count: delivery.length },
+    { key: 'fno',      label: 'Best F&O',        icon: 'auto_graph', count: fno.length },
+  ] as const;
+
+  const activeItems = tab === 'intraday' ? intraday : tab === 'delivery' ? delivery : fno;
 
   return (
     <div>
+      {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
         <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>
-          AI-selected from a live scan of {data?.scanned ?? 0}/{data?.universe ?? 0} stocks
-          {data?.marketRegime ? ` · market ${data.marketRegime}` : ''}
-          {data?.updatedAt ? ` · last updated ${fmtDateTime(data.updatedAt)} IST` : ''}
+          AI scan of {data?.scanned ?? 0}/{data?.universe ?? 0} stocks
+          {data?.updatedAt ? ` · ${fmtDateTime(data.updatedAt)} IST` : ''}
         </div>
         <button onClick={rescan} disabled={scanning}
           style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '5px 12px', borderRadius: 8, border: '1px solid var(--nd-border)', background: 'var(--nd-surface)', cursor: scanning ? 'wait' : 'pointer', fontSize: 12, color: 'var(--nd-text-2)' }}>
@@ -602,40 +645,95 @@ const AiWatchlistTab: React.FC = () => {
 
       <SignalScorePanel ev={evalData} />
 
-      {items.length === 0 ? (
+      {/* Category tabs */}
+      <div style={{ display: 'flex', gap: 6, marginBottom: 14, borderBottom: '1px solid var(--nd-border)', paddingBottom: 0 }}>
+        {tabs.map(t => (
+          <button key={t.key} onClick={() => setTab(t.key)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 5,
+              padding: '8px 14px', borderRadius: '8px 8px 0 0',
+              border: '1px solid var(--nd-border)', borderBottom: tab === t.key ? '2px solid var(--nd-green)' : '1px solid var(--nd-border)',
+              background: tab === t.key ? 'var(--nd-surface)' : 'transparent',
+              cursor: 'pointer', fontSize: 12, fontWeight: tab === t.key ? 700 : 500,
+              color: tab === t.key ? 'var(--nd-green)' : 'var(--nd-text-2)',
+              marginBottom: -1,
+            }}>
+            <span className="material-icons" style={{ fontSize: 14 }}>{t.icon}</span>
+            {t.label}
+            {t.count > 0 && (
+              <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 5px', borderRadius: 8, background: tab === t.key ? 'var(--nd-green)' : 'var(--nd-border)', color: tab === t.key ? '#fff' : 'var(--nd-text-3)' }}>{t.count}</span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {/* Tab descriptions */}
+      {tab === 'intraday' && (
+        <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginBottom: 10, padding: '6px 10px', background: 'var(--nd-bg)', borderRadius: 6, borderLeft: '3px solid var(--nd-green)' }}>
+          High-momentum stocks with above-average volume — suitable for same-day trades. Click for full evidence.
+        </div>
+      )}
+      {tab === 'delivery' && (
+        <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginBottom: 10, padding: '6px 10px', background: 'var(--nd-bg)', borderRadius: 6, borderLeft: '3px solid var(--nd-blue)' }}>
+          Stocks in a confirmed uptrend with moderate volatility — suitable for multi-week holding. The <strong style={{ color: 'var(--nd-text-2)' }}>Safe ~X wks</strong> badge is the AI's estimated safe holding window.
+        </div>
+      )}
+      {tab === 'fno' && (
+        <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginBottom: 10, padding: '6px 10px', background: 'var(--nd-bg)', borderRadius: 6, borderLeft: '3px solid #a78bfa' }}>
+          F&O-eligible stocks with a directional signal. Each row shows the recommended option (CE/PE), strike, expiry, and estimated safe holding days.
+        </div>
+      )}
+
+      {/* Stock list */}
+      {activeItems.length === 0 ? (
         <div style={{ padding: 40, textAlign: 'center', color: 'var(--nd-text-3)', fontSize: 13 }}>
-          The market scanner is warming up — the AI watchlist will appear shortly.
+          {data ? 'No qualifying stocks in this category right now.' : 'The market scanner is warming up — results will appear shortly.'}
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column' }}>
-          {items.map((w, i) => (
-            <div key={w.symbol} onClick={() => setSel(w)}
-              style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 4px', borderTop: i ? '1px solid var(--nd-border)' : 'none', cursor: 'pointer' }}>
-              <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--nd-text-3)', width: 20 }}>#{i + 1}</span>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>{w.symbol}</div>
-                <div style={{ fontSize: 11, color: 'var(--nd-text-3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{w.name}</div>
-                {w.news && ((w.news.catalyst && w.news.catalyst !== 'none') || w.news.summary) && (
-                  <div title="LLM news sentiment" style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 2, fontSize: 10.5, fontWeight: 600, color: ACTION_BG[w.news.action] ?? 'var(--nd-text-3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    <span className="material-icons" style={{ fontSize: 12, flexShrink: 0 }}>article</span>
-                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                      {(w.news.catalyst && w.news.catalyst !== 'none') ? w.news.catalyst : w.news.summary}
-                    </span>
+          {activeItems.map((w: any, i: number) => {
+            // ── Delivery badge ──────────────────────────────────────────────
+            const deliveryBadge = tab === 'delivery' && w.deliveryWeeks > 0 ? (
+              <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 8, background: 'rgba(59,130,246,0.12)', color: 'var(--nd-blue)', flexShrink: 0 }}>
+                Safe ~{w.deliveryWeeks} wk{w.deliveryWeeks > 1 ? 's' : ''}
+              </span>
+            ) : null;
+
+            // ── FNO badge ───────────────────────────────────────────────────
+            const rec = w.fnoRecommendation;
+            const fnoBadge = tab === 'fno' && rec ? (
+              <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 8, background: 'rgba(167,139,250,0.15)', color: '#a78bfa', flexShrink: 0 }}>
+                {rec.optionType} {rec.strike} · {rec.expiry} · {rec.safeDays}d
+              </span>
+            ) : null;
+
+            return (
+              <div key={w.symbol}>
+                <WatchlistRow w={w} i={i} onClick={() => setSel(w)} badge={deliveryBadge ?? fnoBadge} />
+                {/* FNO rationale row */}
+                {tab === 'fno' && rec && (
+                  <div style={{ fontSize: 10.5, color: 'var(--nd-text-3)', padding: '0 4px 8px 52px', lineHeight: 1.5 }}>
+                    {rec.rationale}
                   </div>
                 )}
               </div>
-              <div style={{ textAlign: 'right' }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--nd-text-1)' }}>₹{w.price?.toLocaleString('en-IN')}</div>
-                <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>
-                  {w.signalScore != null ? `signal ${Math.round(w.signalScore)} · ` : ''}conf {(w.confidence * 100).toFixed(0)}%
-                </div>
-              </div>
-              <span style={{ fontSize: 11, fontWeight: 700, padding: '3px 9px', borderRadius: 5, background: `${ACTION_BG[w.action]}1a`, color: ACTION_BG[w.action] }}>{w.action}</span>
-              <span className="material-icons" style={{ fontSize: 16, color: 'var(--nd-text-3)' }}>chevron_right</span>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
+
+      {/* Metrics summary row for active tab */}
+      {activeItems.length > 0 && tab === 'delivery' && (
+        <div style={{ marginTop: 12, padding: '8px 12px', background: 'var(--nd-bg)', borderRadius: 8, fontSize: 11, color: 'var(--nd-text-3)', display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+          <span>Avg holding: <strong style={{ color: 'var(--nd-text-2)' }}>
+            {Math.round(activeItems.reduce((s: number, i: any) => s + (i.deliveryWeeks || 0), 0) / activeItems.length)} wks
+          </strong></span>
+          <span>All in uptrend: <strong style={{ color: 'var(--nd-green)' }}>
+            {activeItems.filter((i: any) => i.metrics?.smaTrend === 'bullish').length}/{activeItems.length}
+          </strong></span>
+        </div>
+      )}
+
       {sel && <WatchlistEvidence stock={sel} scannedAt={data?.updatedAt} onClose={() => setSel(null)} />}
     </div>
   );
@@ -1009,115 +1107,6 @@ const SystemStartupModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   );
 };
 
-// ── System Status Icon (dashboard header badge) ────────────────────────────────
-
-const SystemStatusIcon: React.FC<{ onClick: () => void }> = ({ onClick }) => {
-  const [svcs, setSvcs] = useState<SvcState[]>(INITIAL_SVCS.map(s => ({ ...s })));
-  const [expanded, setExpanded] = useState(false);
-  const popRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    let live = true;
-    const run = async () => {
-      const next = await pollServices();
-      if (live) setSvcs(next);
-    };
-    run();
-    const id = setInterval(run, 8000);
-    return () => { live = false; clearInterval(id); };
-  }, []);
-
-  useEffect(() => {
-    if (!expanded) return;
-    const handler = (e: MouseEvent) => {
-      if (popRef.current && !popRef.current.contains(e.target as Node))
-        setExpanded(false);
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [expanded]);
-
-  const ok    = svcs.filter(s => s.status === 'ok').length;
-  const total = svcs.length;
-  const allOk = ok === total;
-  const dotColor = allOk ? '#00b386' : '#f59e0b';
-
-  return (
-    <div style={{ position: 'relative', display: 'inline-flex' }} ref={popRef}>
-      {/* Badge button */}
-      <button
-        onClick={() => setExpanded(v => !v)}
-        style={{
-          display: 'flex', alignItems: 'center', gap: 7,
-          padding: '5px 11px 5px 8px', borderRadius: 20,
-          background: 'var(--nd-surface)', border: '1px solid var(--nd-border)',
-          cursor: 'pointer', transition: 'border-color 0.2s, box-shadow 0.2s',
-          boxShadow: allOk ? '0 0 0 0 transparent' : '0 0 8px rgba(245,158,11,0.18)',
-        }}
-        title="System status"
-      >
-        {/* Pulsing dot */}
-        <div style={{ position: 'relative', width: 10, height: 10, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          {!allOk && (
-            <div style={{
-              position: 'absolute', inset: 0, borderRadius: '50%',
-              background: dotColor, opacity: 0.35,
-              animation: 'nd-status-ping 1.8s ease-out infinite',
-            }} />
-          )}
-          <div style={{ width: 8, height: 8, borderRadius: '50%', background: dotColor, boxShadow: `0 0 6px ${dotColor}` }} />
-        </div>
-        <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--nd-text-2)', letterSpacing: 0.2 }}>
-          {allOk ? 'All systems live' : `${ok}/${total} live`}
-        </span>
-        <span className="material-icons" style={{ fontSize: 13, color: 'var(--nd-text-3)' }}>
-          {expanded ? 'expand_less' : 'expand_more'}
-        </span>
-      </button>
-
-      {/* Mini dropdown */}
-      {expanded && (
-        <div style={{
-          position: 'absolute', top: 'calc(100% + 8px)', right: 0, zIndex: 500,
-          background: 'var(--nd-bg)', border: '1px solid var(--nd-border)',
-          borderRadius: 12, boxShadow: '0 12px 40px rgba(0,0,0,0.25)',
-          minWidth: 220, overflow: 'hidden',
-        }}>
-          {svcs.map((svc, i) => (
-            <div key={svc.name} style={{
-              display: 'flex', alignItems: 'center', gap: 10,
-              padding: '8px 14px',
-              borderBottom: i < svcs.length - 1 ? '1px solid var(--nd-border)' : 'none',
-            }}>
-              <div style={{
-                width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
-                background: svc.status === 'ok' ? '#00b386' : svc.status === 'error' ? '#f59e0b' : 'var(--nd-text-3)',
-                boxShadow: svc.status === 'ok' ? '0 0 5px rgba(0,179,134,0.7)' : 'none',
-              }} />
-              <span style={{ flex: 1, fontSize: 12, color: 'var(--nd-text-1)', fontWeight: 500 }}>{svc.name}</span>
-              <span style={{ fontSize: 10.5, color: svc.status === 'ok' ? '#00b386' : svc.status === 'error' ? '#f59e0b' : 'var(--nd-text-3)', fontWeight: 600 }}>
-                {svc.status === 'ok' ? 'Live' : svc.status === 'error' ? 'Waiting' : '…'}
-              </span>
-            </div>
-          ))}
-          <div style={{ padding: '9px 14px', borderTop: '1px solid var(--nd-border)' }}>
-            <button
-              onClick={() => { setExpanded(false); onClick(); }}
-              style={{
-                width: '100%', padding: '6px 0', borderRadius: 8,
-                background: 'var(--nd-surface)', border: '1px solid var(--nd-border)',
-                fontSize: 12, color: 'var(--nd-text-2)', cursor: 'pointer', fontWeight: 600,
-              }}
-            >
-              View startup modal
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-};
-
 // ── Dashboard Page ────────────────────────────────────────────────────────────
 
 const Dashboard: React.FC = () => {
@@ -1160,12 +1149,9 @@ const Dashboard: React.FC = () => {
       )}
 
       {/* Page heading */}
-      <div style={{ marginBottom: 20, display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
-        <div>
-          <h1 className="nd-page-title">Market Overview</h1>
-          <p className="nd-page-sub">Real-time NSE · BSE stock data with AI-generated predictions</p>
-        </div>
-        <SystemStatusIcon onClick={() => setShowStartup(true)} />
+      <div style={{ marginBottom: 20 }}>
+        <h1 className="nd-page-title">Market Overview</h1>
+        <p className="nd-page-sub">Real-time NSE · BSE stock data with AI-generated predictions</p>
       </div>
 
       {/* Accuracy stat cards — click any to see the evidence */}

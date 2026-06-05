@@ -83,6 +83,7 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
 
   const selectedRef = useRef<string | null>(null);
   selectedRef.current = selectedId;
+  const detailCache = useRef<Map<string, any>>(new Map());
 
   const loadList = useCallback(async () => {
     try {
@@ -93,13 +94,18 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
   const loadDetail = useCallback(async (id: string) => {
     try {
       const r = await apiService.sessionGet(id);
-      setDetail((r as any).data);
-    } catch { setDetail(null); }
+      const data = (r as any).data;
+      detailCache.current.set(id, data);
+      if (selectedRef.current === id) setDetail(data);
+    } catch { if (selectedRef.current === id) setDetail(null); }
   }, []);
 
   useEffect(() => { loadList(); const t = setInterval(loadList, 3000); return () => clearInterval(t); }, [loadList]);
   useEffect(() => {
     if (!selectedId) { setDetail(null); return; }
+    // Show cached data instantly, then fetch fresh in background
+    const cached = detailCache.current.get(selectedId);
+    if (cached) setDetail(cached);
     loadDetail(selectedId);
     const t = setInterval(() => { if (selectedRef.current) loadDetail(selectedRef.current); }, 2500);
     return () => clearInterval(t);
