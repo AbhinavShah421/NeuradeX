@@ -202,6 +202,12 @@ class GrowwClient:
                     error = f"403 — {body}"
                     raise ValueError(f"Groww session not approved (403): {body}")
 
+                if not resp.is_success:
+                    logger.error(
+                        "Groww token endpoint error body: %s", resp.text[:500],
+                        extra={"log_type": "groww_token", "event": "token_error_body",
+                               "status_code": resp.status_code, "body": resp.text[:500]},
+                    )
                 resp.raise_for_status()
                 data = resp.json()
                 payload = data.get("payload", data)

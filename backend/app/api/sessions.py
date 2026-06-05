@@ -49,6 +49,44 @@ TRADE_GATES = {
 }
 _gate_cache = {"mode": "", "ts": 0.0}
 
+# ── Paper trading time config ─────────────────────────────────────────────────
+_PAPER_CONFIG_KEY     = "paper_trading:config"
+_PAPER_CONFIG_DEFAULT = {"no_entry_after": "14:00", "squareoff_after": "14:30"}
+_paper_cfg_cache: dict = {}
+_paper_cfg_ts: float = 0.0
+
+
+async def get_paper_config() -> dict:
+    """Return paper trading time config (cached 30s)."""
+    import time as _time
+    global _paper_cfg_cache, _paper_cfg_ts
+    if _paper_cfg_cache and (_time.monotonic() - _paper_cfg_ts) < 30:
+        return _paper_cfg_cache
+    cfg = dict(_PAPER_CONFIG_DEFAULT)
+    try:
+        from app.utils.redis_client import cache_get
+        import json as _json
+        raw = await cache_get(_PAPER_CONFIG_KEY)
+        if raw:
+            cfg.update(_json.loads(raw))
+    except Exception:
+        pass
+    _paper_cfg_cache = cfg
+    _paper_cfg_ts = _time.monotonic()
+    return cfg
+
+
+async def save_paper_config(cfg: dict) -> None:
+    global _paper_cfg_cache, _paper_cfg_ts
+    import json as _json
+    try:
+        from app.utils.redis_client import get_redis
+        await get_redis().set(_PAPER_CONFIG_KEY, _json.dumps(cfg))
+    except Exception:
+        pass
+    _paper_cfg_cache = cfg
+    _paper_cfg_ts = 0.0  # invalidate cache so next read is fresh
+
 
 async def get_trade_gate() -> str:
     """Current gate mode (cached ~15s to avoid a Redis read per candle)."""
@@ -190,6 +228,10 @@ async def _feed_memory(symbol: str, fp, regime: str, pnl_pct: float, entry: floa
         logger.debug("session memory feed skipped: %s", exc)
 
 
+_PAPER_PROFIT_TARGET_PCT = 0.6   # book profit at +0.6% gain
+_PAPER_DROP_CANDLES      = 3     # N consecutive lower closes = drop pattern
+
+
 async def _step(s: dict, window: list[dict], force_close: bool) -> None:
     """Run one candle: decide, execute against the session's position, update state."""
     if not window:
@@ -235,6 +277,42 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         action = "SELL" if (tsig == -1 or ens_action == "SELL") else "HOLD"
         if action == "SELL":
             reason = f"Exit: intraday signal/ensemble {ens_action}. {reason}".strip()
+
+    # ── Paper-trading specific rules (configurable times + profit/drop logic) ──
+    if not force_close and s.get("mode") == "paper":
+        cfg          = await get_paper_config()
+        candle_m     = _time_to_minutes(candle.get("time", "09:15"))
+        no_entry_m   = _time_to_minutes(cfg.get("no_entry_after",  "14:00"))
+        squareoff_m  = _time_to_minutes(cfg.get("squareoff_after", "14:30"))
+
+        # Configurable square-off: force sell at or after squareoff time
+        if pos_status == "LONG" and candle_m >= squareoff_m and action != "SELL":
+            action = "SELL"
+            reason = f"Square off at {cfg.get('squareoff_after', '14:30')} — active trading window closed."
+
+        # Configurable entry cutoff: no new buys at or after no_entry time
+        if action == "BUY" and candle_m >= no_entry_m:
+            action = "HOLD"
+            reason = f"No new entries after {cfg.get('no_entry_after', '14:00')}."
+
+        # Profit booking and drop pattern (only while still in a HOLD — don't override above rules)
+        if pos_status == "LONG" and action == "HOLD":
+            entry_price_now = pos.get("entry_price", 0.0)
+            gain_pct = (candle["close"] - entry_price_now) / entry_price_now * 100 if entry_price_now > 0 else 0.0
+
+            if gain_pct >= _PAPER_PROFIT_TARGET_PCT:
+                action = "SELL"
+                reason = f"Profit booked at +{gain_pct:.2f}% — target reached."
+            elif len(window) >= _PAPER_DROP_CANDLES + 1:
+                recent_closes = [c["close"] for c in window[-(_PAPER_DROP_CANDLES + 1):]]
+                if all(recent_closes[i] > recent_closes[i + 1] for i in range(_PAPER_DROP_CANDLES)):
+                    action = "SELL"
+                    reason = f"Drop pattern: {_PAPER_DROP_CANDLES} consecutive lower closes — exiting to preserve capital."
+
+    # ── No more entries after a trade is closed in paper mode ────────────────
+    if action == "BUY" and s.get("no_more_entries"):
+        action = "HOLD"
+        reason = "Session trade complete — running for agent learning only."
 
     trade_executed = None
 
@@ -325,6 +403,9 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
             except Exception as exc:
                 logger.debug("session record_outcome skipped: %s", exc)
         s["position"] = {"status": "NONE", "entry_price": 0.0, "quantity": 0, "entry_time": None, "current_pnl": 0.0}
+        # Paper sessions: one trade per session — keep running for agent learning
+        if s.get("mode") == "paper" and not force_close:
+            s["no_more_entries"] = True
 
     # Unrealised P&L
     if s["position"]["status"] == "LONG":
@@ -568,6 +649,28 @@ async def start_session(req: StartSessionRequest):
 async def list_all_sessions():
     sessions = await list_sessions()
     return {"status": "success", "data": [_summary(s) for s in sessions]}
+
+
+# ── Paper trading time config (must be before /{session_id} to avoid shadowing)
+class PaperConfigRequest(BaseModel):
+    no_entry_after:  str
+    squareoff_after: str
+
+
+@router.get("/paper-config")
+async def get_paper_trading_config():
+    return {"status": "success", "data": await get_paper_config()}
+
+
+@router.post("/paper-config")
+async def set_paper_trading_config(req: PaperConfigRequest):
+    import re
+    hhmm = re.compile(r"^\d{2}:\d{2}$")
+    if not hhmm.match(req.no_entry_after) or not hhmm.match(req.squareoff_after):
+        raise HTTPException(400, "Times must be HH:MM format")
+    cfg = {"no_entry_after": req.no_entry_after, "squareoff_after": req.squareoff_after}
+    await save_paper_config(cfg)
+    return {"status": "success", "data": cfg}
 
 
 @router.get("/{session_id}")

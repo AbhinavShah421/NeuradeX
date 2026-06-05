@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import NeuradeXLogo from './NeuradeXLogo';
 import GrowwStatusBadge from './GrowwStatusBadge';
+import FloatingSystemStatus from './FloatingSystemStatus';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { useAuthStore } from '../stores/authStore';
@@ -388,6 +389,8 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       </header>
 
       <main className="nd-main">{children}</main>
+
+      <FloatingSystemStatus />
 
       <footer className="nd-footer">
         NeuradeX © 2024 · AI-Powered Market Intelligence · For educational purposes only
