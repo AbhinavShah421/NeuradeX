@@ -1,6 +1,6 @@
 NeuradeX is LIVE
 
-https://0f93-103-226-202-201.ngrok-free.app
+https://1dd2-103-226-202-201.ngrok-free.app
 
-Dashboard: https://0f93-103-226-202-201.ngrok-free.app/neuradex
-Updated:   2026-06-05 19:27:56 +05:30
+Dashboard: https://1dd2-103-226-202-201.ngrok-free.app/neuradex
+Updated:   2026-06-05 19:36:27 +05:30
