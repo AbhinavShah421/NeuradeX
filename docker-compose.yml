@@ -451,6 +451,7 @@ services:
       AUTOPILOT_MAX_SESSIONS: "15"          # paper: cover the whole watchlist
       AUTOPILOT_CAPITAL: "50000"
       AUTOPILOT_TICK_SECS: "60"             # paper check cadence
+      AUTOPILOT_MAX_HOLD_MINUTES: "0"       # per-trade hold cap, minutes (0 = off)
       AUTOPILOT_BACKTEST_SPEED: "1"         # 1x — dense, real-like training
       AUTOPILOT_BACKTEST_MAX: "15"          # sessions per day queue
       AUTOPILOT_BACKTEST_POLL: "15"         # queue completion poll

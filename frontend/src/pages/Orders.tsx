@@ -47,6 +47,30 @@ interface Stats {
   agentWeights?: Record<string, number>;
 }
 
+// Response keys are camelCased by the axios interceptor (snake_case → camelCase).
+interface PortfolioMetrics {
+  totalTrades: number;
+  winRate: number;
+  meanPnlPct: number;
+  totalReturnPct: number;
+  sharpeRatio: number;
+  sortinoRatio: number;
+  maxDrawdownPct: number;
+  calmarRatio: number;
+  error?: string;
+}
+
+interface AgentMetric {
+  precision?: number;
+  recall?: number;
+  f1?: number;
+  accuracy?: number;
+  totalTrades?: number;
+  confusionMatrix?: { tp: number; fp: number; tn: number; fn: number };
+  status?: string;
+  total?: number;
+}
+
 // ── Execution Step Types ──────────────────────────────────────────────────────
 
 interface ExecStep {
@@ -88,16 +112,22 @@ function buildExecutionSteps(trade: TradeRecord): ExecStep[] {
     ),
   });
 
+  const mc = trade.marketContext ?? {};
+  const ensembleData: Record<string, any> = {
+    decision: trade.action,
+    confidence: `${((trade.ensembleConfidence ?? 0) * 100).toFixed(1)}%`,
+    gate: (trade.ensembleConfidence ?? 0) >= 0.60 ? 'PASSED (≥ 60%)' : 'FAILED (< 60%)',
+  };
+  // New ensemble fields — shown only when the pipeline persisted them.
+  if (mc.regime) ensembleData.regime = String(mc.regime);
+  if (mc.rawConfidence != null) ensembleData['raw → calibrated'] = `${(mc.rawConfidence * 100).toFixed(0)}% → ${((trade.ensembleConfidence ?? 0) * 100).toFixed(0)}%`;
+  if (mc.metaWinProbability != null) ensembleData['meta win prob'] = `${(mc.metaWinProbability * 100).toFixed(0)}%`;
   steps.push({
     step: 3,
     name: 'Ensemble Vote',
     icon: 'how_to_vote',
     color: '#f59e0b',
-    data: {
-      decision: trade.action,
-      confidence: `${((trade.ensembleConfidence ?? 0) * 100).toFixed(1)}%`,
-      gate: (trade.ensembleConfidence ?? 0) >= 0.60 ? 'PASSED (≥ 60%)' : 'FAILED (< 60%)',
-    },
+    data: ensembleData,
   });
 
   const atr = trade.marketContext?.atr ?? 0;
@@ -283,6 +313,8 @@ const Orders: React.FC = () => {
   const [stats,   setStats]   = useState<Stats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState<string | null>(null);
+  const [portfolio, setPortfolio] = useState<PortfolioMetrics | null>(null);
+  const [agentAcc,  setAgentAcc]  = useState<Record<string, AgentMetric> | null>(null);
   const [selected, setSelected] = useState<TradeRecord | null>(null);
   const [filter,   setFilter]   = useState<'ALL' | 'LIVE' | 'PAPER' | 'BACKTEST'>('ALL');
   const [sortKey,  setSortKey]  = useState<string>('created');
@@ -303,14 +335,22 @@ const Orders: React.FC = () => {
   useEffect(() => {
     const load = async () => {
       try {
-        const [statsRes, tradesRes] = await Promise.allSettled([
+        const [statsRes, tradesRes, pmRes, aaRes] = await Promise.allSettled([
           apiService.getFeedbackStats(),
           apiService.getFeedbackTrades(),
+          apiService.getPortfolioMetrics(),
+          apiService.getAgentAccuracy(20),
         ]);
         if (statsRes.status === 'fulfilled') setStats(statsRes.value);
         if (tradesRes.status === 'fulfilled') {
           const data = tradesRes.value;
           setTrades(Array.isArray(data) ? data : data.trades ?? []);
+        }
+        if (pmRes.status === 'fulfilled' && pmRes.value && !pmRes.value.error) {
+          setPortfolio(pmRes.value as PortfolioMetrics);
+        }
+        if (aaRes.status === 'fulfilled' && aaRes.value?.agentAccuracy) {
+          setAgentAcc(aaRes.value.agentAccuracy as Record<string, AgentMetric>);
         }
       } catch (e: any) {
         setError(e.message);
@@ -451,6 +491,70 @@ const Orders: React.FC = () => {
                 </div>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* Portfolio performance metrics */}
+      {portfolio && portfolio.totalTrades > 0 && (
+        <div style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 12, padding: '14px 18px', marginBottom: 20 }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--nd-text-3)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 12 }}>
+            Portfolio Performance · {portfolio.totalTrades} closed trades
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))', gap: 12 }}>
+            {[
+              { label: 'Sharpe',       value: portfolio.sharpeRatio.toFixed(2),       good: portfolio.sharpeRatio >= 1 },
+              { label: 'Sortino',      value: portfolio.sortinoRatio.toFixed(2),      good: portfolio.sortinoRatio >= 1 },
+              { label: 'Calmar',       value: portfolio.calmarRatio.toFixed(2),       good: portfolio.calmarRatio >= 1 },
+              { label: 'Max Drawdown', value: `${portfolio.maxDrawdownPct.toFixed(1)}%`, good: portfolio.maxDrawdownPct < 15 },
+              { label: 'Total Return', value: `${portfolio.totalReturnPct >= 0 ? '+' : ''}${portfolio.totalReturnPct.toFixed(1)}%`, good: portfolio.totalReturnPct >= 0 },
+              { label: 'Avg P&L/trade', value: `${portfolio.meanPnlPct >= 0 ? '+' : ''}${portfolio.meanPnlPct.toFixed(2)}%`, good: portfolio.meanPnlPct >= 0 },
+            ].map(m => (
+              <div key={m.label} style={{ textAlign: 'center' }}>
+                <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginBottom: 4 }}>{m.label}</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: m.good ? 'var(--nd-green)' : 'var(--nd-red)' }}>{m.value}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Per-agent accuracy (precision / recall / F1) */}
+      {agentAcc && Object.values(agentAcc).some(a => a.f1 !== undefined) && (
+        <div style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 12, padding: '14px 18px', marginBottom: 20 }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--nd-text-3)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 12 }}>
+            Per-Agent Accuracy (closed trades)
+          </div>
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', minWidth: 520, borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr style={{ color: 'var(--nd-text-3)', textAlign: 'left' }}>
+                  {['Agent', 'Accuracy', 'Precision', 'Recall', 'F1', 'Trades'].map(h => (
+                    <th key={h} style={{ padding: '6px 10px', fontWeight: 500 }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(agentAcc).map(([agent, m]) => (
+                  <tr key={agent} style={{ borderTop: '1px solid var(--nd-border)' }}>
+                    <td style={{ padding: '7px 10px', fontWeight: 600, color: AGENT_COLORS[agent] ?? 'var(--nd-text-1)', textTransform: 'capitalize' }}>{agent}</td>
+                    {m.f1 === undefined ? (
+                      <td colSpan={5} style={{ padding: '7px 10px', color: 'var(--nd-text-3)', fontStyle: 'italic' }}>
+                        insufficient data ({m.total ?? 0} trades)
+                      </td>
+                    ) : (
+                      <>
+                        <td style={{ padding: '7px 10px', fontWeight: 600, color: (m.accuracy ?? 0) >= 0.55 ? 'var(--nd-green)' : (m.accuracy ?? 0) >= 0.45 ? '#f59e0b' : 'var(--nd-red)' }}>{((m.accuracy ?? 0) * 100).toFixed(0)}%</td>
+                        <td style={{ padding: '7px 10px', color: 'var(--nd-text-2)' }}>{((m.precision ?? 0) * 100).toFixed(0)}%</td>
+                        <td style={{ padding: '7px 10px', color: 'var(--nd-text-2)' }}>{((m.recall ?? 0) * 100).toFixed(0)}%</td>
+                        <td style={{ padding: '7px 10px', fontWeight: 600, color: 'var(--nd-text-1)' }}>{(m.f1 ?? 0).toFixed(2)}</td>
+                        <td style={{ padding: '7px 10px', color: 'var(--nd-text-3)' }}>{m.totalTrades ?? 0}</td>
+                      </>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       )}

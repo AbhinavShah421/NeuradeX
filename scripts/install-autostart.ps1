@@ -17,9 +17,10 @@ $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
     -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$script`"" `
     -WorkingDirectory $repo
 
-# At logon, delay so Docker Desktop has time to fully initialize its engine.
+# At logon, delay so Docker Desktop + WSL2 have time to initialize.
+# Cold boots need more time than restarts — 120 s is the safe minimum.
 $trigger = New-ScheduledTaskTrigger -AtLogOn
-$trigger.Delay = 'PT60S'
+$trigger.Delay = 'PT120S'
 
 $settings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable `

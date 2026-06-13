@@ -13,6 +13,8 @@ from .consumer import run_consumer
 from .db import fetch_all_symbols
 from .trainers.xgboost_trainer import train_xgboost
 from .trainers.rl_trainer import train_rl
+from .trainers.meta_trainer import train_meta_model
+from .trainers.calibration_trainer import train_calibrator
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -46,8 +48,24 @@ async def _run_all_trainers(trigger: str = "scheduled", symbols: list[str] | Non
             timesteps=settings.RL_TIMESTEPS,
         )
 
+        meta_ok = await train_meta_model(
+            postgres_url=settings.POSTGRES_URL,
+            mlflow_uri=settings.MLFLOW_TRACKING_URI,
+        )
+
+        calib_ok = await train_calibrator(
+            postgres_url=settings.POSTGRES_URL,
+            mlflow_uri=settings.MLFLOW_TRACKING_URI,
+        )
+
         _last_train_time = datetime.utcnow()
-        result = {"xgboost_registered": xgb_ok, "rl_registered": rl_ok, "trigger": trigger}
+        result = {
+            "xgboost_registered": xgb_ok,
+            "rl_registered": rl_ok,
+            "meta_registered": meta_ok,
+            "calibrator_registered": calib_ok,
+            "trigger": trigger,
+        }
         logger.info("Training complete: %s", result)
         return result
 

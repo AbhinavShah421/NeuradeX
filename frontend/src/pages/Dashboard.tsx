@@ -497,6 +497,9 @@ const LearningCurveCard: React.FC = () => {
 // ── AI Watchlist tab (self-running scanner output + evidence) ──────────────────
 
 const ACTION_BG: Record<string, string> = { BUY: '#22c55e', SELL: '#ef4444', HOLD: '#f59e0b' };
+const GRADE_COLOR: Record<string, string> = { A: '#22c55e', B: '#3b82f6', C: '#f59e0b', D: '#94a3b8' };
+// Hold-cap presets (minutes) for inline auto-trading of a watchlist stock
+const HOLD_CAPS = [15, 30, 60, 0] as const;   // 0 = no cap
 
 const fmtDateTime = (s?: string): string => {
   if (!s) return '';
@@ -568,14 +571,29 @@ const SignalScorePanel: React.FC<{ ev: any }> = ({ ev }) => {
   );
 };
 
+// ── Grade badge (A/B/C/D win-probability quality) ─────────────────────────────
+const GradeBadge: React.FC<{ grade?: string; winProb?: number }> = ({ grade, winProb }) => {
+  if (!grade) return null;
+  const c = GRADE_COLOR[grade] ?? '#94a3b8';
+  return (
+    <span title={winProb != null ? `Win probability ${(winProb * 100).toFixed(0)}%` : 'Quality grade'}
+      style={{ fontSize: 10, fontWeight: 800, padding: '1px 6px', borderRadius: 4, background: `${c}1f`, color: c, border: `1px solid ${c}55`, letterSpacing: 0.3 }}>
+      {grade}{winProb != null ? ` · ${(winProb * 100).toFixed(0)}%` : ''}
+    </span>
+  );
+};
+
 // ── Shared stock row used across all watchlist tabs ───────────────────────────
-const WatchlistRow: React.FC<{ w: any; i: number; onClick: () => void; badge?: React.ReactNode }> = ({ w, i, onClick, badge }) => (
+const WatchlistRow: React.FC<{ w: any; i: number; onClick: () => void; badge?: React.ReactNode; onAutoTrade?: (sym: string) => void; tradingSym?: string | null }> = ({ w, i, onClick, badge, onAutoTrade, tradingSym }) => {
+  const started = tradingSym === w.symbol;
+  return (
   <div onClick={onClick}
     style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 4px', borderTop: i ? '1px solid var(--nd-border)' : 'none', cursor: 'pointer' }}>
     <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--nd-text-3)', width: 20 }}>#{i + 1}</span>
     <div style={{ flex: 1, minWidth: 0 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
         <span style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>{w.symbol}</span>
+        <GradeBadge grade={w.grade} winProb={w.winProbability} />
         {badge}
       </div>
       <div style={{ fontSize: 11, color: 'var(--nd-text-3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{w.name}</div>
@@ -590,12 +608,23 @@ const WatchlistRow: React.FC<{ w: any; i: number; onClick: () => void; badge?: R
     </div>
     <div style={{ textAlign: 'right', flexShrink: 0 }}>
       <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--nd-text-1)' }}>₹{w.price?.toLocaleString('en-IN')}</div>
-      <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>conf {(w.confidence * 100).toFixed(0)}%</div>
+      <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>
+        {w.winProbability != null ? `win ${(w.winProbability * 100).toFixed(0)}%` : `conf ${(w.confidence * 100).toFixed(0)}%`}
+      </div>
     </div>
     <span style={{ fontSize: 11, fontWeight: 700, padding: '3px 9px', borderRadius: 5, background: `${ACTION_BG[w.action]}1a`, color: ACTION_BG[w.action] }}>{w.action}</span>
+    {onAutoTrade && (
+      <button onClick={e => { e.stopPropagation(); onAutoTrade(w.symbol); }} disabled={started}
+        title="Auto paper-trade this stock with the selected hold cap"
+        style={{ display: 'flex', alignItems: 'center', gap: 3, padding: '4px 8px', borderRadius: 6, border: `1px solid ${started ? 'var(--nd-green)' : 'var(--nd-border)'}`, background: started ? 'var(--nd-green-50)' : 'var(--nd-surface)', color: started ? 'var(--nd-green)' : 'var(--nd-text-2)', cursor: started ? 'default' : 'pointer', fontSize: 11, fontWeight: 600, flexShrink: 0 }}>
+        <span className="material-icons" style={{ fontSize: 13 }}>{started ? 'check' : 'play_arrow'}</span>
+        {started ? 'Started' : 'Auto'}
+      </button>
+    )}
     <span className="material-icons" style={{ fontSize: 16, color: 'var(--nd-text-3)' }}>chevron_right</span>
   </div>
-);
+  );
+};
 
 const AiWatchlistTab: React.FC = () => {
   const [data, setData]         = useState<any>(null);
@@ -603,6 +632,22 @@ const AiWatchlistTab: React.FC = () => {
   const [sel, setSel]           = useState<any>(null);
   const [scanning, setScanning] = useState(false);
   const [tab, setTab]           = useState<'intraday' | 'delivery' | 'fno'>('intraday');
+  const [holdCap, setHoldCap]   = useState<number>(30);     // per-trade hold cap (min)
+  const [tradingSym, setTradingSym] = useState<string | null>(null);
+  const [autoMsg, setAutoMsg]   = useState<string | null>(null);
+
+  const startAuto = useCallback(async (sym: string) => {
+    setAutoMsg(null);
+    try {
+      await apiService.sessionStart({ mode: 'paper', symbol: sym, capital: 50000, max_hold_minutes: holdCap });
+      setTradingSym(sym);
+      setAutoMsg(`Auto paper-trading ${sym} — exits any position after ${holdCap ? `${holdCap}m` : 'EOD'}.`);
+      setTimeout(() => setAutoMsg(null), 6000);
+    } catch (e: any) {
+      setAutoMsg(`Could not start auto-trade for ${sym}: ${e?.response?.data?.detail || e?.message || 'error'}`);
+      setTimeout(() => setAutoMsg(null), 6000);
+    }
+  }, [holdCap]);
 
   const load = useCallback(async () => {
     try { const r = await apiService.aiWatchlist(); setData((r as any).data); } catch {}
@@ -670,9 +715,62 @@ const AiWatchlistTab: React.FC = () => {
       {/* Tab descriptions */}
       {tab === 'intraday' && (
         <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginBottom: 10, padding: '6px 10px', background: 'var(--nd-bg)', borderRadius: 6, borderLeft: '3px solid var(--nd-green)' }}>
-          High-momentum stocks with above-average volume — suitable for same-day trades. Click for full evidence.
+          High-momentum stocks with above-average volume — suitable for same-day trades. Grades A/B are the highest win-probability setups. Click for full evidence.
         </div>
       )}
+
+      {/* Top Conviction Picks + auto-trade controls (intraday only) */}
+      {tab === 'intraday' && intraday.length > 0 && (() => {
+        const top = intraday.filter((w: any) => w.grade === 'A' || w.grade === 'B').slice(0, 5);
+        return (
+          <div style={{ border: '1px solid var(--nd-border)', borderRadius: 12, padding: '12px 14px', marginBottom: 12, background: 'linear-gradient(135deg, rgba(34,197,94,0.06), rgba(59,130,246,0.05))' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: top.length ? 10 : 0 }}>
+              <span className="material-icons" style={{ fontSize: 18, color: 'var(--nd-green)' }}>workspace_premium</span>
+              <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--nd-text-1)' }}>Top Conviction Picks</span>
+              {data?.gradeCounts && (
+                <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>
+                  {data.gradeCounts.A ?? 0}×A · {data.gradeCounts.B ?? 0}×B · {data.gradeCounts.C ?? 0}×C
+                </span>
+              )}
+              <span style={{ flex: 1 }} />
+              {/* Hold-cap selector */}
+              <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>Hold cap</span>
+              <div style={{ display: 'flex', gap: 2, background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 8, padding: 2 }}>
+                {HOLD_CAPS.map(h => (
+                  <button key={h} onClick={() => setHoldCap(h)}
+                    style={{ padding: '3px 9px', borderRadius: 6, border: 'none', cursor: 'pointer', fontSize: 11, fontWeight: 600,
+                      background: holdCap === h ? 'var(--nd-green)' : 'transparent', color: holdCap === h ? '#fff' : 'var(--nd-text-2)' }}>
+                    {h === 0 ? 'EOD' : `${h}m`}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {top.length > 0 ? (
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {top.map((w: any) => (
+                  <div key={w.symbol} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 8 }}>
+                    <GradeBadge grade={w.grade} winProb={w.winProbability} />
+                    <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--nd-text-1)' }}>{w.symbol}</span>
+                    <span style={{ fontSize: 11, fontWeight: 700, color: ACTION_BG[w.action] }}>{w.action}</span>
+                    <button onClick={() => startAuto(w.symbol)} disabled={tradingSym === w.symbol}
+                      style={{ display: 'flex', alignItems: 'center', gap: 3, padding: '3px 8px', borderRadius: 6, border: `1px solid ${tradingSym === w.symbol ? 'var(--nd-green)' : 'var(--nd-border)'}`, background: tradingSym === w.symbol ? 'var(--nd-green-50)' : 'var(--nd-bg)', color: tradingSym === w.symbol ? 'var(--nd-green)' : 'var(--nd-text-2)', cursor: tradingSym === w.symbol ? 'default' : 'pointer', fontSize: 11, fontWeight: 600 }}>
+                      <span className="material-icons" style={{ fontSize: 13 }}>{tradingSym === w.symbol ? 'check' : 'play_arrow'}</span>
+                      {tradingSym === w.symbol ? 'Started' : 'Auto'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div style={{ fontSize: 11.5, color: 'var(--nd-text-3)' }}>No A/B-grade setups right now — only high win-probability names appear here.</div>
+            )}
+            {autoMsg && (
+              <div style={{ marginTop: 10, fontSize: 11.5, color: 'var(--nd-text-2)', background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 8, padding: '7px 10px' }}>
+                {autoMsg}
+              </div>
+            )}
+          </div>
+        );
+      })()}
       {tab === 'delivery' && (
         <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginBottom: 10, padding: '6px 10px', background: 'var(--nd-bg)', borderRadius: 6, borderLeft: '3px solid var(--nd-blue)' }}>
           Stocks in a confirmed uptrend with moderate volatility — suitable for multi-week holding. The <strong style={{ color: 'var(--nd-text-2)' }}>Safe ~X wks</strong> badge is the AI's estimated safe holding window.
@@ -709,7 +807,8 @@ const AiWatchlistTab: React.FC = () => {
 
             return (
               <div key={w.symbol}>
-                <WatchlistRow w={w} i={i} onClick={() => setSel(w)} badge={deliveryBadge ?? fnoBadge} />
+                <WatchlistRow w={w} i={i} onClick={() => setSel(w)} badge={deliveryBadge ?? fnoBadge}
+                  onAutoTrade={tab === 'intraday' ? startAuto : undefined} tradingSym={tradingSym} />
                 {/* FNO rationale row */}
                 {tab === 'fno' && rec && (
                   <div style={{ fontSize: 10.5, color: 'var(--nd-text-3)', padding: '0 4px 8px 52px', lineHeight: 1.5 }}>
@@ -747,6 +846,7 @@ const WatchlistEvidence: React.FC<{ stock: any; scannedAt?: string; onClose: () 
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span style={{ fontSize: 16, fontWeight: 700, color: 'var(--nd-text-1)' }}>{stock.symbol}</span>
           <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 9px', borderRadius: 5, background: `${ACTION_BG[stock.action]}1a`, color: ACTION_BG[stock.action] }}>{stock.action}</span>
+          <GradeBadge grade={stock.grade} winProb={stock.winProbability} />
         </div>
         <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer' }}><span className="material-icons" style={{ color: 'var(--nd-text-3)', fontSize: 20 }}>close</span></button>
       </div>
@@ -1107,6 +1207,128 @@ const SystemStartupModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   );
 };
 
+// ── Performance + market-regime hero strip ────────────────────────────────────
+
+const REGIME_STYLE: Record<string, { color: string; label: string; icon: string }> = {
+  bullish: { color: '#22c55e', label: 'Risk-On · Bullish',  icon: 'trending_up' },
+  bearish: { color: '#ef4444', label: 'Risk-Off · Bearish', icon: 'trending_down' },
+  neutral: { color: '#f59e0b', label: 'Neutral',            icon: 'trending_flat' },
+};
+
+const PerformanceRegimeStrip: React.FC = () => {
+  const [pm, setPm] = useState<any>(null);
+  const [regime, setRegime] = useState<string>('neutral');
+
+  useEffect(() => {
+    apiService.getPortfolioMetrics().then((r: any) => { if (r && !r.error) setPm(r); }).catch(() => {});
+    apiService.aiWatchlist().then((r: any) => { const d = r?.data; if (d?.marketRegime) setRegime(d.marketRegime); }).catch(() => {});
+  }, []);
+
+  const rg = REGIME_STYLE[regime] ?? REGIME_STYLE.neutral;
+  const tiles = pm && pm.totalTrades > 0 ? [
+    { label: 'Win Rate',     value: `${(pm.winRate * 100).toFixed(0)}%`,            good: pm.winRate >= 0.5 },
+    { label: 'Sharpe',       value: pm.sharpeRatio?.toFixed(2),                      good: pm.sharpeRatio >= 1 },
+    { label: 'Max DD',       value: `${pm.maxDrawdownPct?.toFixed(1)}%`,             good: pm.maxDrawdownPct < 15 },
+    { label: 'Total Return', value: `${pm.totalReturnPct >= 0 ? '+' : ''}${pm.totalReturnPct?.toFixed(1)}%`, good: pm.totalReturnPct >= 0 },
+  ] : [];
+
+  return (
+    <div className="nd-card" style={{ padding: '12px 16px', marginBottom: 20, display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+      {/* Market regime chip */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, paddingRight: 16, borderRight: tiles.length ? '1px solid var(--nd-border)' : 'none' }}>
+        <span className="material-icons" style={{ fontSize: 20, color: rg.color }}>{rg.icon}</span>
+        <div>
+          <div style={{ fontSize: 10, color: 'var(--nd-text-3)', textTransform: 'uppercase', letterSpacing: 0.6 }}>Market Regime</div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: rg.color }}>{rg.label}</div>
+        </div>
+      </div>
+      {tiles.length > 0 ? tiles.map(t => (
+        <div key={t.label}>
+          <div style={{ fontSize: 10, color: 'var(--nd-text-3)', textTransform: 'uppercase', letterSpacing: 0.6 }}>{t.label}</div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: t.good ? 'var(--nd-green)' : 'var(--nd-red)' }}>{t.value}</div>
+        </div>
+      )) : (
+        <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>Live performance appears here once trades are recorded.</div>
+      )}
+      {pm && pm.totalTrades > 0 && (
+        <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--nd-text-3)' }}>{pm.totalTrades} closed trades</span>
+      )}
+    </div>
+  );
+};
+
+// ── Live auto-trading sessions (open positions + intraday P&L) ─────────────────
+
+const LiveSessionsPanel: React.FC = () => {
+  const [sessions, setSessions] = useState<any[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const r = await apiService.sessionList();
+      const all: any[] = (r as any).data ?? [];
+      setSessions(all.filter(s => s.status === 'running'));
+    } catch { /* keep last */ }
+  }, []);
+  useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [load]);
+
+  const stop = async (id: string) => {
+    setBusy(id);
+    try { await apiService.sessionStop(id); await load(); } catch { /* ignore */ } finally { setBusy(null); }
+  };
+
+  if (!sessions.length) return null;
+  const totalPnl = sessions.reduce((s, x) => s + (x.pnl ?? 0), 0);
+
+  return (
+    <div className="nd-card" style={{ padding: '14px 18px', marginBottom: 20 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10, flexWrap: 'wrap' }}>
+        <span className="material-icons" style={{ fontSize: 18, color: 'var(--nd-green)' }}>monitoring</span>
+        <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>Live Auto-Trading</div>
+        <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>{sessions.length} running</span>
+        <span style={{ marginLeft: 'auto', fontSize: 13, fontWeight: 700, color: totalPnl >= 0 ? 'var(--nd-green)' : 'var(--nd-red)' }}>
+          {totalPnl >= 0 ? '+' : ''}{inr(totalPnl)}
+        </span>
+      </div>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', minWidth: 540, borderCollapse: 'collapse', fontSize: 12 }}>
+          <thead>
+            <tr style={{ color: 'var(--nd-text-3)', textAlign: 'left' }}>
+              {['Symbol', 'Mode', 'Position', 'Hold cap', 'P&L', 'Trades', ''].map(h => (
+                <th key={h} style={{ padding: '6px 10px', fontWeight: 500 }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {sessions.map(s => (
+              <tr key={s.id} style={{ borderTop: '1px solid var(--nd-border)' }}>
+                <td style={{ padding: '7px 10px', fontWeight: 700, color: 'var(--nd-text-1)' }}>{s.symbol}</td>
+                <td style={{ padding: '7px 10px' }}>
+                  <span style={{ fontSize: 10, fontWeight: 600, padding: '2px 6px', borderRadius: 4, background: s.mode === 'paper' ? 'rgba(245,158,11,0.15)' : 'rgba(59,130,246,0.15)', color: s.mode === 'paper' ? '#f59e0b' : '#3b82f6' }}>{(s.mode || '').toUpperCase()}</span>
+                </td>
+                <td style={{ padding: '7px 10px' }}>
+                  <span style={{ fontWeight: 600, color: s.position === 'LONG' ? 'var(--nd-green)' : 'var(--nd-text-3)' }}>{s.position ?? 'NONE'}</span>
+                </td>
+                <td style={{ padding: '7px 10px', color: 'var(--nd-text-2)' }}>{s.maxHoldMinutes ? `${s.maxHoldMinutes}m` : '—'}</td>
+                <td style={{ padding: '7px 10px', fontWeight: 600, color: (s.pnl ?? 0) >= 0 ? 'var(--nd-green)' : 'var(--nd-red)' }}>
+                  {(s.pnl ?? 0) >= 0 ? '+' : ''}{inr(s.pnl ?? 0)} <span style={{ color: 'var(--nd-text-3)', fontWeight: 400 }}>({(s.pnlPct ?? 0).toFixed(2)}%)</span>
+                </td>
+                <td style={{ padding: '7px 10px', color: 'var(--nd-text-3)' }}>{s.trades ?? 0}</td>
+                <td style={{ padding: '7px 10px', textAlign: 'right' }}>
+                  <button onClick={() => stop(s.id)} disabled={busy === s.id}
+                    style={{ padding: '3px 10px', borderRadius: 6, border: '1px solid var(--nd-border)', background: 'var(--nd-surface)', color: 'var(--nd-red)', cursor: 'pointer', fontSize: 11, fontWeight: 600 }}>
+                    {busy === s.id ? '…' : 'Stop'}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
 // ── Dashboard Page ────────────────────────────────────────────────────────────
 
 const Dashboard: React.FC = () => {
@@ -1153,6 +1375,12 @@ const Dashboard: React.FC = () => {
         <h1 className="nd-page-title">Market Overview</h1>
         <p className="nd-page-sub">Real-time NSE · BSE stock data with AI-generated predictions</p>
       </div>
+
+      {/* Live performance + current market regime */}
+      <PerformanceRegimeStrip />
+
+      {/* Currently-running auto-trading sessions with open positions + P&L */}
+      <LiveSessionsPanel />
 
       {/* Accuracy stat cards — click any to see the evidence */}
       {STAT_CARDS.length > 0 && (

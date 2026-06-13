@@ -118,6 +118,9 @@ class StartSessionRequest(BaseModel):
     capital:    float = Field(default=50_000.0, ge=5_000, le=10_000_000)
     speed:      int   = 1
     model:      Optional[str] = None
+    # Per-trade hold cap (minutes): force-exit any single position held longer
+    # than this. 0 = disabled. Used by auto-traded watchlist stocks.
+    max_hold_minutes: int = Field(default=0, ge=0, le=375)
 
 
 class SpeedRequest(BaseModel):
@@ -154,6 +157,7 @@ def _summary(s: dict) -> dict:
         "trades":         len(s.get("trades", [])),
         "position":       pos.get("status", "NONE"),
         "speed":          s.get("speed", 1),
+        "max_hold_minutes": s.get("max_hold_minutes", 0),
         "data_source":    s.get("data_source"),
         "agent_action":   s.get("agent_decision", {}).get("action"),
         "agent_confidence": s.get("agent_decision", {}).get("confidence"),
@@ -277,6 +281,18 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         action = "SELL" if (tsig == -1 or ens_action == "SELL") else "HOLD"
         if action == "SELL":
             reason = f"Exit: intraday signal/ensemble {ens_action}. {reason}".strip()
+
+    # ── Per-trade hold cap: force-exit any position held longer than the span ──
+    # Applies to auto-traded watchlist stocks so no single trade overstays; the
+    # stock keeps being traded for the rest of the session.
+    max_hold = s.get("max_hold_minutes") or 0
+    if not force_close and pos_status == "LONG" and max_hold > 0 and action != "SELL":
+        entry_m  = _time_to_minutes(pos.get("entry_time", candle.get("time", "09:15")))
+        candle_m = _time_to_minutes(candle.get("time", "09:15"))
+        held = candle_m - entry_m
+        if held >= max_hold:
+            action = "SELL"
+            reason = f"Hold cap: position held {held}m ≥ {max_hold}m — force exit."
 
     # ── Paper-trading specific rules (configurable times + profit/drop logic) ──
     if not force_close and s.get("mode") == "paper":
@@ -588,6 +604,7 @@ async def start_session(req: StartSessionRequest):
         "capital": req.capital, "cash": req.capital, "status": "running",
         "position": {"status": "NONE", "entry_price": 0.0, "quantity": 0, "entry_time": None, "current_pnl": 0.0},
         "trades": [], "agents": [], "agent_decision": {},
+        "max_hold_minutes": req.max_hold_minutes,
         "metrics": _compute_metrics(req.capital, req.capital, []),
         "created_at": now.isoformat(), "updated_at": now.isoformat(),
     }

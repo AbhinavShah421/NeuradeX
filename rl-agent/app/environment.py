@@ -16,6 +16,11 @@ class TradingEnv(gym.Env):
 
     metadata = {"render_modes": []}
 
+    # Sharpe reward blending: 0.6 Sharpe component + 0.4 raw PnL
+    SHARPE_WEIGHT = 0.6
+    SHARPE_WINDOW = 20    # rolling window for return stats
+    TRANSACTION_COST = 0.001
+
     def __init__(self, candles: list[dict], initial_capital: float = 100_000.0):
         super().__init__()
         self.candles = candles
@@ -36,6 +41,21 @@ class TradingEnv(gym.Env):
         self.entry_price = 0.0
         self.peak_capital = self.initial_capital
         self.max_drawdown = 0.0
+        self._trade_returns: list[float] = []   # rolling PnL history for Sharpe
+
+    def _sharpe_component(self, pnl_pct: float) -> float:
+        """Compute Sharpe-normalised component from rolling trade returns."""
+        self._trade_returns.append(pnl_pct)
+        if len(self._trade_returns) > self.SHARPE_WINDOW:
+            self._trade_returns.pop(0)
+        if len(self._trade_returns) < 2:
+            return pnl_pct
+        arr = np.array(self._trade_returns)
+        std = arr.std()
+        if std < 1e-9:
+            return 0.0
+        # Normalise by sqrt(window) to keep scale similar to raw PnL
+        return float(arr.mean() / std) / np.sqrt(self.SHARPE_WINDOW)
 
     def _get_obs(self) -> np.ndarray:
         if self.current_step >= len(self.candles):
@@ -99,23 +119,34 @@ class TradingEnv(gym.Env):
             return self._get_obs(), 0.0, True, False, {}
 
         price = float(self.candles[self.current_step].get("close", 0))
-        reward = -0.001   # small time penalty
+        reward = -self.TRANSACTION_COST   # time penalty
 
         if action == 1 and self.position == 0:  # BUY
             self.position = 1
             self.entry_price = price
+
         elif action == 2 and self.position == 1:  # SELL
             pnl_pct = (price - self.entry_price) / (self.entry_price + 1e-9)
-            reward = pnl_pct - 0.001   # pnl minus transaction cost
             self.capital *= (1 + pnl_pct)
             self.position = 0
             self.entry_price = 0.0
 
+            # Sharpe-blended reward: reduces incentive for high-variance large bets
+            sharpe_r = self._sharpe_component(pnl_pct)
+            reward = (
+                self.SHARPE_WEIGHT * sharpe_r
+                + (1.0 - self.SHARPE_WEIGHT) * pnl_pct
+                - self.TRANSACTION_COST
+            )
+
+        # Max-drawdown penalty applied only when holding (not every step)
         if self.capital > self.peak_capital:
             self.peak_capital = self.capital
         drawdown = (self.peak_capital - self.capital) / (self.peak_capital + 1e-9)
         self.max_drawdown = max(self.max_drawdown, drawdown)
-        reward -= 0.5 * drawdown
+        if self.position == 1:
+            # Penalise open drawdown while holding
+            reward -= 0.3 * drawdown
 
         self.current_step += 1
         done = self.current_step >= len(self.candles) - 1

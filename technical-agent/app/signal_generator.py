@@ -132,3 +132,74 @@ def generate_signal(candles: list[dict], symbol: str) -> dict:
         "indicators": indicators,
         "model_votes": model_votes,
     }
+
+
+# Timeframe weights: daily anchors trend, hourly momentum, 15m entry timing
+_TF_WEIGHTS = {"1d": 0.50, "1h": 0.30, "15m": 0.20}
+
+
+def fuse_timeframe_signals(tf_results: dict[str, dict]) -> dict:
+    """
+    tf_results: { "1d": generate_signal(...), "1h": ..., "15m": ... }
+    Fuses signals across timeframes using weighted scoring.
+    Agreement across higher timeframes dramatically lifts confidence.
+    """
+    if not tf_results:
+        return {"signal": "HOLD", "confidence": 0.50, "reasoning": "no timeframe data", "timeframes": {}}
+
+    buy_score = sell_score = hold_score = total_w = 0.0
+    tf_summary: dict[str, dict] = {}
+
+    for tf, result in tf_results.items():
+        w = _TF_WEIGHTS.get(tf, 0.20)
+        sig = result.get("signal", "HOLD")
+        conf = float(result.get("confidence", 0.50))
+        tf_summary[tf] = {"signal": sig, "confidence": round(conf, 3)}
+        weighted = w * conf
+        if sig == "BUY":
+            buy_score += weighted
+        elif sig == "SELL":
+            sell_score += weighted
+        else:
+            hold_score += weighted
+        total_w += w
+
+    if total_w == 0:
+        return {"signal": "HOLD", "confidence": 0.50, "reasoning": "zero weight", "timeframes": tf_summary}
+
+    buy_score /= total_w
+    sell_score /= total_w
+    hold_score /= total_w
+
+    max_score = max(buy_score, sell_score, hold_score)
+    if buy_score == max_score:
+        fused_signal, fused_conf = "BUY", buy_score
+    elif sell_score == max_score:
+        fused_signal, fused_conf = "SELL", sell_score
+    else:
+        fused_signal, fused_conf = "HOLD", hold_score
+
+    # Agreement bonus
+    agreeing_tfs = [tf for tf, r in tf_summary.items() if r["signal"] == fused_signal]
+    n_agree = len(agreeing_tfs)
+    total_tfs = len(tf_summary)
+
+    if n_agree == total_tfs and total_tfs >= 2:
+        fused_conf = min(fused_conf * 1.35, 0.92)  # all agree
+        agreement_note = f"all {total_tfs} timeframes agree"
+    elif n_agree >= 2:
+        fused_conf = min(fused_conf * 1.20, 0.88)  # majority agree
+        agreement_note = f"{n_agree}/{total_tfs} timeframes agree"
+    else:
+        agreement_note = "timeframes conflict — confidence penalised"
+        fused_conf *= 0.80
+
+    tf_desc = ", ".join(f"{tf}:{r['signal']}" for tf, r in tf_summary.items())
+    reasoning = f"Multi-TF fusion [{tf_desc}]: {agreement_note}"
+
+    return {
+        "signal": fused_signal,
+        "confidence": round(fused_conf, 3),
+        "reasoning": reasoning,
+        "timeframes": tf_summary,
+    }

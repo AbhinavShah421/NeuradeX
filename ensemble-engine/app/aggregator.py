@@ -15,6 +15,44 @@ DEFAULT_WEIGHTS = {
     "macro":     0.15,
 }
 
+# Per-regime weight multipliers (applied before normalisation).
+# Values > 1.0 boost an agent; < 1.0 dampen it.
+# Rationale:
+#   RISK_ON   — trending market; momentum / technicals are reliable
+#   RISK_OFF  — macro stress dominates; sentiment captures fear
+#   HIGH_VOL  — macro + sentiment most differentiated; patterns and RL unreliable
+#   NEUTRAL   — no override; use learned DB weights as-is
+_REGIME_MULTIPLIERS: dict[str, dict[str, float]] = {
+    "RISK_ON": {
+        "technical": 1.30,
+        "pattern":   1.15,
+        "sentiment": 0.90,
+        "rl":        1.10,
+        "macro":     0.80,
+    },
+    "RISK_OFF": {
+        "technical": 0.75,
+        "pattern":   0.85,
+        "sentiment": 1.30,
+        "rl":        0.80,
+        "macro":     1.50,
+    },
+    "HIGH_VOLATILITY": {
+        "technical": 0.70,
+        "pattern":   0.65,
+        "sentiment": 1.40,
+        "rl":        0.60,
+        "macro":     1.60,
+    },
+    "NEUTRAL": {
+        "technical": 1.0,
+        "pattern":   1.0,
+        "sentiment": 1.0,
+        "rl":        1.0,
+        "macro":     1.0,
+    },
+}
+
 
 def _normalize_weights(weights: dict[str, float]) -> dict[str, float]:
     total = sum(weights.values())
@@ -23,16 +61,30 @@ def _normalize_weights(weights: dict[str, float]) -> dict[str, float]:
     return {k: v / total for k, v in weights.items()}
 
 
+def _apply_regime_weights(
+    weights: dict[str, float],
+    regime: str,
+) -> dict[str, float]:
+    """Scale base weights by regime multipliers, then re-normalise."""
+    multipliers = _REGIME_MULTIPLIERS.get(regime, _REGIME_MULTIPLIERS["NEUTRAL"])
+    scaled = {k: v * multipliers.get(k, 1.0) for k, v in weights.items()}
+    return _normalize_weights(scaled)
+
+
 def aggregate_signals(
     agent_signals: dict[str, dict],
     weights: dict[str, float] | None = None,
+    regime: str = "NEUTRAL",
 ) -> dict:
     """
     agent_signals: { agent_name: { signal, confidence, reasoning, indicators } }
     weights: optional override (will be normalized)
+    regime: current macro regime — used to scale weights before voting
     Returns: full ensemble decision dict per REQUIREMENTS.md Section 5.
     """
-    w = _normalize_weights(weights or DEFAULT_WEIGHTS)
+    base_weights = _normalize_weights(weights or DEFAULT_WEIGHTS)
+    w = _apply_regime_weights(base_weights, regime)
+    logger.info("Regime=%s → effective weights: %s", regime, {k: round(v, 3) for k, v in w.items()})
 
     buy_score = 0.0
     sell_score = 0.0
@@ -105,6 +157,7 @@ def aggregate_signals(
         "agent_votes": agent_votes,
         "agreement_score": round(agreement_score, 3),
         "uncertainty": uncertainty,
+        "regime": regime,
         "scores": {
             "buy": round(buy_score, 3),
             "sell": round(sell_score, 3),

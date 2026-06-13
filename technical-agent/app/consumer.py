@@ -10,7 +10,7 @@ import aio_pika
 import asyncpg
 
 from app.config import settings
-from app.signal_generator import generate_signal
+from app.signal_generator import generate_signal, fuse_timeframe_signals
 
 logger = logging.getLogger(__name__)
 
@@ -33,11 +33,38 @@ async def _fetch_candles(pool: asyncpg.Pool, symbol: str, interval: str = "1d") 
 
 
 async def _build_signal_message(symbol: str, pool: asyncpg.Pool) -> dict:
-    candles = await _fetch_candles(pool, symbol, interval="1d")
-    if len(candles) < 5:
-        candles = await _fetch_candles(pool, symbol, interval="1m")
+    # Fetch all three timeframes in parallel for multi-timeframe fusion
+    candles_1d, candles_1h, candles_15m = await asyncio.gather(
+        _fetch_candles(pool, symbol, interval="1d"),
+        _fetch_candles(pool, symbol, interval="1h"),
+        _fetch_candles(pool, symbol, interval="15m"),
+    )
 
-    result = generate_signal(candles, symbol)
+    # Fall back to 1m if higher timeframes are empty (fresh setup)
+    if len(candles_1d) < 5 and len(candles_1h) < 5:
+        candles_1d = await _fetch_candles(pool, symbol, interval="1m")
+
+    tf_results: dict[str, dict] = {}
+    if len(candles_1d) >= 5:
+        tf_results["1d"] = generate_signal(candles_1d, symbol)
+    if len(candles_1h) >= 5:
+        tf_results["1h"] = generate_signal(candles_1h, symbol)
+    if len(candles_15m) >= 5:
+        tf_results["15m"] = generate_signal(candles_15m, symbol)
+
+    if len(tf_results) > 1:
+        fused = fuse_timeframe_signals(tf_results)
+        # Use daily indicators for risk-engine (ATR, close price)
+        base_indicators = tf_results.get("1d", next(iter(tf_results.values()))).get("indicators", {})
+        signal, confidence, reasoning = fused["signal"], fused["confidence"], fused["reasoning"]
+        model_votes = {tf: {"signal": r["signal"], "confidence": r["confidence"]} for tf, r in tf_results.items()}
+        model_votes["fused"] = {"signal": signal, "confidence": confidence}
+    else:
+        single = next(iter(tf_results.values())) if tf_results else generate_signal([], symbol)
+        signal, confidence, reasoning = single["signal"], single["confidence"], single["reasoning"]
+        base_indicators = single.get("indicators", {})
+        model_votes = single.get("model_votes", {})
+
     return {
         "event_id": str(uuid.uuid4()),
         "timestamp": datetime.now(tz=timezone.utc).isoformat(),
@@ -47,11 +74,11 @@ async def _build_signal_message(symbol: str, pool: asyncpg.Pool) -> dict:
             "symbol": symbol,
             "exchange": "NSE",
             "agent": settings.AGENT_NAME,
-            "signal": result["signal"],
-            "confidence": result["confidence"],
-            "reasoning": result["reasoning"],
-            "indicators": result["indicators"],
-            "model_votes": result["model_votes"],
+            "signal": signal,
+            "confidence": confidence,
+            "reasoning": reasoning,
+            "indicators": base_indicators,
+            "model_votes": model_votes,
         },
     }
 

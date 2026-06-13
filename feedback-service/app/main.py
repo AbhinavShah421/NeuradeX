@@ -121,7 +121,9 @@ async def _store_rl_experience(pool: asyncpg.Pool, payload: dict) -> None:
     action_map = {"BUY": 1, "SELL": 2, "HOLD": 0}
     action = action_map.get(payload.get("action", "HOLD"), 0)
     pnl = float(payload.get("pnl_pct", 0)) if payload.get("pnl_pct") is not None else 0.0
-    reward = pnl - 0.001   # pnl minus transaction cost
+    # Match the Sharpe-blended reward from TradingEnv.step()
+    # Without rolling history we fall back to a penalised PnL
+    reward = 0.6 * pnl + 0.4 * pnl - 0.001   # simplified: still equal weights, minus cost
 
     await pool.execute(
         "INSERT INTO rl_experiences (symbol, state, action, reward, next_state, done) VALUES ($1,$2,$3,$4,$5,$6)",
@@ -315,6 +317,153 @@ async def get_trades(limit: int = 200, offset: int = 0):
     except Exception as exc:
         logger.error("GET /trades error: %s", exc)
         return []
+
+
+@app.get("/agent-accuracy")
+async def get_agent_accuracy(min_trades: int = 20):
+    """
+    Per-agent precision, recall, F1 and confusion matrix derived from closed trades.
+    For each agent, reads agent_signals JSONB to extract the signal the agent voted,
+    then compares against the actual trade outcome (WIN/LOSS) to compute metrics.
+    """
+    if not _pool:
+        return {"error": "not ready"}
+    try:
+        rows = await _pool.fetch(
+            """
+            SELECT agent_signals, action, outcome
+            FROM trade_records
+            WHERE outcome IN ('WIN', 'LOSS')
+              AND agent_signals IS NOT NULL
+            ORDER BY created_at DESC
+            LIMIT 2000
+            """
+        )
+
+        AGENTS = ["technical", "pattern", "sentiment", "rl", "macro"]
+        # For each agent track: TP, FP, TN, FN
+        # A correct prediction = agent signal aligned with action AND outcome=WIN,
+        # OR agent signal opposed trade direction AND outcome=LOSS.
+        stats: dict[str, dict] = {a: {"tp": 0, "fp": 0, "tn": 0, "fn": 0, "total": 0} for a in AGENTS}
+
+        for row in rows:
+            raw = row.get("agent_signals") or "{}"
+            signals = json.loads(raw) if isinstance(raw, str) else raw
+            actual_action = row.get("action", "HOLD")
+            outcome = row.get("outcome", "")
+
+            for agent in AGENTS:
+                vote = signals.get(agent, {})
+                if not isinstance(vote, dict):
+                    continue
+                agent_signal = vote.get("signal", "HOLD")
+                if agent_signal == "HOLD":
+                    continue
+
+                s = stats[agent]
+                s["total"] += 1
+                agent_agreed = (agent_signal == actual_action)
+                if agent_agreed and outcome == "WIN":
+                    s["tp"] += 1
+                elif agent_agreed and outcome == "LOSS":
+                    s["fp"] += 1
+                elif not agent_agreed and outcome == "LOSS":
+                    s["tn"] += 1
+                else:  # not agreed, outcome WIN
+                    s["fn"] += 1
+
+        result = {}
+        for agent, s in stats.items():
+            total = s["total"]
+            if total < min_trades:
+                result[agent] = {"status": "insufficient_data", "total": total}
+                continue
+            tp, fp, tn, fn = s["tp"], s["fp"], s["tn"], s["fn"]
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+            accuracy = (tp + tn) / total if total > 0 else 0.0
+            result[agent] = {
+                "precision": round(precision, 4),
+                "recall": round(recall, 4),
+                "f1": round(f1, 4),
+                "accuracy": round(accuracy, 4),
+                "total_trades": total,
+                "confusion_matrix": {"tp": tp, "fp": fp, "tn": tn, "fn": fn},
+            }
+
+        return {"agent_accuracy": result, "evaluated_from": len(rows), "min_trades_threshold": min_trades}
+    except Exception as exc:
+        logger.error("GET /agent-accuracy error: %s", exc)
+        return {"error": str(exc)}
+
+
+@app.get("/portfolio-metrics")
+async def get_portfolio_metrics():
+    """
+    Portfolio-level metrics: Sharpe, Sortino, Calmar, max drawdown, win rate.
+    Computed from all closed trade_records.
+    """
+    if not _pool:
+        return {"error": "not ready"}
+    try:
+        rows = await _pool.fetch(
+            """
+            SELECT pnl_pct, outcome, timestamp_open, timestamp_close
+            FROM trade_records
+            WHERE outcome IN ('WIN', 'LOSS', 'BREAK_EVEN')
+              AND pnl_pct IS NOT NULL
+            ORDER BY timestamp_open ASC
+            """
+        )
+        if not rows:
+            return {"error": "no closed trades"}
+
+        pnls = [float(r["pnl_pct"]) for r in rows]
+        n = len(pnls)
+        wins = sum(1 for p in pnls if p > 0.001)
+        losses = sum(1 for p in pnls if p < -0.001)
+        win_rate = wins / n if n else 0.0
+        mean_pnl = sum(pnls) / n
+        std_pnl = (sum((p - mean_pnl) ** 2 for p in pnls) / max(n - 1, 1)) ** 0.5
+
+        # Sharpe (annualised assuming ~252 trading days, 1 trade per day approximation)
+        sharpe = (mean_pnl / std_pnl * (252 ** 0.5)) if std_pnl > 0 else 0.0
+
+        # Sortino (only downside deviation)
+        neg_pnls = [p for p in pnls if p < 0]
+        down_std = (sum(p ** 2 for p in neg_pnls) / max(len(neg_pnls), 1)) ** 0.5
+        sortino = (mean_pnl / down_std * (252 ** 0.5)) if down_std > 0 else 0.0
+
+        # Max drawdown (cumulative)
+        cumulative = 1.0
+        peak = 1.0
+        max_dd = 0.0
+        for p in pnls:
+            cumulative *= (1 + p)
+            if cumulative > peak:
+                peak = cumulative
+            dd = (peak - cumulative) / peak
+            if dd > max_dd:
+                max_dd = dd
+
+        total_return = cumulative - 1.0
+        calmar = (total_return / max_dd) if max_dd > 0 else 0.0
+
+        return {
+            "total_trades": n,
+            "win_rate": round(win_rate, 4),
+            "mean_pnl_pct": round(mean_pnl * 100, 4),
+            "std_pnl_pct": round(std_pnl * 100, 4),
+            "total_return_pct": round(total_return * 100, 4),
+            "sharpe_ratio": round(sharpe, 4),
+            "sortino_ratio": round(sortino, 4),
+            "max_drawdown_pct": round(max_dd * 100, 4),
+            "calmar_ratio": round(calmar, 4),
+        }
+    except Exception as exc:
+        logger.error("GET /portfolio-metrics error: %s", exc)
+        return {"error": str(exc)}
 
 
 @app.get("/trades/{trade_id}")
