@@ -19,17 +19,31 @@ if ($env:PATH -notlike "*$dockerBin*") {
 Write-Host ""
 Write-Host "Starting NeuradeX..." -ForegroundColor Cyan
 
-# Wait for the Docker engine - at boot, Docker Desktop may still be starting.
-$dockerReady = $false
-for ($i = 0; $i -lt 60; $i++) {
+# Wait for the Docker engine - at cold boot, Docker Desktop + WSL2 can take
+# several minutes. We also proactively launch Docker Desktop after 30 s in case
+# Fast Startup (hybrid shutdown) left it un-started.
+$dockerReady          = $false
+$dockerDesktopLaunched = $false
+for ($i = 0; $i -lt 120; $i++) {        # up to 10 minutes
     docker info *> $null
     if ($LASTEXITCODE -eq 0) { $dockerReady = $true; break }
     if ($i -eq 0) { Write-Host "Waiting for Docker engine..." -ForegroundColor Yellow }
+
+    # After 30 s with no response, explicitly launch Docker Desktop.
+    # Handles cold-boot / Fast Startup where the autostart may be delayed.
+    if ($i -eq 6 -and -not $dockerDesktopLaunched) {
+        $ddExe = "${env:ProgramFiles}\Docker\Docker\Docker Desktop.exe"
+        if (Test-Path $ddExe) {
+            Write-Host "  Launching Docker Desktop explicitly..." -ForegroundColor Yellow
+            Start-Process $ddExe
+            $dockerDesktopLaunched = $true
+        }
+    }
     Start-Sleep -Seconds 5
 }
 if (-not $dockerReady) {
-    Write-Host "Docker engine not ready. Enable 'Start Docker Desktop when you log in'." -ForegroundColor Red
-    exit 1
+    Write-Host "Docker engine not ready after 10 min - continuing anyway so VS Code still opens." -ForegroundColor Yellow
+    # Do NOT exit: VS Code + Claude Code should still launch so the user can see status.
 }
 
 # --- Start Ollama if not already running ---
@@ -324,20 +338,27 @@ public class NxFocus {
     Start-Sleep -Milliseconds 1500
 
     # Open command palette (Ctrl+Shift+P) and run the Claude Code focus command.
-    # "Focus on Claude Code View" is the display name of claude-vscode.focus.
+    # Use clipboard paste instead of SendKeys character-by-character: SendKeys drops
+    # or reorders characters when the system is under load (Docker/VS Code just started).
+    Set-Clipboard "Claude Code: Focus on Claude Code View"
     [System.Windows.Forms.SendKeys]::SendWait("^+p")
+    Start-Sleep -Milliseconds 1000
+    [System.Windows.Forms.SendKeys]::SendWait("^v")   # paste — atomic, order guaranteed
     Start-Sleep -Milliseconds 800
-    [System.Windows.Forms.SendKeys]::SendWait("Focus on Claude Code View")
-    Start-Sleep -Milliseconds 600
     [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
-    Start-Sleep -Milliseconds 2500
+    Start-Sleep -Milliseconds 3000
 
     # Re-focus the VS Code window after the command palette closes
     try { [NxFocus]::ForceForeground($hwnd) } catch {}
     Start-Sleep -Milliseconds 800
 
-    # Type and submit /remote-control
-    [System.Windows.Forms.SendKeys]::SendWait("/remote-control")
+    # Close any remaining command palette UI so the chat input is active
+    [System.Windows.Forms.SendKeys]::SendWait("{ESC}")
+    Start-Sleep -Milliseconds 300
+
+    # Paste and submit /remote-control
+    Set-Clipboard "/remote-control"
+    [System.Windows.Forms.SendKeys]::SendWait("^v")
     Start-Sleep -Milliseconds 300
     [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
 
