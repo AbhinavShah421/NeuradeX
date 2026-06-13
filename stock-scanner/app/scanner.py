@@ -116,6 +116,23 @@ def _sma(values: list[float], period: int) -> float:
     return sum(values[-period:]) / period
 
 
+def _grade_from_winprob(win_probability: float, action: str, fit: bool) -> str:
+    """Map a win-probability into an A/B/C/D quality grade.
+
+    Only directional (BUY/SELL) calls that clear the intraday bar can earn the
+    top grades — that's what 'win max' filtering means: we only promote setups
+    where many independent factors line up. HOLD is never tradable-grade."""
+    if action == "HOLD":
+        return "D"
+    if fit and win_probability >= 0.70:
+        return "A"
+    if fit and win_probability >= 0.58:
+        return "B"
+    if win_probability >= 0.48:
+        return "C"
+    return "D"
+
+
 def _analyze(candles: list[dict], regime: int = 0, calib: dict | None = None) -> dict | None:
     if len(candles) < 35:
         return None
@@ -189,6 +206,47 @@ def _analyze(candles: list[dict], regime: int = 0, calib: dict | None = None) ->
     confidence = round(min(0.98, max(0.30, (0.40 + 0.50 * conviction) * mult)), 3)
     signal_score = round(min(100.0, (0.5 * tradability + 0.5 * conviction) * 100 * mult), 1)
 
+    # ── Win-probability: a weighted vote across INDEPENDENT confirmations ──────
+    # Each factor that agrees with the call lifts the win probability. The more
+    # independent factors line up, the more likely the trade works — so the
+    # watchlist can be filtered to only high-probability setups.
+    if action == "BUY":
+        trend_aligned = (price > sma20) and (sma20 >= sma50)
+        mom_aligned   = mom > 0.5
+        macd_aligned  = macd_hist > 0
+        vol_confirm   = rel_vol >= 1.3 and mom > 0
+        rsi_ok        = rsi < 70           # not already overbought
+        regime_aligned = regime >= 0
+    elif action == "SELL":
+        trend_aligned = (price < sma20) and (sma20 <= sma50)
+        mom_aligned   = mom < -0.5
+        macd_aligned  = macd_hist < 0
+        vol_confirm   = rel_vol >= 1.3 and mom < 0
+        rsi_ok        = rsi > 30           # not already oversold
+        regime_aligned = regime <= 0
+    else:  # HOLD — no directional confirmation
+        trend_aligned = mom_aligned = macd_aligned = vol_confirm = False
+        rsi_ok = True
+        regime_aligned = regime == 0
+
+    confirmations = {
+        "conviction":  round(conviction, 3),
+        "trend":       1.0 if trend_aligned else 0.0,
+        "momentum":    1.0 if mom_aligned else 0.0,
+        "macd":        1.0 if macd_aligned else 0.0,
+        "volume":      1.0 if vol_confirm else round(min(1.0, rel_vol / 1.5) * 0.5, 3),
+        "regime":      1.0 if regime_aligned else 0.0,
+        "rsi":         1.0 if rsi_ok else 0.0,
+        "tradability": round(tradability, 3),
+    }
+    _WEIGHTS = {"conviction": 0.20, "trend": 0.18, "momentum": 0.12, "macd": 0.12,
+                "volume": 0.12, "regime": 0.10, "rsi": 0.06, "tradability": 0.10}
+    align = sum(confirmations[k] * w for k, w in _WEIGHTS.items())   # 0..1
+    win_probability = round(min(0.95, max(0.05, align * mult)), 3)
+    grade = _grade_from_winprob(win_probability, action, fit)
+    confirmed_factors = sum(1 for k in ("trend", "momentum", "macd", "volume", "regime", "rsi")
+                            if confirmations[k] >= 1.0)
+
     regime_txt = {1: "bullish", -1: "bearish", 0: "neutral"}[regime]
     reasoning = (f"Liquidity {avg_vol/1e6:.1f}M/day ({rel_vol:.1f}× avg), volatility {atr_pct:.1f}% ATR, "
                  f"trend {'up' if sma_trend > 0 else 'down'} (SMA20{'>' if sma20 > sma50 else '<'}SMA50), "
@@ -203,6 +261,10 @@ def _analyze(candles: list[dict], regime: int = 0, calib: dict | None = None) ->
         "agreement": round(conviction, 3),
         "score": raw_score,
         "signal_score": signal_score,
+        "win_probability": win_probability,
+        "grade": grade,
+        "confirmed_factors": confirmed_factors,
+        "confirmations": confirmations,
         "intraday_fit": fit,
         "reasoning": reasoning,
         "metrics": {
@@ -338,8 +400,15 @@ async def scan_once(phase: str = "intraday") -> dict:
             pass
         c["catalyst_boost"] = round(boost, 3)
         c["rank_score"] = round(c["signal_score"] * (1 + boost), 2)
+        # A fresh directional catalyst lifts win-probability (long-only: positive
+        # news helps, negative hurts); re-grade so the watchlist reflects it.
+        if boost:
+            c["win_probability"] = round(min(0.95, max(0.05, c.get("win_probability", 0.5) * (1 + boost))), 3)
+            c["grade"] = _grade_from_winprob(c["win_probability"], c.get("action", "HOLD"), c.get("intraday_fit", False))
 
-    candidates.sort(key=lambda r: (r["action"] != "BUY", -r["rank_score"]))
+    # Rank: BUY calls first, then by grade (A→D), then by composite rank score.
+    _grade_rank = {"A": 0, "B": 1, "C": 2, "D": 3}
+    candidates.sort(key=lambda r: (r["action"] != "BUY", _grade_rank.get(r.get("grade", "D"), 3), -r["rank_score"]))
     watchlist = candidates[:TOP_N]
 
     # Publish the candidate pool so the sentiment-service analyses the names just
@@ -352,6 +421,7 @@ async def scan_once(phase: str = "intraday") -> dict:
         logger.debug("candidate pool write failed: %s", exc)
 
     now = _ist_now()
+    grade_counts = {g: sum(1 for w in watchlist if w.get("grade") == g) for g in ("A", "B", "C", "D")}
     payload = {
         "updated_at": now.isoformat(),
         "phase": phase,
@@ -360,6 +430,8 @@ async def scan_once(phase: str = "intraday") -> dict:
         "candidates": len(candidates),
         "market_regime": _state["market_regime"],
         "calibration": {"accuracy": calib.get("accuracy"), "samples": calib.get("samples", 0)},
+        "grade_counts": grade_counts,
+        "high_conviction": grade_counts["A"] + grade_counts["B"],
         "items": watchlist,
     }
     try:

@@ -180,3 +180,13 @@ async def feedback_stats():
 @router.get("/feedback/trades")
 async def feedback_trades():
     return await _feedback_get("/trades")
+
+
+@router.get("/feedback/agent-accuracy")
+async def feedback_agent_accuracy(min_trades: int = 20):
+    return await _feedback_get(f"/agent-accuracy?min_trades={min_trades}")
+
+
+@router.get("/feedback/portfolio-metrics")
+async def feedback_portfolio_metrics():
+    return await _feedback_get("/portfolio-metrics")

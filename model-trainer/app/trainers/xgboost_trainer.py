@@ -9,8 +9,7 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 from sklearn.metrics import accuracy_score
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import TimeSeriesSplit
 
 logger = logging.getLogger(__name__)
 
@@ -101,11 +100,13 @@ async def train_xgboost(
         logger.error("No usable data for XGBoost training")
         return False
 
+    # Sort by time across all symbols to preserve temporal order
     combined = pd.concat(frames, ignore_index=True)
+    if "time" in combined.columns:
+        combined = combined.sort_values("time").reset_index(drop=True)
+
     X = combined[FEATURE_COLS].values
     y = combined["label"].values.astype(int)
-
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
 
     params = {
         "objective": "multi:softprob",
@@ -120,35 +121,52 @@ async def train_xgboost(
         "tree_method": "hist",
     }
 
+    # Walk-forward time-series cross-validation (n=5 folds, no shuffle)
+    tscv = TimeSeriesSplit(n_splits=5)
+    fold_accuracies = []
+
+    for fold, (train_idx, test_idx) in enumerate(tscv.split(X), 1):
+        X_tr, X_te = X[train_idx], X[test_idx]
+        y_tr, y_te = y[train_idx], y[test_idx]
+        m = xgb.XGBClassifier(**params)
+        m.fit(X_tr, y_tr, eval_set=[(X_te, y_te)], verbose=False)
+        fold_acc = accuracy_score(y_te, m.predict(X_te))
+        fold_accuracies.append(fold_acc)
+        logger.info("Walk-forward fold %d/%d accuracy: %.4f", fold, 5, fold_acc)
+
+    mean_accuracy = float(np.mean(fold_accuracies))
+    std_accuracy = float(np.std(fold_accuracies))
+    logger.info(
+        "Walk-forward CV: mean=%.4f std=%.4f (threshold %.4f)",
+        mean_accuracy, std_accuracy, min_accuracy,
+    )
+
+    # Train final model on ALL data
+    final_model = xgb.XGBClassifier(**params)
+    final_model.fit(X, y, verbose=False)
+
     mlflow.set_tracking_uri(mlflow_uri)
     mlflow.set_experiment("technical-xgboost-training")
 
     with mlflow.start_run(run_name=f"xgb_{datetime.utcnow().strftime('%Y%m%d_%H%M')}"):
-        model = xgb.XGBClassifier(**params)
-        model.fit(
-            X_train, y_train,
-            eval_set=[(X_test, y_test)],
-            verbose=False,
-        )
-
-        y_pred = model.predict(X_test)
-        accuracy = accuracy_score(y_test, y_pred)
-
         mlflow.log_params(params)
-        mlflow.log_metric("accuracy", accuracy)
-        mlflow.log_metric("train_samples", len(X_train))
-        mlflow.log_metric("test_samples", len(X_test))
+        mlflow.log_metric("wf_cv_accuracy_mean", mean_accuracy)
+        mlflow.log_metric("wf_cv_accuracy_std", std_accuracy)
+        for i, acc in enumerate(fold_accuracies, 1):
+            mlflow.log_metric(f"wf_fold_{i}_accuracy", acc)
+        mlflow.log_metric("train_samples", len(X))
 
-        logger.info("XGBoost accuracy: %.4f (threshold %.4f)", accuracy, min_accuracy)
-
-        if accuracy >= min_accuracy:
+        if mean_accuracy >= min_accuracy:
             mlflow.xgboost.log_model(
-                model,
+                final_model,
                 artifact_path="model",
                 registered_model_name=model_name,
             )
-            logger.info("Registered XGBoost model '%s'", model_name)
+            logger.info("Registered XGBoost model '%s' (wf_cv=%.4f)", model_name, mean_accuracy)
             return True
         else:
-            logger.warning("XGBoost accuracy %.4f below threshold %.4f — NOT registered", accuracy, min_accuracy)
+            logger.warning(
+                "XGBoost walk-forward CV %.4f below threshold %.4f — NOT registered",
+                mean_accuracy, min_accuracy,
+            )
             return False

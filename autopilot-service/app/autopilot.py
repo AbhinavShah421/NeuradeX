@@ -43,6 +43,10 @@ def _paper_started_key(date_str: str) -> str:
 PAPER_MAX   = int(os.getenv("AUTOPILOT_MAX_SESSIONS", "15"))
 CAPITAL     = float(os.getenv("AUTOPILOT_CAPITAL", "50000"))
 PAPER_TICK  = int(os.getenv("AUTOPILOT_TICK_SECS", "60"))
+# Per-trade hold cap (minutes): force-exit any position the autopilot's paper
+# sessions hold longer than this. 0 = disabled (positions exit on the normal
+# intraday/ensemble rules + end-of-day square-off).
+MAX_HOLD_MIN = int(os.getenv("AUTOPILOT_MAX_HOLD_MINUTES", "0"))
 BT_SPEED    = int(os.getenv("AUTOPILOT_BACKTEST_SPEED", "1"))      # 1x — dense, real-like
 BT_MAX      = int(os.getenv("AUTOPILOT_BACKTEST_MAX", "15"))       # sessions per day queue
 BT_POLL     = int(os.getenv("AUTOPILOT_BACKTEST_POLL", "15"))      # seconds between queue checks
@@ -208,7 +212,8 @@ async def _do_paper_tick() -> None:
             break
         if sym in running or sym in started:
             continue
-        sid = await _start_session({"mode": "paper", "symbol": sym, "capital": CAPITAL, "speed": 1})
+        sid = await _start_session({"mode": "paper", "symbol": sym, "capital": CAPITAL, "speed": 1,
+                                    "max_hold_minutes": MAX_HOLD_MIN})
         if sid:
             started.add(sym)
             slots -= 1
@@ -266,6 +271,7 @@ async def _do_backtest_step() -> None:
             sid = await _start_session({
                 "mode": "replay", "symbol": sym, "date": cursor,
                 "start_time": "09:15", "capital": CAPITAL, "speed": BT_SPEED,
+                "max_hold_minutes": MAX_HOLD_MIN,
             })
             if sid:
                 ids.append(sid)

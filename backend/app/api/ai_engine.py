@@ -194,16 +194,26 @@ async def learning_summary():
 # ── AI Watchlist (self-running market scanner) ────────────────────────────────
 
 @router.get("/watchlist")
-async def get_watchlist():
+async def get_watchlist(min_grade: str | None = None):
     """The live AI watchlist produced by the stock-scanner service (read from
     Redis), each item enriched with its latest LLM news-sentiment signal
-    (produced by the sentiment-service)."""
+    (produced by the sentiment-service).
+
+    min_grade: optional A/B/C filter — keep only items at or above that grade
+    (A is best). Use it to surface only high win-probability setups."""
     import json
     from app.utils.redis_client import cache_get
+    _grade_rank = {"A": 0, "B": 1, "C": 2, "D": 3}
     try:
         raw = await cache_get("ai_engine:watchlist")
         if raw:
             data = json.loads(raw)
+            if min_grade and min_grade.upper() in _grade_rank:
+                cutoff = _grade_rank[min_grade.upper()]
+                kept = [it for it in data.get("items", [])
+                        if _grade_rank.get((it.get("grade") or "D").upper(), 3) <= cutoff]
+                data["items"] = kept
+                data["filtered_min_grade"] = min_grade.upper()
             for item in data.get("items", []):
                 sym = (item.get("symbol") or "").upper()
                 if not sym:

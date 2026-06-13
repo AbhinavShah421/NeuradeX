@@ -738,6 +738,7 @@ class ApiService {
   async sessionStart(payload: {
     mode: 'replay' | 'paper'; symbol: string; date?: string;
     start_time?: string; capital?: number; speed?: number; model?: string;
+    max_hold_minutes?: number;
   }): Promise<ApiResponse<any>> {
     const response = await this.api.post('/api/sessions/start', payload);
     return response.data;
@@ -819,6 +820,16 @@ class ApiService {
 
   async getFeedbackTrades(): Promise<any> {
     const response = await this.api.get('/api/orders/feedback/trades');
+    return response.data;
+  }
+
+  async getPortfolioMetrics(): Promise<any> {
+    const response = await this.api.get('/api/orders/feedback/portfolio-metrics');
+    return response.data;
+  }
+
+  async getAgentAccuracy(minTrades = 20): Promise<any> {
+    const response = await this.api.get(`/api/orders/feedback/agent-accuracy?min_trades=${minTrades}`);
     return response.data;
   }
 }

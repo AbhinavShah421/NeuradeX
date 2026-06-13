@@ -43,8 +43,9 @@ def _build_signal(symbol: str, aggregated: dict) -> dict:
     else:
         signal, confidence, reason = "HOLD", 0.50, f"neutral sentiment ({net:+.2f}) across {count} articles"
 
-    # Dampen confidence when only a few articles
-    if 0 < count < 5:
+    # Dampen confidence when effective weight is low (stale or few articles)
+    effective = aggregated.get("effective_articles", float(count))
+    if 0 < effective < 3.0:
         confidence = round(confidence * 0.8, 3)
 
     return {

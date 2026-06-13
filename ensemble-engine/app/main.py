@@ -15,6 +15,8 @@ from pydantic import model_validator
 
 from app.aggregator import aggregate_signals, DEFAULT_WEIGHTS
 from app.agent_collector import AgentSignalCollector
+from app.meta_model import predict_win_probability, load_meta_model
+from app.calibrator import calibrate_confidence, load_calibrator
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -41,6 +43,8 @@ class Settings(BaseSettings):
     RABBITMQ_URL: str = ""
     AGENT_SIGNAL_TIMEOUT_SECONDS: float = 5.0
     MIN_CONFIDENCE_TO_TRADE: float = 0.60
+    MLFLOW_TRACKING_URI: str = "http://mlflow:5000"
+    META_WIN_PROB_GATE: float = 0.52
 
     @model_validator(mode="after")
     def build_urls(self) -> "Settings":
@@ -81,11 +85,40 @@ async def _load_weights_from_db() -> dict[str, float]:
 
 async def on_all_signals_received(symbol: str, agent_signals: dict) -> None:
     weights = await _load_weights_from_db()
-    result = aggregate_signals(agent_signals, weights)
 
-    # Gate: below minimum confidence → downgrade to HOLD
+    # Extract macro regime from the macro-agent signal so ensemble can
+    # shift weights toward agents that perform best in this environment.
+    regime = "NEUTRAL"
+    macro_sig = agent_signals.get("macro", {})
+    if isinstance(macro_sig, dict):
+        regime = macro_sig.get("regime", "NEUTRAL")
+
+    result = aggregate_signals(agent_signals, weights, regime=regime)
+
+    # Secondary gate: meta-model WIN probability (trained on historical trades)
+    meta_win_prob = predict_win_probability(
+        result["agent_votes"],
+        result["weighted_confidence"],
+        settings.MLFLOW_TRACKING_URI,
+    )
+
+    # Primary confidence gate
     if result["weighted_confidence"] < settings.MIN_CONFIDENCE_TO_TRADE:
         result["final_action"] = "HOLD"
+
+    # Meta-model gate: if meta-model is loaded and predicts low WIN probability, hold
+    if meta_win_prob is not None and meta_win_prob < settings.META_WIN_PROB_GATE:
+        logger.info(
+            "Meta-model gate: WIN_PROB=%.3f < %.3f — downgrading %s to HOLD",
+            meta_win_prob, settings.META_WIN_PROB_GATE, result["final_action"],
+        )
+        result["final_action"] = "HOLD"
+
+    # Calibrate the confidence score so it reflects true WIN probability
+    raw_confidence = result["weighted_confidence"]
+    calibrated_confidence = calibrate_confidence(raw_confidence, settings.MLFLOW_TRACKING_URI)
+    result["weighted_confidence"] = round(calibrated_confidence, 3)
+    result["raw_confidence"] = round(raw_confidence, 3)
 
     # Extract price and ATR from technical agent indicators (used by risk-engine)
     current_price = 0.0
@@ -115,6 +148,9 @@ async def on_all_signals_received(symbol: str, agent_signals: dict) -> None:
             "uncertainty": result["uncertainty"],
             "scores": result["scores"],
             "weights_used": weights,
+            "regime": regime,
+            "meta_win_probability": round(meta_win_prob, 3) if meta_win_prob is not None else None,
+            "raw_confidence": result.get("raw_confidence"),
             "current_price": current_price,
             "atr": atr,
         },
@@ -188,8 +224,13 @@ async def lifespan(app: FastAPI):
 
     _tasks.append(asyncio.create_task(collector.start(settings.RABBITMQ_URL), name="ensemble-collector"))
 
-    logger.info("ensemble-engine ready — timeout=%.1fs min_confidence=%.2f",
-                settings.AGENT_SIGNAL_TIMEOUT_SECONDS, settings.MIN_CONFIDENCE_TO_TRADE)
+    # Pre-load meta-model and calibrator so first inference doesn't block
+    load_meta_model(settings.MLFLOW_TRACKING_URI)
+    load_calibrator(settings.MLFLOW_TRACKING_URI)
+
+    logger.info("ensemble-engine ready — timeout=%.1fs min_confidence=%.2f meta_gate=%.2f",
+                settings.AGENT_SIGNAL_TIMEOUT_SECONDS, settings.MIN_CONFIDENCE_TO_TRADE,
+                settings.META_WIN_PROB_GATE)
     yield
 
     for t in _tasks:

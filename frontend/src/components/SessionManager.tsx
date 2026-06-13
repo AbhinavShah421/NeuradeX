@@ -75,6 +75,7 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
   const [mode, setMode] = useState<'replay' | 'paper'>(fixedMode ?? 'replay');
   const [symbol, setSymbol] = useState('SBIN');
   const [date, setDate] = useState(lastWeekday(1));
+  const [autoDate, setAutoDate] = useState(true);   // Auto = last trading day
   const [startTime, setStartTime] = useState('09:15');
   const [capital, setCapital] = useState('50000');
   const [speed, setSpeed] = useState(5);
@@ -116,7 +117,7 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
     try {
       const r = await apiService.sessionStart({
         mode: effectiveMode, symbol: symbol.toUpperCase().trim(),
-        date: effectiveMode === 'replay' ? date : undefined,
+        date: effectiveMode === 'replay' ? (autoDate ? lastWeekday(1) : date) : undefined,
         start_time: startTime, capital: parseFloat(capital) || 50000, speed,
       });
       const d = (r as any).data;
@@ -165,7 +166,18 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
           )}
           <Field label="Symbol" full><StockPicker value={symbol} onChange={(sym) => setSymbol(sym)} /></Field>
           {effectiveMode === 'replay' && (
-            <Field label="Date"><input className="nd-input" type="date" value={date} onChange={e => setDate(e.target.value)} style={fieldStyle} /></Field>
+            <Field label="Date">
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                <button type="button"
+                  onClick={() => { const next = !autoDate; setAutoDate(next); if (next) setDate(lastWeekday(1)); }}
+                  title="Auto = last trading day"
+                  style={{ flexShrink: 0, padding: '6px 10px', borderRadius: 6, border: `1px solid ${autoDate ? 'var(--nd-green)' : 'var(--nd-border)'}`, background: autoDate ? 'var(--nd-green)' : 'var(--nd-surface)', color: autoDate ? '#fff' : 'var(--nd-text-2)', fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>
+                  Auto
+                </button>
+                <input className="nd-input" type="date" value={date} disabled={autoDate}
+                  onChange={e => setDate(e.target.value)} style={{ ...fieldStyle, opacity: autoDate ? 0.55 : 1 }} />
+              </div>
+            </Field>
           )}
           <Field label="Start time"><input className="nd-input" type="time" value={startTime} onChange={e => setStartTime(e.target.value)} style={fieldStyle} /></Field>
           <Field label="Capital (₹)"><input className="nd-input" type="number" inputMode="numeric" value={capital} onChange={e => setCapital(e.target.value)} style={fieldStyle} /></Field>
