@@ -825,13 +825,13 @@ const ScanAccuracyCard: React.FC = () => {
   const commBelow = commAcc != null && commAcc < target;
 
   return (
-    <div className="nd-card" style={{ padding: '16px 18px', marginBottom: 0, height: '100%', display: 'flex', flexDirection: 'column' }}>
+    <div className="nd-card" style={{ padding: '16px 18px', marginBottom: 0, height: '100%', display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden' }}>
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
         <div>
           <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>AI Scan Accuracy</div>
           <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>Graded vs the actual move · <span style={{ color: '#a855f7' }}>High-conviction</span> is the selective tier tuned to the {target.toFixed(0)}% target</div>
         </div>
-        <div style={{ display: 'flex', gap: 6 }}>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
           {series.map(s => {
             const la = latestAcc(s);
             return (
@@ -948,7 +948,7 @@ const PatternModelCard: React.FC<{ embedded?: boolean }> = ({ embedded }) => {
             Learns price <span style={{ color: '#06b6d4' }}>patterns only</span> across the full NSE universe. <span style={{ color: '#a855f7' }}>High-confidence</span> = accuracy when the model is sure (it abstains otherwise)
           </div>
         </div>
-        <div style={{ display: 'flex', gap: 14, alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: 14, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
           <div style={{ textAlign: 'right' }}>
             <div style={{ fontSize: 18, fontWeight: 700, color: '#a855f7' }}>{hcAcc != null ? `${hcAcc.toFixed(1)}%` : '—'}</div>
             <div style={{ fontSize: 10, color: 'var(--nd-text-3)' }}>high-confidence{hcCov != null ? ` · ${hcCov.toFixed(0)}% of picks` : ''}</div>
@@ -1959,10 +1959,10 @@ const Dashboard: React.FC = () => {
       <TradeGateCard />
 
       {/* Two-up: the system's learning (curve + pattern model) | AI scan accuracy */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))', gap: 20, marginBottom: 20, alignItems: 'stretch' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 420px), 1fr))', gap: 20, marginBottom: 20, alignItems: 'stretch', width: '100%' }}>
         {/* Unified "system learning" card: the equity/win-rate curve on top, the
             dedicated pattern-recognition model below the divider. */}
-        <div className="nd-card" style={{ padding: 0, position: 'relative', display: 'flex', flexDirection: 'column' }}>
+        <div className="nd-card" style={{ padding: 0, position: 'relative', display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden' }}>
           <LearningCurveCard embedded />
           <div style={{ height: 1, background: 'var(--nd-border)', margin: '12px 18px 0' }} />
           <PatternModelCard embedded />
