@@ -825,7 +825,7 @@ const ScanAccuracyCard: React.FC = () => {
   const commBelow = commAcc != null && commAcc < target;
 
   return (
-    <div className="nd-card" style={{ padding: '16px 18px', marginBottom: 0 }}>
+    <div className="nd-card" style={{ padding: '16px 18px', marginBottom: 0, height: '100%', display: 'flex', flexDirection: 'column' }}>
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
         <div>
           <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>AI Scan Accuracy</div>
@@ -848,12 +848,13 @@ const ScanAccuracyCard: React.FC = () => {
         </div>
       </div>
 
+      <div style={{ flex: 1, minHeight: 160, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
       {!hasData ? (
         <div style={{ fontSize: 12, color: 'var(--nd-text-3)', padding: '24px 0' }}>
           No graded scans yet — the morning watchlist is graded after each close (delivery picks after a {data?.latest?.horizon_days ?? 5}-day hold).
         </div>
       ) : (
-        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 160 }} preserveAspectRatio="none">
+        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: '100%', minHeight: 160, flex: 1 }} preserveAspectRatio="none">
           {[yMin, (yMin + yMax) / 2, yMax].map((v, i) => (
             <g key={i}>
               <line x1={PL} y1={sy(v)} x2={W - PR} y2={sy(v)} stroke="var(--nd-border)" strokeWidth="0.5" />
@@ -882,6 +883,7 @@ const ScanAccuracyCard: React.FC = () => {
           ))}
         </svg>
       )}
+      </div>
 
       {commBelow ? (
         <div style={{ marginTop: 8, fontSize: 11, color: '#d8b4fe', background: '#a855f715', border: '1px solid #a855f733', borderRadius: 8, padding: '6px 9px' }}>
@@ -1955,7 +1957,7 @@ const Dashboard: React.FC = () => {
       <TradeGateCard />
 
       {/* Two-up: the system's learning (curve + pattern model) | AI scan accuracy */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))', gap: 20, marginBottom: 20, alignItems: 'start' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))', gap: 20, marginBottom: 20, alignItems: 'stretch' }}>
         {/* Unified "system learning" card: the equity/win-rate curve on top, the
             dedicated pattern-recognition model below the divider. */}
         <div className="nd-card" style={{ padding: 0, position: 'relative', display: 'flex', flexDirection: 'column' }}>
