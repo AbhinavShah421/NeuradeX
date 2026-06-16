@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import random
 import time
@@ -78,11 +79,127 @@ async def _load_hc_params() -> dict:
     return {"min_factors": HC_MIN_FACTORS, "wp_floor": HC_WP_FLOOR}
 
 
+# Pattern-recognition model gate — the scanner pulls the backend model's learned
+# weights once per sweep and scores each pattern locally (no per-stock HTTP). A
+# committed pick must have the *learned pattern model* agree it's an up-pattern.
+PATTERN_MIN_P  = float(os.getenv("SCAN_PATTERN_MIN_P", "0.55"))   # model must say P(up) ≥ this
+_FP_SHAPE_LEN  = 10
+_FP_DIM        = 19
+_pattern_wb_cache: dict = {"w": None, "b": 0.0, "ts": 0.0, "trained": False}
+
+
+def _fp_clip(v: float, lo: float = -1.0, hi: float = 1.0) -> float:
+    return max(lo, min(hi, v))
+
+
+def _fp_div(a: float, b: float, default: float = 0.0) -> float:
+    return a / b if b else default
+
+
+def _fp_rsi(closes: list[float], period: int = 14) -> float:
+    if len(closes) < period + 1:
+        return 50.0
+    g = l = 0.0
+    for i in range(len(closes) - period, len(closes)):
+        d = closes[i] - closes[i - 1]
+        if d >= 0: g += d
+        else:      l -= d
+    ag, al = g / period, l / period
+    if al == 0:
+        return 100.0
+    return 100.0 - (100.0 / (1.0 + ag / al))
+
+
+def _fp_ema(values: list[float], period: int) -> float:
+    if not values:
+        return 0.0
+    k = 2 / (period + 1)
+    e = values[0]
+    for v in values[1:]:
+        e = v * k + e * (1 - k)
+    return e
+
+
+def _pattern_fingerprint(candles: list[dict]) -> list[float] | None:
+    """Scale-free pattern fingerprint — MUST match backend app/agents/fingerprint.py
+    (build_fingerprint) feature-for-feature so the backend-trained weights apply.
+    Scanner candles use o/h/l/c/v keys."""
+    if not candles or len(candles) < 15:
+        return None
+    closes = [float(c["c"]) for c in candles]
+    highs  = [float(c.get("h", c["c"])) for c in candles]
+    lows   = [float(c.get("l", c["c"])) for c in candles]
+    vols   = [float(c.get("v", 0) or 0) for c in candles]
+    last = closes[-1]
+
+    rets: list[float] = []
+    for i in range(len(closes) - _FP_SHAPE_LEN, len(closes)):
+        prev = closes[i - 1] if i > 0 else closes[i]
+        rets.append(_fp_div(closes[i] - prev, prev))
+    sigma = (sum(r * r for r in rets) / len(rets)) ** 0.5 or 1e-6
+    shape = [_fp_clip(r / (sigma * 3)) for r in rets]
+
+    f_rsi = _fp_clip((_fp_rsi(closes) - 50) / 50)
+    e12, e26 = _fp_ema(closes[-26:], 12), _fp_ema(closes[-26:], 26)
+    f_macd = _fp_clip(_fp_div(e12 - e26, last) * 100)
+    vwap = sum((highs[i] + lows[i] + closes[i]) / 3 for i in range(len(closes))) / len(closes)
+    f_vwap = _fp_clip(_fp_div(last - vwap, vwap) * 50)
+    atr = sum(highs[i] - lows[i] for i in range(len(closes) - 10, len(closes))) / 10
+    f_atr = _fp_clip(_fp_div(atr, last) * 50)
+    win = closes[-20:]
+    mean = sum(win) / len(win)
+    std = (sum((c - mean) ** 2 for c in win) / len(win)) ** 0.5 or 1e-6
+    f_bbpos = _fp_clip((last - mean) / (2 * std))
+    avg_vol = (sum(vols) / len(vols)) or 1.0
+    f_vol = _fp_clip(math.tanh(_fp_div(vols[-1], avg_vol) - 1.0))
+    f_mom5  = _fp_clip(_fp_div(last - closes[-5],  closes[-5])  * 20) if len(closes) >= 5  else 0.0
+    f_mom10 = _fp_clip(_fp_div(last - closes[-10], closes[-10]) * 20) if len(closes) >= 10 else 0.0
+    n = min(10, len(closes)); xs = list(range(n)); ys = closes[-n:]
+    mx = sum(xs) / n; my = sum(ys) / n
+    denom = sum((x - mx) ** 2 for x in xs) or 1e-6
+    slope = sum((xs[i] - mx) * (ys[i] - my) for i in range(n)) / denom
+    f_slope = _fp_clip(_fp_div(slope, last) * 200)
+    return shape + [f_rsi, f_macd, f_vwap, f_atr, f_bbpos, f_vol, f_mom5, f_mom10, f_slope]
+
+
+def _pattern_p_up(candles: list[dict]) -> float | None:
+    """Learned pattern model's P(up) for the latest pattern, or None if the model
+    isn't trained / weights unavailable."""
+    wb = _pattern_wb_cache
+    if not wb.get("trained") or wb.get("w") is None:
+        return None
+    fp = _pattern_fingerprint(candles)
+    if fp is None or len(fp) != _FP_DIM:
+        return None
+    z = sum(wi * xi for wi, xi in zip(wb["w"], fp)) + wb["b"]
+    return 1.0 / (1.0 + math.exp(-z)) if z >= 0 else math.exp(z) / (1.0 + math.exp(z))
+
+
+async def _load_pattern_weights() -> None:
+    """Pull the backend pattern model's weights once per sweep (cached ~10 min)."""
+    if time.time() - _pattern_wb_cache.get("ts", 0) < 600 and _pattern_wb_cache.get("w") is not None:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as c:
+            r = await c.get(f"{BACKEND_URL}/api/ai-engine/pattern-model/weights")
+            d = (r.json() or {}).get("data") or {}
+        w = d.get("weights")
+        if w and len(w) == _FP_DIM and d.get("trained"):
+            _pattern_wb_cache.update({"w": [float(x) for x in w], "b": float(d.get("bias", 0.0)),
+                                      "trained": True, "ts": time.time()})
+        else:
+            _pattern_wb_cache.update({"trained": bool(d.get("trained")), "ts": time.time()})
+    except Exception as exc:
+        logger.debug("pattern weights fetch skipped: %s", exc)
+        _pattern_wb_cache["ts"] = time.time()
+
+
 def _is_committed(res: dict, p: dict) -> bool:
     """A high-conviction long: top grade BUY, enough short-term confirmations, a
     win-probability above the (adaptive) floor, PLUS independent confirmation —
-    a confirmed higher-timeframe uptrend and no negative news catalyst. Requiring
-    signals that aren't all correlated technicals is what lifts precision."""
+    a confirmed higher-timeframe uptrend, no negative news catalyst, AND the
+    learned pattern model agreeing it's an up-pattern. Requiring signals that
+    aren't all correlated technicals is what lifts precision."""
     if not (res.get("action") == "BUY"
             and res.get("grade") == "A"
             and int(res.get("confirmed_factors", 0)) >= p["min_factors"]
@@ -94,16 +211,24 @@ def _is_committed(res: dict, p: dict) -> bool:
     # Independent signal 2 — block on a negative news catalyst.
     if float(res.get("catalyst_boost") or 0.0) < -0.05:
         return False
+    # Independent signal 3 — the learned pattern model must agree (when trained).
+    pp = res.get("pattern_p_up")
+    if pp is not None and pp < PATTERN_MIN_P:
+        return False
     return True
 
 
 def _independent_signals(res: dict) -> int:
-    """Count of confirming signals that are independent of the short-term technical
-    score: long-term trend agreement + a positive fresh news catalyst."""
+    """Count of confirming signals independent of the short-term technical score:
+    long-term trend agreement, a positive fresh news catalyst, and the learned
+    pattern model's confident agreement."""
     n = 0
     if res.get("long_trend") is True:
         n += 1
     if float(res.get("catalyst_boost") or 0.0) > 0.10:
+        n += 1
+    pp = res.get("pattern_p_up")
+    if pp is not None and pp >= 0.60:
         n += 1
     return n
 
@@ -404,6 +529,7 @@ def _analyze(candles: list[dict], regime: int = 0, calib: dict | None = None) ->
         "confirmed_factors": confirmed_factors,
         "confirmations": confirmations,
         "long_trend": long_trend,
+        "pattern_p_up": _pattern_p_up(candles),   # learned pattern model's verdict
         "intraday_fit": fit,
         "delivery_fit": delivery_fit,
         "delivery_weeks": delivery_weeks,
@@ -626,6 +752,7 @@ async def scan_once(phase: str = "intraday") -> dict:
         logger.debug("ranked prev snapshot skipped: %s", exc)
 
     calib = await _load_calibration()
+    await _load_pattern_weights()        # pull the pattern model's weights for local scoring
     universe = await _load_universe()
     total = len(universe)
     _state["universe"] = total

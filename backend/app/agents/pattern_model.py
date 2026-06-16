@@ -171,6 +171,13 @@ class PatternRecognitionModel:
         fp = build_fingerprint(candles)
         return self.predict_fp(fp) if fp else None
 
+    def weights_payload(self) -> dict:
+        """Export the learned weights so another service (the scanner) can score
+        patterns locally without a round-trip per stock."""
+        return {"weights": [round(float(x), 6) for x in self.w], "bias": round(float(self.b), 6),
+                "dim": FINGERPRINT_DIM, "trained": self.n_samples > 0,
+                "hc_margin": _HC_MARGIN, "n_samples": self.n_samples}
+
     # ── learning ─────────────────────────────────────────────────────────────────
     def _step(self, x: np.ndarray, y: int) -> bool:
         """One SGD step on logloss; returns whether the pre-update call was correct."""

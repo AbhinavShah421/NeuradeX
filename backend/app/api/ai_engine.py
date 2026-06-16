@@ -1300,6 +1300,16 @@ async def pattern_model_curve(limit: int = 200):
     return {"status": "success", "data": {"points": pts}}
 
 
+@router.get("/pattern-model/weights")
+async def pattern_model_weights():
+    """The learned weights — the scanner pulls these once per sweep to score each
+    pattern locally and gate the high-conviction tier on the model's agreement."""
+    from app.agents import get_pattern_model
+    m = get_pattern_model()
+    await m.init_db()
+    return {"status": "success", "data": m.weights_payload()}
+
+
 @router.post("/pattern-model/predict")
 async def pattern_model_predict(req: AnalyzeRequest):
     """What does the pattern model say about this candle window's *pattern* alone?"""

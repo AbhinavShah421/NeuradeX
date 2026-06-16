@@ -211,10 +211,16 @@ the single-pick level, and the broad scan sits ~50%. The way to a high hit-rate
 is **selectivity + abstention**: only *commit* to a pick when many independent
 signals agree, and ignore the rest.
 
-A pick is **committed** only when it is a grade-A BUY with all six independent
-confirmations (trend, momentum, MACD, volume, regime, RSI) and a win-probability
-above an adaptive floor (`ai_engine:hc_params`). Everything else is "watch, don't
-trade". The committed tier is graded separately (`trade_kind='committed'`) and is
+A pick is **committed** only when it is a grade-A BUY with all six confirmations
+(trend, momentum, MACD, volume, regime, RSI), a win-probability above an adaptive
+floor (`ai_engine:hc_params`), **and** the genuinely-independent signals agree:
+a confirmed higher-timeframe uptrend, no negative news catalyst, and **the learned
+Pattern Recognition Model's P(up) ≥ `SCAN_PATTERN_MIN_P`** (0.55). The scanner pulls
+the model's weights once per sweep (`/pattern-model/weights`) and scores each
+candidate's pattern locally, so this gate adds no per-stock latency. Stacking
+uncorrelated signals is what actually lifts the committed tier's accuracy — in
+practice only a tiny fraction of candidates clear the pattern gate. Everything
+else is "watch, don't trade". The committed tier is graded separately (`trade_kind='committed'`) and is
 the only series measured against `SCAN_ACCURACY_TARGET` (0.90).
 
 An **adaptive controller** (`_tune_hc_params`) tightens the bar each session when
