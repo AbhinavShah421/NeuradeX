@@ -387,6 +387,22 @@ async def scan_watchlist():
         return {"status": "error", "detail": str(exc)}
 
 
+@router.post("/backfill-delivery")
+async def backfill_delivery(days: int = 14, limit: int = 250):
+    """Ask the scanner to reconstruct delivery-pick accuracy history so the AI Scan
+    Accuracy graph shows a delivery line immediately (live grading continues daily)."""
+    import httpx
+    from app.config import settings
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            await client.post(f"{settings.SCANNER_SERVICE_URL}/backfill-delivery",
+                              params={"days": days, "limit": limit})
+        return {"status": "started", "days": days, "limit": limit}
+    except Exception as exc:
+        logger.warning("could not trigger delivery backfill: %s", exc)
+        return {"status": "error", "detail": str(exc)}
+
+
 @router.get("/scan-status")
 async def scan_status():
     """Centralized scan status (shared by Dashboard / Predictions / Portfolio):

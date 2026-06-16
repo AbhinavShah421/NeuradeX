@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .scanner import (
     scanner_loop, schedule_loop, scan_once, evaluate_day,
-    evaluate_delivery, grade_due_delivery,
+    evaluate_delivery, grade_due_delivery, backfill_delivery,
     get_state, get_latest_eval, warm_state,
 )
 from .universe import UNIVERSE
@@ -78,3 +78,11 @@ async def evaluate_delivery_ep(date: str | None = None):
         return {"status": "success", "data": await evaluate_delivery(date)}
     asyncio.create_task(grade_due_delivery())
     return {"status": "started"}
+
+
+@app.post("/backfill-delivery")
+async def backfill_delivery_ep(days: int = 14, limit: int = 250):
+    """Reconstruct delivery-pick accuracy for the last `days` days so the accuracy
+    graph has delivery history immediately. Runs in the background."""
+    asyncio.create_task(backfill_delivery(days=days, limit=limit))
+    return {"status": "started", "days": days, "limit": limit}

@@ -941,6 +941,75 @@ async def grade_due_delivery() -> None:
             logger.debug("delivery grade %s skipped: %s", d, exc)
 
 
+async def backfill_delivery(days: int = 14, limit: int = 250) -> dict:
+    """Reconstruct delivery-pick accuracy for the last `days` trading days so the
+    accuracy graph has delivery history immediately (no waiting for live snapshots
+    to mature). For each symbol in a liquid sample we fetch daily candles once,
+    then for each past day decide whether it was a delivery pick *as of that day*
+    (re-running the same fitness logic on the candle window) and grade it on the
+    DELIVERY_HORIZON_DAYS forward return — exactly how live grading works."""
+    calib = await _load_calibration()
+    universe = await _load_universe()
+    syms = list(universe.items())[:max(1, limit)]
+    cutoff = _ist_now() - timedelta(days=days)
+    by_date: dict[str, list[dict]] = {}
+
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        for sym, name in syms:
+            candles = await _fetch_daily(client, sym)
+            await asyncio.sleep(FETCH_DELAY)
+            if len(candles) < 40:
+                continue
+            # evaluate each historical bar that has a full forward horizon and a date in range
+            for i in range(35, len(candles) - DELIVERY_HORIZON_DAYS):
+                bd = _bar_date(candles[i])
+                if not bd or bd < cutoff.strftime("%Y-%m-%d"):
+                    continue
+                res = _analyze(candles[: i + 1], regime=0, calib=calib)
+                if not res or not res.get("delivery_fit") or res.get("action") != "BUY":
+                    continue
+                entry_c = candles[i]["c"]
+                fwd_c = candles[i + DELIVERY_HORIZON_DAYS]["c"]
+                if entry_c <= 0:
+                    continue
+                fwd_ret = (fwd_c - entry_c) / entry_c * 100
+                by_date.setdefault(bd, []).append({
+                    "symbol": sym, "action": "BUY",
+                    "predicted_confidence": res.get("confidence"),
+                    "predicted_signal_score": res.get("delivery_score") or res.get("signal_score"),
+                    "day_return_pct": round(fwd_ret, 2),
+                    "realized_return_pct": round(fwd_ret, 2),
+                    "correct": bool(fwd_ret >= DELIVERY_TARGET_PCT),
+                    "trade_kind": "delivery",
+                })
+
+    r = await _get_redis()
+    graded_days = 0
+    for d, picks in sorted(by_date.items()):
+        if not picks:
+            continue
+        hits = sum(1 for g in picks if g["correct"])
+        accuracy = round(hits / len(picks), 4)
+        avg_realized = round(sum(g["realized_return_pct"] for g in picks) / len(picks), 2)
+        payload = {
+            "date": d, "evaluated_at": _ist_now().isoformat(), "trade_kind": "delivery",
+            "picks": len(picks), "hits": hits, "accuracy": accuracy,
+            "avg_realized_return_pct": avg_realized,
+            "target": SCAN_ACCURACY_TARGET, "meets_target": accuracy >= SCAN_ACCURACY_TARGET,
+            "horizon_days": DELIVERY_HORIZON_DAYS, "backfilled": True,
+            "results": sorted(picks, key=lambda g: -g["realized_return_pct"]),
+        }
+        try:
+            await r.set(f"ai_engine:scan_eval:delivery:{d}", json.dumps(payload), ex=86400 * 90)
+            await r.set(_DELIVERY_DONE_KEY.format(d), "1", ex=86400 * 30)
+        except Exception:
+            pass
+        await _push_feedback(payload)
+        graded_days += 1
+    logger.info("delivery backfill: graded %d days from %d symbols", graded_days, len(syms))
+    return {"status": "done", "graded_days": graded_days, "symbols": len(syms), "days": days}
+
+
 # ── Schedulers ────────────────────────────────────────────────────────────────
 
 async def scanner_loop() -> None:
