@@ -214,7 +214,9 @@ async def get_watchlist(min_grade: str | None = None):
                         if _grade_rank.get((it.get("grade") or "D").upper(), 3) <= cutoff]
                 data["items"] = kept
                 data["filtered_min_grade"] = min_grade.upper()
-            for item in data.get("items", []):
+            # Enrich every surfaced list (intraday items + delivery) with the
+            # latest LLM news-sentiment signal for each symbol.
+            for item in [*data.get("items", []), *data.get("delivery", [])]:
                 sym = (item.get("symbol") or "").upper()
                 if not sym:
                     continue
@@ -242,6 +244,43 @@ async def get_watchlist(min_grade: str | None = None):
     return {"status": "success", "data": {"updated_at": None, "scanned": 0, "universe": 0, "items": []}}
 
 
+@router.get("/ranked")
+async def get_ranked(limit: int = 100):
+    """The full ranked board of AI-scanned stocks (for the Predictions page),
+    each enriched with its latest LLM news-sentiment. `limit` caps how many of the
+    top-ranked names to return."""
+    import json
+    from app.utils.redis_client import cache_get
+    try:
+        raw = await cache_get("ai_engine:ranked")
+        if raw:
+            data = json.loads(raw)
+            items = (data.get("items") or [])[: max(1, min(limit, 250))]
+            for item in items:
+                sym = (item.get("symbol") or "").upper()
+                if not sym:
+                    continue
+                try:
+                    s = await cache_get(f"ai_engine:sentiment:{sym}")
+                    if s:
+                        sd = json.loads(s)
+                        if int(sd.get("headlines_count", 0)) > 0:
+                            item["news"] = {
+                                "sentiment": sd.get("sentiment"), "score": sd.get("score"),
+                                "action": sd.get("action"), "confidence": sd.get("confidence"),
+                                "catalyst": sd.get("catalyst"), "summary": sd.get("summary"),
+                                "headlines_count": sd.get("headlines_count"),
+                                "top_headlines": sd.get("top_headlines", []),
+                                "updated_at": sd.get("updated_at"),
+                            }
+                except Exception:
+                    pass
+            return {"status": "success", "data": {**data, "items": items, "returned": len(items)}}
+    except Exception as exc:
+        logger.debug("ranked board read failed: %s", exc)
+    return {"status": "success", "data": {"updated_at": None, "scanned": 0, "universe": 0, "items": [], "returned": 0}}
+
+
 @router.post("/watchlist/scan")
 async def scan_watchlist():
     """Ask the stock-scanner microservice to run an immediate full market sweep."""
@@ -254,6 +293,269 @@ async def scan_watchlist():
     except Exception as exc:
         logger.warning("could not trigger scanner: %s", exc)
         return {"status": "error", "detail": str(exc)}
+
+
+@router.get("/scan-status")
+async def scan_status():
+    """Centralized scan status (shared by Dashboard / Predictions / Portfolio):
+    whether a sweep is running, progress, and when it last completed. Single source
+    of truth so a rescan started on one page disables rescan everywhere."""
+    import httpx, json
+    from app.config import settings
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(f"{settings.SCANNER_SERVICE_URL}/status")
+            if r.status_code == 200:
+                d = (r.json() or {}).get("data", {})
+                return {"status": "success", "data": {
+                    "scanning": bool(d.get("scanning")),
+                    "running": bool(d.get("running")),
+                    "scanned": d.get("scanned", 0),
+                    "universe": d.get("universe", 0),
+                    "candidates": d.get("candidates", 0),
+                    "last_scan": d.get("last_scan"),
+                    "market_regime": d.get("market_regime"),
+                }}
+    except Exception as exc:
+        logger.debug("scan-status proxy failed: %s", exc)
+    # Fallback: read the watchlist payload's scanning flag from Redis.
+    try:
+        from app.utils.redis_client import cache_get
+        raw = await cache_get("ai_engine:watchlist")
+        if raw:
+            data = json.loads(raw)
+            return {"status": "success", "data": {
+                "scanning": bool(data.get("scanning")),
+                "scanned": data.get("scanned", 0), "universe": data.get("universe", 0),
+                "candidates": data.get("candidates", 0), "last_scan": data.get("updated_at"),
+                "market_regime": data.get("market_regime"),
+            }}
+    except Exception:
+        pass
+    return {"status": "success", "data": {"scanning": False, "scanned": 0, "universe": 0}}
+
+
+# ── AI Loss Post-Mortem & Lessons ─────────────────────────────────────────────
+# Owns the "why did this trade lose, and what do we learn" loop:
+#   1. Pull losing closed trades (with their recorded agent signals + market
+#      context) from the feedback-service.
+#   2. Have the LLM explain the root cause + a reusable failure_mode + the lesson.
+#   3. Persist each post-mortem; aggregate recurring failure modes into "lessons".
+#   4. Cache the active lessons so the AI's decision prompts can consult them next
+#      time (complements the quantitative pattern-memory veto already in the
+#      ensemble).
+
+_FEEDBACK_URL = "http://feedback-service:8012"
+_ACTIVE_LESSONS_KEY = "ai_engine:active_lessons"
+
+_POSTMORTEM_DDL = """
+CREATE TABLE IF NOT EXISTS trade_postmortems (
+    id            SERIAL PRIMARY KEY,
+    trade_key     TEXT UNIQUE,
+    symbol        TEXT,
+    action        TEXT,
+    source        TEXT,
+    pnl_pct       DOUBLE PRECISION,
+    root_cause    TEXT,
+    failure_mode  TEXT,
+    factors       JSONB,
+    lesson        TEXT,
+    avoid_when    TEXT,
+    confidence    DOUBLE PRECISION,
+    created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+"""
+
+
+def _trade_key(t: dict) -> str:
+    return f"{(t.get('symbol') or '').upper()}|{t.get('timestamp_open') or t.get('trade_id') or ''}"
+
+
+def _extract_json(txt) -> dict | None:
+    if not txt:
+        return None
+    import json as _json
+    s = txt.strip()
+    if "```" in s:
+        parts = s.split("```")
+        s = parts[1] if len(parts) >= 2 else s
+        if s.lower().startswith("json"):
+            s = s[4:]
+    a, b = s.find("{"), s.rfind("}")
+    if a == -1 or b <= a:
+        return None
+    try:
+        return _json.loads(s[a:b + 1])
+    except Exception:
+        return None
+
+
+def _rule_postmortem(t: dict) -> dict:
+    """Deterministic fallback explanation when the LLM is unavailable."""
+    mc = t.get("market_context") or {}
+    rsi = mc.get("rsi")
+    regime = mc.get("market_regime") or mc.get("regime")
+    mom = mc.get("momentum_pct") if mc.get("momentum_pct") is not None else mc.get("mom5")
+    factors, fm = [], "Price reversed after entry"
+    act = (t.get("action") or "").upper()
+    if act == "BUY":
+        if isinstance(rsi, (int, float)) and rsi > 70:
+            fm = "Bought overbought (RSI > 70)"; factors.append(f"RSI was {rsi} at entry — little upside left")
+        if regime == "bearish":
+            fm = "Bought against a bearish market"; factors.append("Broad market regime was bearish")
+        if isinstance(mom, (int, float)) and mom < 0:
+            factors.append(f"Momentum was negative ({mom}%) at entry")
+    if not factors:
+        factors = ["The move went against the position after entry"]
+    return {
+        "root_cause": f"{t.get('symbol')} moved against the {act} after entry (P&L {t.get('pnl_pct')}%).",
+        "failure_mode": fm,
+        "factors": factors,
+        "lesson": "Re-check RSI, momentum and market-regime alignment before taking a similar setup.",
+        "avoid_when": fm,
+        "confidence": 0.4,
+    }
+
+
+async def _llm_postmortem(t: dict) -> dict | None:
+    import json as _json
+    from app.utils.llm_client import llm_chat
+    mc = _json.dumps(t.get("market_context") or {})[:700]
+    ag = _json.dumps(t.get("agent_signals") or {})[:700]
+    prompt = f"""A real trade LOST money. Using only the evidence, explain exactly WHY it lost and the lesson to learn.
+
+Trade: {t.get('symbol')} · {t.get('action')} · entry {t.get('entry_price')} → exit {t.get('exit_price')} · P&L {t.get('pnl_pct')}% · held {t.get('duration_minutes')}m · source {t.get('trade_source')}
+Market context at entry: {mc}
+Agent signals at entry: {ag}
+
+Respond with ONLY valid JSON:
+{{"root_cause": str, "failure_mode": "a short reusable category (e.g. 'chased momentum into resistance', 'ignored bearish regime', 'stop too tight')", "factors": [str, ...], "lesson": str, "avoid_when": "the condition to avoid next time", "confidence": number 0..1}}"""
+    try:
+        txt = await llm_chat(prompt, system="You are a precise trading risk analyst. Output only valid JSON.",
+                             temperature=0.2, max_tokens=550, timeout=30.0)
+    except Exception:
+        txt = None
+    parsed = _extract_json(txt)
+    return parsed if parsed and parsed.get("root_cause") else None
+
+
+async def _refresh_active_lessons() -> list[dict]:
+    """Aggregate stored post-mortems into ranked lessons and cache a compact text
+    version for the decision prompts."""
+    from sqlalchemy import text
+    from app.database.postgres import engine
+    lessons: list[dict] = []
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text(_POSTMORTEM_DDL))
+            rows = (await conn.execute(text("""
+                SELECT failure_mode, COUNT(*) AS n, AVG(pnl_pct) AS avg_loss,
+                       MAX(lesson) AS lesson, MAX(avoid_when) AS avoid_when
+                FROM trade_postmortems
+                WHERE failure_mode IS NOT NULL AND failure_mode <> ''
+                GROUP BY failure_mode ORDER BY n DESC, avg_loss ASC LIMIT 12
+            """))).fetchall()
+        for r in rows:
+            lessons.append({
+                "failure_mode": r[0], "occurrences": int(r[1]),
+                "avg_loss_pct": round(float(r[2] or 0), 2),
+                "lesson": r[3], "avoid_when": r[4],
+            })
+    except Exception as exc:
+        logger.warning("lessons aggregation failed: %s", exc)
+    try:
+        from app.utils.redis_client import cache_set
+        if lessons:
+            txt = "LESSONS FROM PAST LOSING TRADES (avoid repeating these):\n" + "\n".join(
+                f"- {l['failure_mode']} ({l['occurrences']}× · avg {l['avg_loss_pct']}%): {l.get('avoid_when') or l.get('lesson') or ''}"
+                for l in lessons[:8])
+            await cache_set(_ACTIVE_LESSONS_KEY, txt, expire=86400 * 14)
+    except Exception:
+        pass
+    return lessons
+
+
+@router.post("/loss-learning/run")
+async def loss_learning_run(limit: int = 60, max_new: int = 15):
+    """Analyse recent losing trades that don't yet have a post-mortem, store the
+    AI explanations, and refresh the aggregated lessons."""
+    import httpx, json as _json
+    from sqlalchemy import text
+    from app.database.postgres import engine
+
+    # 1. Pull losing trades from the feedback-service.
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            r = await c.get(f"{_FEEDBACK_URL}/trades", params={"limit": limit})
+            trades = r.json() if r.status_code == 200 else []
+    except Exception as exc:
+        logger.warning("loss-learning: could not read feedback trades: %s", exc)
+        trades = []
+    losses = [t for t in trades
+              if t.get("outcome") == "LOSS" or (t.get("pnl_pct") is not None and float(t.get("pnl_pct")) < 0)]
+
+    analyzed = 0
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text(_POSTMORTEM_DDL))
+            existing = {row[0] for row in (await conn.execute(text("SELECT trade_key FROM trade_postmortems"))).fetchall()}
+            for t in losses:
+                if analyzed >= max_new:
+                    break
+                key = _trade_key(t)
+                if key in existing:
+                    continue
+                pm = await _llm_postmortem(t) or _rule_postmortem(t)
+                await conn.execute(text("""
+                    INSERT INTO trade_postmortems
+                      (trade_key, symbol, action, source, pnl_pct, root_cause, failure_mode, factors, lesson, avoid_when, confidence)
+                    VALUES (:k,:sym,:act,:src,:pnl,:rc,:fm,:fac,:les,:aw,:conf)
+                    ON CONFLICT (trade_key) DO NOTHING
+                """), {
+                    "k": key, "sym": t.get("symbol"), "act": t.get("action"), "src": t.get("trade_source"),
+                    "pnl": t.get("pnl_pct"), "rc": pm.get("root_cause"), "fm": pm.get("failure_mode"),
+                    "fac": _json.dumps(pm.get("factors") or []), "les": pm.get("lesson"),
+                    "aw": pm.get("avoid_when"), "conf": pm.get("confidence"),
+                })
+                analyzed += 1
+    except Exception as exc:
+        logger.warning("loss-learning persist failed: %s", exc)
+
+    lessons = await _refresh_active_lessons()
+    return {"status": "success", "data": {"losing_trades": len(losses), "newly_analyzed": analyzed, "lessons": len(lessons)}}
+
+
+@router.get("/loss-learning/postmortems")
+async def loss_learning_postmortems(limit: int = 50):
+    """Recent loss post-mortems (why each losing trade lost)."""
+    import json as _json
+    from sqlalchemy import text
+    from app.database.postgres import engine
+    items = []
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text(_POSTMORTEM_DDL))
+            rows = (await conn.execute(text("""
+                SELECT symbol, action, source, pnl_pct, root_cause, failure_mode, factors, lesson, avoid_when, confidence, created_at
+                FROM trade_postmortems ORDER BY created_at DESC LIMIT :lim
+            """), {"lim": max(1, min(limit, 200))})).fetchall()
+        for r in rows:
+            items.append({
+                "symbol": r[0], "action": r[1], "source": r[2], "pnl_pct": r[3],
+                "root_cause": r[4], "failure_mode": r[5],
+                "factors": (_json.loads(r[6]) if isinstance(r[6], str) else r[6]) or [],
+                "lesson": r[7], "avoid_when": r[8], "confidence": r[9],
+                "created_at": r[10].isoformat() if r[10] else None,
+            })
+    except Exception as exc:
+        logger.warning("postmortems read failed: %s", exc)
+    return {"status": "success", "data": {"items": items, "count": len(items)}}
+
+
+@router.get("/loss-learning/lessons")
+async def loss_learning_lessons():
+    """The aggregated lessons the AI has learned from losing trades."""
+    return {"status": "success", "data": {"lessons": await _refresh_active_lessons()}}
 
 
 # ── Scanner post-market signal score (learning feedback) ──────────────────────
@@ -473,6 +775,22 @@ async def set_autopilot(req: AutopilotRequest):
                               json={"mode": mode, "enabled": req.enabled})
     except Exception as exc:
         logger.debug("autopilot control proxy failed: %s", exc)
+    return {"status": "success", "data": await _autopilot_status()}
+
+
+@router.post("/autopilot/reset-cursor")
+async def reset_autopilot_cursor():
+    """Reset the backtest autopilot's next trade date to the last trading day
+    before today (proxied to the autopilot microservice)."""
+    try:
+        import httpx
+        from app.config import settings
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(f"{settings.AUTOPILOT_SERVICE_URL}/backtest/reset-cursor")
+            if r.status_code == 200:
+                return {"status": "success", "data": (r.json().get("data") or {})}
+    except Exception as exc:
+        logger.warning("autopilot reset-cursor proxy failed: %s", exc)
     return {"status": "success", "data": await _autopilot_status()}
 
 

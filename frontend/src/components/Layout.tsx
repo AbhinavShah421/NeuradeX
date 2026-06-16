@@ -5,6 +5,7 @@ import FloatingSystemStatus from './FloatingSystemStatus';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { useAuthStore } from '../stores/authStore';
+import { useScanStore } from '../stores/scanStore';
 import socketService from '../services/socket';
 
 interface LayoutProps {
@@ -66,6 +67,16 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   useEffect(() => {
     document.documentElement.classList.toggle('dark-mode', isDark);
   }, [isDark]);
+
+  // Centralized AI-scan status poll — runs app-wide so every page shares the same
+  // scanning/rescan state (faster cadence while a sweep is live).
+  const scanning = useScanStore(s => s.scanning);
+  const fetchScanStatus = useScanStore(s => s.fetchStatus);
+  useEffect(() => {
+    fetchScanStatus();
+    const t = setInterval(fetchScanStatus, scanning ? 5000 : 15000);
+    return () => clearInterval(t);
+  }, [scanning, fetchScanStatus]);
 
   useEffect(() => {
     const init = async () => {
@@ -376,15 +387,17 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
         )}
 
         <div className="nd-ticker">
-          {INDICES.map(idx => (
-            <div key={idx.name} className="nd-ticker-item">
-              <span className="nd-ticker-name">{idx.name}</span>
-              <span className="nd-ticker-val">{idx.value}</span>
-              <span className={idx.change >= 0 ? 'nd-ticker-up' : 'nd-ticker-dn'}>
-                {idx.change >= 0 ? '+' : ''}{idx.change.toFixed(2)} ({idx.pct}%)
-              </span>
-            </div>
-          ))}
+          <div className="nd-ticker-inner">
+            {INDICES.map(idx => (
+              <div key={idx.name} className="nd-ticker-item">
+                <span className="nd-ticker-name">{idx.name}</span>
+                <span className="nd-ticker-val">{idx.value}</span>
+                <span className={idx.change >= 0 ? 'nd-ticker-up' : 'nd-ticker-dn'}>
+                  {idx.change >= 0 ? '+' : ''}{idx.change.toFixed(2)} ({idx.pct}%)
+                </span>
+              </div>
+            ))}
+          </div>
         </div>
       </header>
 

@@ -320,6 +320,20 @@ const Orders: React.FC = () => {
   const [sortKey,  setSortKey]  = useState<string>('created');
   const [sortDir,  setSortDir]  = useState<'asc' | 'desc'>('desc');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [lessons,     setLessons]     = useState<any[]>([]);
+  const [postmortems, setPostmortems] = useState<any[]>([]);
+  const [lossBusy,    setLossBusy]    = useState(false);
+
+  const runLossLearning = async () => {
+    setLossBusy(true);
+    try {
+      await apiService.runLossLearning();
+      const [l, p] = await Promise.all([apiService.getLossLessons(), apiService.getLossPostmortems(50)]);
+      setLessons(l.data?.lessons ?? []);
+      setPostmortems(p.data?.items ?? []);
+    } catch (e) { console.error('loss-learning failed', e); }
+    finally { setLossBusy(false); }
+  };
 
   // Column filters
   const [showFilters,  setShowFilters]  = useState(false);
@@ -335,11 +349,13 @@ const Orders: React.FC = () => {
   useEffect(() => {
     const load = async () => {
       try {
-        const [statsRes, tradesRes, pmRes, aaRes] = await Promise.allSettled([
+        const [statsRes, tradesRes, pmRes, aaRes, lessRes, pmortemRes] = await Promise.allSettled([
           apiService.getFeedbackStats(),
           apiService.getFeedbackTrades(),
           apiService.getPortfolioMetrics(),
           apiService.getAgentAccuracy(20),
+          apiService.getLossLessons(),
+          apiService.getLossPostmortems(50),
         ]);
         if (statsRes.status === 'fulfilled') setStats(statsRes.value);
         if (tradesRes.status === 'fulfilled') {
@@ -352,6 +368,8 @@ const Orders: React.FC = () => {
         if (aaRes.status === 'fulfilled' && aaRes.value?.agentAccuracy) {
           setAgentAcc(aaRes.value.agentAccuracy as Record<string, AgentMetric>);
         }
+        if (lessRes.status === 'fulfilled') setLessons(lessRes.value?.data?.lessons ?? []);
+        if (pmortemRes.status === 'fulfilled') setPostmortems(pmortemRes.value?.data?.items ?? []);
       } catch (e: any) {
         setError(e.message);
       } finally {
@@ -472,6 +490,71 @@ const Orders: React.FC = () => {
           ))}
         </div>
       )}
+
+      {/* ── AI Loss Learning — why trades lost + lessons applied to future decisions ── */}
+      <div style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 12, padding: '16px 18px', marginBottom: 20 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: lessons.length || postmortems.length ? 12 : 0 }}>
+          <span className="material-icons" style={{ color: 'var(--nd-purple, #a78bfa)' }}>psychology_alt</span>
+          <div style={{ flex: 1, minWidth: 220 }}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--nd-text-1)' }}>AI Loss Learning</div>
+            <div style={{ fontSize: 12, color: 'var(--nd-text-3)', marginTop: 2 }}>
+              The AI explains why losing trades lost, then applies those lessons to future decisions.
+            </div>
+          </div>
+          <button onClick={runLossLearning} disabled={lossBusy}
+            style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px', borderRadius: 8, border: 'none',
+              background: 'var(--nd-purple, #7c3aed)', color: '#fff', fontWeight: 600, fontSize: 13, cursor: lossBusy ? 'wait' : 'pointer' }}>
+            <span className={`material-icons${lossBusy ? ' nd-spin' : ''}`} style={{ fontSize: 17 }}>{lossBusy ? 'autorenew' : 'insights'}</span>
+            {lossBusy ? 'Analysing losses…' : 'Analyse recent losses'}
+          </button>
+        </div>
+
+        {/* Lessons learned */}
+        {lessons.length > 0 && (
+          <div style={{ marginBottom: postmortems.length ? 14 : 0 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--nd-text-3)', letterSpacing: 0.5, marginBottom: 8 }}>LESSONS APPLIED TO FUTURE DECISIONS</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {lessons.map((l: any, i: number) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 10px', background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 8 }}>
+                  <span className="material-icons" style={{ fontSize: 15, color: '#f59e0b' }}>error_outline</span>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--nd-text-1)' }}>{l.failureMode}</div>
+                    <div style={{ fontSize: 11.5, color: 'var(--nd-text-2)', marginTop: 1 }}>{l.avoidWhen || l.lesson}</div>
+                  </div>
+                  <span style={{ fontSize: 11, color: 'var(--nd-text-3)', whiteSpace: 'nowrap' }}>{l.occurrences}× · avg {l.avgLossPct}%</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Recent per-trade post-mortems */}
+        {postmortems.length > 0 && (
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--nd-text-3)', letterSpacing: 0.5, marginBottom: 8 }}>RECENT LOSS POST-MORTEMS</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 280, overflow: 'auto' }}>
+              {postmortems.slice(0, 25).map((p: any, i: number) => (
+                <div key={i} style={{ padding: '8px 10px', background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 8 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
+                    <span style={{ fontWeight: 700, fontFamily: 'monospace', color: 'var(--nd-text-1)' }}>{p.symbol}</span>
+                    <span style={{ fontSize: 10.5, color: ACTION_COLOR[p.action] ?? 'var(--nd-text-3)' }}>{p.action}</span>
+                    <span style={{ fontSize: 11, color: 'var(--nd-red)' }}>{p.pnlPct != null ? `${p.pnlPct}%` : ''}</span>
+                    <span style={{ marginLeft: 'auto', fontSize: 10.5, fontWeight: 700, color: '#f59e0b' }}>{p.failureMode}</span>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: 'var(--nd-text-2)', lineHeight: 1.5 }}>{p.rootCause}</div>
+                  {p.lesson && <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginTop: 2 }}><strong>Lesson:</strong> {p.lesson}</div>}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {!lessons.length && !postmortems.length && !lossBusy && (
+          <div style={{ fontSize: 12.5, color: 'var(--nd-text-3)', marginTop: 10 }}>
+            No post-mortems yet. Click <strong>Analyse recent losses</strong> to have the AI explain why recent losing trades lost and extract lessons.
+          </div>
+        )}
+      </div>
 
       {/* Agent weights */}
       {stats?.agentWeights && (

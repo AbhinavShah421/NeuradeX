@@ -191,6 +191,24 @@ async def _stop_backtest_queue(reason: str = "paper-trading window") -> None:
     logger.info("backtest queue closed (%s): %d sessions stopped", reason, len(queue))
 
 
+async def reset_cursor() -> dict:
+    """Reset the backtest walk so the next trade date is the **last trading day
+    before today**. Any in-flight replay queue is stopped first. Training history
+    (completed_days / last_completed) is preserved — only the walk position moves."""
+    st = await _load_bt_state()
+    for sid in (st.get("queue") or []):
+        await _stop_session(sid)
+    new_cursor = _prev_trading_day(_today())
+    st.update({
+        "cursor": new_cursor,
+        "queue": [], "queue_pending": 0, "queue_total": 0,
+        "queue_date": None, "started_at": None, "days_back": 0,
+    })
+    await _save_bt_state(st)
+    logger.info("backtest autopilot cursor reset → %s", new_cursor)
+    return st
+
+
 # ── Paper autopilot ───────────────────────────────────────────────────────────
 
 async def _do_paper_tick() -> None:

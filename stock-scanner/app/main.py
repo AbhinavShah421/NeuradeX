@@ -39,12 +39,14 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "stock-scanner", **get_state(), "universe": len(UNIVERSE)}
+    st = get_state()
+    return {"status": "ok", "service": "stock-scanner", **st, "universe": st.get("universe") or len(UNIVERSE)}
 
 
 @app.get("/status")
 async def status():
-    return {"status": "success", "data": {**get_state(), "universe": len(UNIVERSE)}}
+    st = get_state()
+    return {"status": "success", "data": {**st, "universe": st.get("universe") or len(UNIVERSE)}}
 
 
 @app.post("/scan")

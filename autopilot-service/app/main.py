@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from .autopilot import paper_loop, backtest_loop, status, set_mode, kick
+from .autopilot import paper_loop, backtest_loop, status, set_mode, kick, reset_cursor
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("autopilot")
@@ -53,4 +53,14 @@ async def control(req: ControlRequest):
     if req.enabled:
         # Start the first queue/tick immediately so the toggle feels instant.
         asyncio.create_task(kick(mode))
+    return {"status": "success", "data": await status()}
+
+
+@app.post("/backtest/reset-cursor")
+async def reset_backtest_cursor():
+    """Reset the backtest 'next trade date' to the last trading day before today."""
+    await reset_cursor()
+    # If backtest is enabled (and in its allowed window), start the new day's
+    # queue right away so the reset feels instant.
+    asyncio.create_task(kick("backtest"))
     return {"status": "success", "data": await status()}

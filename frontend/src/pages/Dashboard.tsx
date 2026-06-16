@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import apiService from '../services/api';
+import ScanControl from '../components/ScanControl';
 
 const inr = (v: number) =>
   `₹${v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -44,6 +45,16 @@ const ExBadge = ({ ex }: { ex: string }) => {
 
 const EX_ALL = 'All';
 
+type SortCol = 'symbol' | 'name' | 'sector' | 'exchange' | 'price' | 'changePct';
+type SortDir = 'asc' | 'desc';
+type ChangeFilter = 'all' | 'gainers' | 'losers';
+
+const SortIcon: React.FC<{ col: SortCol; active: SortCol | null; dir: SortDir }> = ({ col, active, dir }) => (
+  <span style={{ fontSize: 11, marginLeft: 3, color: active === col ? 'var(--nd-accent)' : 'var(--nd-text-3)', verticalAlign: 'middle' }}>
+    {active === col ? (dir === 'asc' ? '▲' : '▼') : '⇅'}
+  </span>
+);
+
 const DirectoryTab: React.FC = () => {
   const [stocks, setStocks]           = useState<StockEntry[]>([]);
   const [total, setTotal]             = useState(0);
@@ -56,6 +67,11 @@ const DirectoryTab: React.FC = () => {
   const [sector, setSector]           = useState('');
   const [exchange, setExchange]       = useState('');
   const [page, setPage]               = useState(1);
+  const [sortCol, setSortCol]         = useState<SortCol | null>(null);
+  const [sortDir, setSortDir]         = useState<SortDir>('asc');
+  const [changeFilter, setChangeFilter] = useState<ChangeFilter>('all');
+  const [priceMin, setPriceMin]       = useState('');
+  const [priceMax, setPriceMax]       = useState('');
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const fetchDirectory = useCallback(async (q: string, sec: string, ex: string, pg: number) => {
@@ -98,10 +114,50 @@ const DirectoryTab: React.FC = () => {
   const chgColor = (v?: number) =>
     v == null ? 'var(--nd-text-3)' : v >= 0 ? 'var(--nd-green)' : 'var(--nd-red)';
 
+  const toggleSort = (col: SortCol) => {
+    if (sortCol === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setSortCol(col); setSortDir('asc'); }
+  };
+
+  const thStyle = (col: SortCol, align: 'left' | 'center' | 'right' = 'left'): React.CSSProperties => ({
+    textAlign: align, cursor: 'pointer', userSelect: 'none',
+    color: sortCol === col ? 'var(--nd-accent)' : undefined,
+    whiteSpace: 'nowrap',
+  });
+
+  const minP = priceMin !== '' ? parseFloat(priceMin) : null;
+  const maxP = priceMax !== '' ? parseFloat(priceMax) : null;
+
+  const displayStocks = [...stocks]
+    .filter(s => {
+      const pi = prices[s.symbol];
+      if (changeFilter === 'gainers' && (pi == null || pi.changePct < 0)) return false;
+      if (changeFilter === 'losers'  && (pi == null || pi.changePct >= 0)) return false;
+      if (minP != null && (pi == null || pi.price < minP)) return false;
+      if (maxP != null && (pi == null || pi.price > maxP)) return false;
+      return true;
+    })
+    .sort((a, b) => {
+      if (!sortCol) return 0;
+      const pa = prices[a.symbol], pb = prices[b.symbol];
+      let va: any, vb: any;
+      if (sortCol === 'price')     { va = pa?.price ?? -Infinity; vb = pb?.price ?? -Infinity; }
+      else if (sortCol === 'changePct') { va = pa?.changePct ?? -Infinity; vb = pb?.changePct ?? -Infinity; }
+      else if (sortCol === 'symbol')   { va = a.symbol;   vb = b.symbol; }
+      else if (sortCol === 'name')     { va = a.name;     vb = b.name; }
+      else if (sortCol === 'sector')   { va = a.sector;   vb = b.sector; }
+      else if (sortCol === 'exchange') { va = a.exchange; vb = b.exchange; }
+      if (va < vb) return sortDir === 'asc' ? -1 : 1;
+      if (va > vb) return sortDir === 'asc' ? 1 : -1;
+      return 0;
+    });
+
+  const hasFilters = changeFilter !== 'all' || priceMin !== '' || priceMax !== '';
+
   return (
     <div>
-      {/* Filters row */}
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 14 }}>
+      {/* Filters row 1: search + sector + exchange */}
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 8 }}>
         {/* Search */}
         <div style={{ position: 'relative', flex: '1 1 220px', maxWidth: 280 }}>
           <span className="material-icons" style={{ position: 'absolute', left: 8, top: '50%', transform: 'translateY(-50%)', fontSize: 16, color: 'var(--nd-text-3)', pointerEvents: 'none' }}>search</span>
@@ -145,8 +201,54 @@ const DirectoryTab: React.FC = () => {
         </div>
 
         <span style={{ fontSize: 12, color: 'var(--nd-text-3)', marginLeft: 'auto' }}>
-          {total} stocks
+          {displayStocks.length !== stocks.length
+            ? <>{displayStocks.length} <span style={{ opacity: 0.6 }}>of {total}</span></>
+            : <>{total}</>} stocks
         </span>
+      </div>
+
+      {/* Filters row 2: price range + change direction */}
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
+        {/* Price range */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <span style={{ fontSize: 11, color: 'var(--nd-text-3)', whiteSpace: 'nowrap' }}>Price ₹</span>
+          <input
+            type="number" min={0} value={priceMin} onChange={e => setPriceMin(e.target.value)}
+            placeholder="Min"
+            style={{ width: 72, fontSize: 12, padding: '5px 8px', borderRadius: 7, border: '1px solid var(--nd-border)', background: 'var(--nd-surface)', color: 'var(--nd-text-1)', outline: 'none' }}
+          />
+          <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>–</span>
+          <input
+            type="number" min={0} value={priceMax} onChange={e => setPriceMax(e.target.value)}
+            placeholder="Max"
+            style={{ width: 72, fontSize: 12, padding: '5px 8px', borderRadius: 7, border: '1px solid var(--nd-border)', background: 'var(--nd-surface)', color: 'var(--nd-text-1)', outline: 'none' }}
+          />
+        </div>
+
+        {/* Change direction toggle */}
+        <div style={{ display: 'flex', borderRadius: 8, overflow: 'hidden', border: '1px solid var(--nd-border)' }}>
+          {(['all', 'gainers', 'losers'] as ChangeFilter[]).map(cf => (
+            <button key={cf} onClick={() => setChangeFilter(cf)}
+              style={{
+                padding: '5px 12px', fontSize: 12, fontWeight: 500, cursor: 'pointer', border: 'none',
+                background: changeFilter === cf
+                  ? (cf === 'gainers' ? 'var(--nd-green)' : cf === 'losers' ? 'var(--nd-red)' : 'var(--nd-accent)')
+                  : 'var(--nd-surface)',
+                color: changeFilter === cf ? '#fff' : 'var(--nd-text-2)',
+                transition: 'all 0.15s',
+              }}>
+              {cf === 'all' ? 'All' : cf === 'gainers' ? '▲ Gainers' : '▼ Losers'}
+            </button>
+          ))}
+        </div>
+
+        {/* Clear filters */}
+        {(hasFilters || sortCol) && (
+          <button onClick={() => { setChangeFilter('all'); setPriceMin(''); setPriceMax(''); setSortCol(null); setSortDir('asc'); }}
+            style={{ fontSize: 11, padding: '5px 10px', borderRadius: 7, border: '1px solid var(--nd-border)', background: 'var(--nd-surface)', color: 'var(--nd-text-3)', cursor: 'pointer' }}>
+            Clear
+          </button>
+        )}
       </div>
 
       {/* Table */}
@@ -155,12 +257,24 @@ const DirectoryTab: React.FC = () => {
           <thead>
             <tr>
               <th style={{ width: 40, textAlign: 'center' }}>#</th>
-              <th>Symbol</th>
-              <th>Company</th>
-              <th>Sector</th>
-              <th style={{ textAlign: 'center' }}>Exchange</th>
-              <th style={{ textAlign: 'right' }}>Price</th>
-              <th style={{ textAlign: 'right' }}>Change %</th>
+              <th style={thStyle('symbol')} onClick={() => toggleSort('symbol')}>
+                Symbol <SortIcon col="symbol" active={sortCol} dir={sortDir} />
+              </th>
+              <th style={thStyle('name')} onClick={() => toggleSort('name')}>
+                Company <SortIcon col="name" active={sortCol} dir={sortDir} />
+              </th>
+              <th style={thStyle('sector')} onClick={() => toggleSort('sector')}>
+                Sector <SortIcon col="sector" active={sortCol} dir={sortDir} />
+              </th>
+              <th style={thStyle('exchange', 'center')} onClick={() => toggleSort('exchange')}>
+                Exchange <SortIcon col="exchange" active={sortCol} dir={sortDir} />
+              </th>
+              <th style={thStyle('price', 'right')} onClick={() => toggleSort('price')}>
+                Price <SortIcon col="price" active={sortCol} dir={sortDir} />
+              </th>
+              <th style={thStyle('changePct', 'right')} onClick={() => toggleSort('changePct')}>
+                Change % <SortIcon col="changePct" active={sortCol} dir={sortDir} />
+              </th>
               <th style={{ textAlign: 'center' }}>Action</th>
             </tr>
           </thead>
@@ -172,15 +286,15 @@ const DirectoryTab: React.FC = () => {
                   Loading stocks…
                 </td>
               </tr>
-            ) : stocks.length === 0 ? (
+            ) : displayStocks.length === 0 ? (
               <tr>
                 <td colSpan={8} style={{ textAlign: 'center', padding: 40, color: 'var(--nd-text-3)' }}>
                   No stocks found. Try adjusting your filters.
                 </td>
               </tr>
-            ) : stocks.map((s, idx) => {
+            ) : displayStocks.map((s, idx) => {
               const pi  = prices[s.symbol];
-              const row = (page - 1) * 50 + idx + 1;
+              const row = sortCol ? idx + 1 : (page - 1) * 50 + idx + 1;
               return (
                 <tr key={s.symbol}
                   onMouseEnter={e => (e.currentTarget.style.background = 'var(--nd-bg)')}
@@ -413,6 +527,10 @@ const AutopilotBanner: React.FC = () => {
     setBusy(mode);
     try { const r = await apiService.setAutopilot(next, mode); setAp((r as any).data); } catch {} finally { setBusy(null); }
   };
+  const resetCursor = async () => {
+    setBusy('reset');
+    try { const r = await apiService.resetBacktestCursor(); setAp((r as any).data); } catch {} finally { setBusy(null); }
+  };
   if (!ap) return null;
   const paper = ap.paper ?? {};
   const bt = ap.backtest ?? {};
@@ -447,6 +565,21 @@ const AutopilotBanner: React.FC = () => {
         on={!!paper.enabled} busy={busy === 'paper'} onToggle={() => toggle('paper', !paper.enabled)} />
       <APRow icon="history" title="Backtest (1× replay)" desc={btDesc}
         on={!!bt.enabled} busy={busy === 'backtest'} onToggle={() => toggle('backtest', !bt.enabled)} />
+      {/* Next trade date + reset */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 0 0 30px', flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 11.5, color: 'var(--nd-text-3)' }}>
+          Next trade date:&nbsp;
+          <strong style={{ color: 'var(--nd-text-2)', fontFamily: 'monospace' }}>{bt.cursor ?? '—'}</strong>
+        </span>
+        <button onClick={resetCursor} disabled={busy === 'reset'}
+          title="Reset the backtest walk to the last trading day before today"
+          style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px', borderRadius: 6,
+            border: '1px solid var(--nd-border)', background: 'var(--nd-surface)',
+            color: 'var(--nd-text-2)', cursor: busy === 'reset' ? 'wait' : 'pointer', fontSize: 11, fontWeight: 600 }}>
+          <span className="material-icons" style={{ fontSize: 13 }}>{busy === 'reset' ? 'hourglass_top' : 'restart_alt'}</span>
+          {busy === 'reset' ? 'Resetting…' : 'Reset to last trading day'}
+        </button>
+      </div>
     </div>
   );
 };
@@ -500,12 +633,6 @@ const ACTION_BG: Record<string, string> = { BUY: '#22c55e', SELL: '#ef4444', HOL
 const GRADE_COLOR: Record<string, string> = { A: '#22c55e', B: '#3b82f6', C: '#f59e0b', D: '#94a3b8' };
 // Hold-cap presets (minutes) for inline auto-trading of a watchlist stock
 const HOLD_CAPS = [15, 30, 60, 0] as const;   // 0 = no cap
-
-const fmtDateTime = (s?: string): string => {
-  if (!s) return '';
-  const d = new Date(s);
-  return `${d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}, ${d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}`;
-};
 
 const SignalScorePanel: React.FC<{ ev: any }> = ({ ev }) => {
   const [open, setOpen] = useState(false);
@@ -630,7 +757,6 @@ const AiWatchlistTab: React.FC = () => {
   const [data, setData]         = useState<any>(null);
   const [evalData, setEvalData] = useState<any>(null);
   const [sel, setSel]           = useState<any>(null);
-  const [scanning, setScanning] = useState(false);
   const [tab, setTab]           = useState<'intraday' | 'delivery' | 'fno'>('intraday');
   const [holdCap, setHoldCap]   = useState<number>(30);     // per-trade hold cap (min)
   const [tradingSym, setTradingSym] = useState<string | null>(null);
@@ -655,12 +781,6 @@ const AiWatchlistTab: React.FC = () => {
   }, []);
   useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, [load]);
 
-  const rescan = async () => {
-    setScanning(true);
-    try { await apiService.scanWatchlist(); setTimeout(() => { load(); setScanning(false); }, 35000); }
-    catch { setScanning(false); }
-  };
-
   const intraday: any[] = data?.intraday ?? data?.items ?? [];
   const delivery: any[] = data?.delivery ?? [];
   const fno: any[]      = data?.fno ?? [];
@@ -675,17 +795,9 @@ const AiWatchlistTab: React.FC = () => {
 
   return (
     <div>
-      {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
-        <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>
-          AI scan of {data?.scanned ?? 0}/{data?.universe ?? 0} stocks
-          {data?.updatedAt ? ` · ${fmtDateTime(data.updatedAt)} IST` : ''}
-        </div>
-        <button onClick={rescan} disabled={scanning}
-          style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '5px 12px', borderRadius: 8, border: '1px solid var(--nd-border)', background: 'var(--nd-surface)', cursor: scanning ? 'wait' : 'pointer', fontSize: 12, color: 'var(--nd-text-2)' }}>
-          <span className="material-icons" style={{ fontSize: 15 }}>{scanning ? 'hourglass_top' : 'refresh'}</span>
-          {scanning ? 'Scanning…' : 'Rescan'}
-        </button>
+      {/* Header — centralized scan status + rescan */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
+        <ScanControl align="right" />
       </div>
 
       <SignalScorePanel ev={evalData} />
@@ -828,7 +940,7 @@ const AiWatchlistTab: React.FC = () => {
             {Math.round(activeItems.reduce((s: number, i: any) => s + (i.deliveryWeeks || 0), 0) / activeItems.length)} wks
           </strong></span>
           <span>All in uptrend: <strong style={{ color: 'var(--nd-green)' }}>
-            {activeItems.filter((i: any) => i.metrics?.smaTrend === 'bullish').length}/{activeItems.length}
+            {activeItems.filter((i: any) => i.metrics?.smaTrend === 'up').length}/{activeItems.length}
           </strong></span>
         </div>
       )}

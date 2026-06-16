@@ -54,9 +54,23 @@ Dashboard mounts
 - Click any stock → navigate to `/stocks/:symbol`
 
 ### Tab 2: All Stocks Directory
-- Searchable, filterable, paginated table
-- Columns: Symbol, Company, Sector, Price, Change%, Volume
+- Searchable, filterable, sortable, paginated table
+- Columns: Symbol, Company, Sector, Exchange, Price, Change %, Action
 - Batch price fetch for visible page only (performance optimization)
+
+**Server-side filters** (re-query + reset to page 1): free-text search (symbol/name),
+sector dropdown, and an All / NSE / BSE exchange toggle.
+
+**Client-side sort & filter** (applied to the loaded page — prices are fetched
+separately from the symbol metadata, so these operate over the current page):
+
+- **Column sorting** — click any header (Symbol, Company, Sector, Exchange, Price,
+  Change %) to toggle ascending/descending; the header shows a ⇅ / ▲ / ▼ indicator.
+- **Price range** — Min / Max ₹ inputs.
+- **Change direction** — All / ▲ Gainers / ▼ Losers toggle.
+- **Clear** — resets the active sort and the price/direction filters at once.
+
+When a client-side filter narrows the page, the stock count reads `N of total`.
 
 ## State
 

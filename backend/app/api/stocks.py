@@ -288,6 +288,24 @@ async def get_stock_directory(
     }
 
 
+@router.get("/directory/symbols")
+async def get_directory_symbols(tradable_only: bool = True):
+    """The complete stock master as a flat symbol list — used by the stock-scanner
+    as its scan universe (single source of truth with the 'All Stocks' directory).
+
+    tradable_only keeps only NSE-listed names (exchange NSE or BOTH), since the
+    live market-data feed is NSE.
+    """
+    items = STOCKS_DEDUPED
+    if tradable_only:
+        items = [s for s in items if s.get("exchange") in ("NSE", "BOTH")]
+    return {
+        "status": "success",
+        "total": len(items),
+        "data": [{"symbol": s["symbol"], "name": s["name"], "exchange": s["exchange"]} for s in items],
+    }
+
+
 class PricesRequest(BaseModel):
     symbols: list[str]
 

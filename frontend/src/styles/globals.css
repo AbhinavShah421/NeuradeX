@@ -172,9 +172,15 @@ body {
 .nd-theme-btn .material-icons { font-size: 17px; }
 
 /* ── Market ticker strip ────────────────────────────────────────────────────── */
+/* Full-width bar (border + background), but its content is constrained to the
+   same max-width container as the header nav and main, so it lines up. */
 .nd-ticker {
   border-top: 1px solid var(--nd-border);
   background: var(--nd-surface);
+}
+.nd-ticker-inner {
+  max-width: 1280px;
+  margin: 0 auto;
   padding: 5px 24px;
   display: flex;
   justify-content: center;
@@ -182,7 +188,7 @@ body {
   overflow-x: auto;
   scrollbar-width: none;
 }
-.nd-ticker::-webkit-scrollbar { display: none; }
+.nd-ticker-inner::-webkit-scrollbar { display: none; }
 
 .nd-ticker-item {
   display: flex;
@@ -792,7 +798,7 @@ body.nd-chart-fullscreen-open { overflow: hidden; }
   .nd-main { padding: 16px 12px; }
 
   /* Ticker */
-  .nd-ticker { justify-content: flex-start; gap: 16px; padding: 5px 12px; }
+  .nd-ticker-inner { justify-content: flex-start; gap: 16px; padding: 5px 12px; }
 
   /* Responsive grids */
   .nd-grid-4       { grid-template-columns: repeat(2, 1fr); }

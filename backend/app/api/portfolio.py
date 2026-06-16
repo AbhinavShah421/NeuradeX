@@ -2,9 +2,13 @@
 Portfolio API Routes — backed by Groww holdings/positions with simulation fallback.
 """
 
+import asyncio
+import json
+import os
 import random
 from datetime import datetime
 
+import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -13,6 +17,60 @@ from app.utils.elk_logger import get_logger
 
 logger = get_logger(__name__)
 router = APIRouter()
+
+# ── Yahoo live-price fallback ─────────────────────────────────────────────────
+# Groww's /live-data/ltp needs the paid Live-Data entitlement; when it's not
+# available the holdings would otherwise show current = avg (0 P&L). Yahoo gives
+# near-real-time NSE prices for free, so we use it to fill any symbol Groww
+# couldn't price — the same source the scanner and live sessions already use.
+_YH_BASE = "https://query1.finance.yahoo.com/v8/finance/chart/"
+_YH_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "application/json",
+}
+
+
+async def _yahoo_quote(client: httpx.AsyncClient, symbol: str) -> dict | None:
+    """Return {'ltp': price, 'prev_close': previous-day close} for an NSE symbol."""
+    try:
+        r = await client.get(_YH_BASE + f"{symbol}.NS",
+                             params={"interval": "1d", "range": "5d"}, headers=_YH_HEADERS)
+        if r.status_code != 200:
+            return None
+        res = (r.json().get("chart", {}).get("result") or [None])[0]
+        if not res:
+            return None
+        meta = res.get("meta") or {}
+        ltp = meta.get("regularMarketPrice")
+        # previousClose = the actual prior-day close (for the 1D return).
+        # chartPreviousClose is the close before the requested range, so it's only
+        # a last resort (it would overstate the day change).
+        prev = meta.get("previousClose") or meta.get("chartPreviousClose")
+        if not (ltp and float(ltp) > 0):
+            q = (res.get("indicators", {}).get("quote") or [{}])[0]
+            closes = [c for c in (q.get("close") or []) if c]
+            if not closes:
+                return None
+            ltp = closes[-1]
+            if prev is None and len(closes) >= 2:
+                prev = closes[-2]
+        return {"ltp": float(ltp), "prev_close": float(prev) if prev else None}
+    except Exception:
+        return None
+
+
+async def _yahoo_quote_map(symbols: list[str]) -> dict:
+    """{symbol: {'ltp', 'prev_close'}} fetched from Yahoo concurrently."""
+    out: dict = {}
+    sem = asyncio.Semaphore(8)
+    async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
+        async def one(s: str) -> None:
+            async with sem:
+                q = await _yahoo_quote(client, s)
+                if q:
+                    out[s] = q
+        await asyncio.gather(*(one(s) for s in symbols))
+    return out
 
 # Fallback data — user's real Groww holdings approximated from last known weights.
 # Used when the Groww API session is not yet TOTP-approved.
@@ -44,12 +102,14 @@ class Alert(BaseModel):
     enabled: bool
 
 
-def _build_portfolio(holdings: list, ltp_map: dict) -> dict:
+def _build_portfolio(holdings: list, ltp_map: dict, prev_map: dict | None = None) -> dict:
     """
     Build portfolio dict from Groww holdings + a symbol→LTP map.
     Groww holdings endpoint returns only: trading_symbol, quantity, average_price.
-    Current prices must come from a separate LTP call.
+    Current prices come from a separate LTP call (Groww live-data, else Yahoo).
+    prev_map: optional {symbol: previous-day close} → used for the 1D return.
     """
+    prev_map = prev_map or {}
     stocks = []
     for h in holdings:
         symbol = h.get("trading_symbol", h.get("symbol", ""))
@@ -64,6 +124,9 @@ def _build_portfolio(holdings: list, ltp_map: dict) -> dict:
             # Last resort: use avg price (shows 0 gain, clearly wrong rather than misleadingly random)
             current = purchase
 
+        prev_close = prev_map.get(symbol)
+        day_change = round((current - float(prev_close)) * qty, 2) if prev_close else 0.0
+
         value = round(current * qty, 2)
         gain = round((current - purchase) * qty, 2)
         gain_pct = round(((current - purchase) / purchase) * 100, 2) if purchase else 0.0
@@ -75,17 +138,23 @@ def _build_portfolio(holdings: list, ltp_map: dict) -> dict:
             "value": value,
             "gain": gain,
             "gain_percent": gain_pct,
+            "day_change": day_change,
         })
 
     total_value = round(sum(s["value"] for s in stocks), 2)
     total_gain = round(sum(s["gain"] for s in stocks), 2)
     total_invested = round(sum(s["purchase_price"] * s["quantity"] for s in stocks), 2)
     gain_pct = round((total_gain / total_invested) * 100, 2) if total_invested else 0.0
+    day_change = round(sum(s["day_change"] for s in stocks), 2)
+    prev_value = total_value - day_change
+    day_change_pct = round((day_change / prev_value) * 100, 2) if prev_value else 0.0
     return {
         "total_value": total_value,
         "total_invested": total_invested,
         "total_gain": total_gain,
         "gain_percent": gain_pct,
+        "day_change": day_change,
+        "day_change_percent": day_change_pct,
         "stocks": stocks,
         "cash_available": round(random.uniform(5000, 50000), 2),
         "updated_at": datetime.now().isoformat(),
@@ -140,7 +209,34 @@ async def get_portfolio():
                             extra={"log_type": "portfolio_event", "event": "ltp_fallback", "error": str(ltp_err)},
                         )
 
-                return {"status": "success", "data": _build_portfolio(raw, ltp_map)}
+                    # Groww live-data is entitlement-gated. Fetch Yahoo quotes for
+                    # all holdings to (a) fill any price Groww couldn't return so
+                    # current values are real instead of collapsing to the average,
+                    # and (b) get each previous close for the 1D return.
+                    prev_map: dict = {}
+                    try:
+                        yq = await _yahoo_quote_map(symbols)
+                        filled = 0
+                        for s in symbols:
+                            q = yq.get(s)
+                            if not q:
+                                continue
+                            if q.get("prev_close"):
+                                prev_map[s] = q["prev_close"]
+                            if not (ltp_map.get(f"NSE_{s}") or ltp_map.get(f"BSE_{s}")) and q.get("ltp"):
+                                ltp_map[f"NSE_{s}"] = q["ltp"]
+                                filled += 1
+                        logger.info(
+                            "Yahoo quotes: priced %d holdings, %d prev-closes",
+                            filled, len(prev_map),
+                            extra={"log_type": "portfolio_event", "event": "yahoo_quote_fallback",
+                                   "filled": filled, "prev_closes": len(prev_map)},
+                        )
+                    except Exception as yh_err:
+                        logger.warning("Yahoo quote fallback failed: %s", yh_err,
+                                       extra={"log_type": "portfolio_event", "event": "yahoo_quote_error"})
+
+                return {"status": "success", "data": _build_portfolio(raw, ltp_map, prev_map)}
         except Exception as e:
             logger.warning(
                 "Groww holdings fetch failed, using simulation",
@@ -153,6 +249,596 @@ async def get_portfolio():
         [{"trading_symbol": h["symbol"], "quantity": h["quantity"], "average_price": h["average_price"]} for h in SIM_HOLDINGS],
         sim_ltp,
     )}
+
+
+# ── AI Portfolio Optimizer ────────────────────────────────────────────────────
+# Flow: real holdings (live prices/P&L) → per-holding AI signal from live daily
+# indicators → portfolio risk (concentration/sector/losers) → higher-conviction
+# opportunities from the AI scanner watchlist → LLM (Claude) synthesises a
+# structured rebalancing plan. A deterministic rule engine produces the same
+# shape as a fallback, so the feature works even with the LLM disabled.
+
+def _sma(vals: list[float], n: int) -> float:
+    if not vals:
+        return 0.0
+    return sum(vals[-n:]) / min(n, len(vals))
+
+
+def _rsi(closes: list[float], period: int = 14) -> float:
+    if len(closes) < period + 1:
+        return 50.0
+    gains = losses = 0.0
+    for i in range(len(closes) - period, len(closes)):
+        ch = closes[i] - closes[i - 1]
+        if ch >= 0:
+            gains += ch
+        else:
+            losses -= ch
+    if losses == 0:
+        return 100.0
+    rs = (gains / period) / (losses / period)
+    return round(100 - 100 / (1 + rs), 1)
+
+
+async def _daily_series(client: httpx.AsyncClient, symbol: str) -> dict | None:
+    try:
+        r = await client.get(_YH_BASE + f"{symbol}.NS",
+                             params={"interval": "1d", "range": "6mo"}, headers=_YH_HEADERS)
+        if r.status_code != 200:
+            return None
+        res = (r.json().get("chart", {}).get("result") or [None])[0]
+        if not res:
+            return None
+        q = (res.get("indicators", {}).get("quote") or [{}])[0]
+        closes = [c for c in (q.get("close") or []) if c]
+        highs = [h for h in (q.get("high") or []) if h]
+        lows = [l for l in (q.get("low") or []) if l]
+        return {"closes": closes, "highs": highs, "lows": lows} if len(closes) >= 20 else None
+    except Exception:
+        return None
+
+
+def _holding_signal(series: dict) -> dict:
+    closes, highs, lows = series["closes"], series["highs"], series["lows"]
+    price = closes[-1]
+    sma20, sma50 = _sma(closes, 20), _sma(closes, 50)
+    rsi = _rsi(closes)
+    mom = (closes[-1] - closes[-10]) / closes[-10] * 100 if len(closes) >= 10 else 0.0
+    atr = (sum(highs[i] - lows[i] for i in range(len(closes) - 14, len(closes))) / 14
+           if len(closes) >= 14 and len(highs) >= 14 and len(lows) >= 14 else 0.0)
+    atr_pct = round(atr / price * 100, 2) if price else 0.0
+    up = price > sma20 and sma20 >= sma50
+    down = price < sma20 and sma20 < sma50
+    if up and mom > 0 and rsi < 72:
+        signal = "bullish"
+    elif down or mom < -3 or rsi > 82:
+        signal = "bearish"
+    else:
+        signal = "neutral"
+    health = 50 + (15 if up else (-15 if down else 0)) + max(-15, min(15, mom * 1.5)) \
+        + (10 if 45 <= rsi <= 65 else (-8 if (rsi > 75 or rsi < 30) else 0))
+    return {
+        "signal": signal,
+        "health": int(max(0, min(100, round(health)))),
+        "rsi": rsi,
+        "momentum_pct": round(mom, 2),
+        "atr_pct": atr_pct,
+        "sma_trend": "up" if sma20 >= sma50 else "down",
+    }
+
+
+def _portfolio_risk(stocks: list[dict]) -> dict:
+    tv = sum(s["value"] for s in stocks) or 1.0
+    weights = [(s["symbol"], s["value"] / tv) for s in stocks]
+    top_sym, top_w = max(weights, key=lambda x: x[1])
+    hhi = round(sum(w * w for _, w in weights), 4)              # Herfindahl concentration (1 = single stock)
+    sect: dict = {}
+    for s in stocks:
+        sect[s.get("sector", "Other")] = sect.get(s.get("sector", "Other"), 0.0) + s["value"] / tv * 100
+    top_sector, top_sector_pct = max(sect.items(), key=lambda x: x[1]) if sect else ("—", 0.0)
+    losers = sum(1 for s in stocks if s.get("gain_percent", 0) < 0)
+    return {
+        "holdings": len(stocks),
+        "top_symbol": top_sym,
+        "top_weight_pct": round(top_w * 100, 1),
+        "hhi": hhi,
+        "effective_holdings": round(1 / hhi, 1) if hhi else len(stocks),
+        "top_sector": top_sector,
+        "top_sector_pct": round(top_sector_pct, 1),
+        "losers": losers,
+        "sector_breakdown": {k: round(v, 1) for k, v in sorted(sect.items(), key=lambda x: -x[1])},
+    }
+
+
+async def _ai_opportunities(held: set) -> list[dict]:
+    """Top-graded BUY names from the live AI scanner watchlist that aren't held."""
+    try:
+        from app.utils.redis_client import cache_get
+        raw = await cache_get("ai_engine:watchlist")
+        items = json.loads(raw).get("items", []) if raw else []
+    except Exception:
+        items = []
+    out = []
+    for it in items:
+        sym = (it.get("symbol") or "").upper()
+        if not sym or sym in held:
+            continue
+        if it.get("grade") in ("A", "B") and it.get("action") == "BUY":
+            out.append({
+                "symbol": sym, "name": it.get("name", sym),
+                "grade": it.get("grade"), "action": it.get("action"),
+                "win_probability": it.get("win_probability"),
+                "price": it.get("price"),
+                "reasoning": (it.get("reasoning") or "")[:160],
+            })
+    return out[:10]
+
+
+def _action_reason(action: str, sig: str, pnl: float, weight_pct: float) -> str:
+    if action == "EXIT":
+        return f"AI signal {sig}, down {pnl:.1f}% — cut a losing position the model no longer favours."
+    if action == "TRIM":
+        if weight_pct > 18:
+            return f"Oversized at {weight_pct:.0f}% of the book — trim to cap single-name risk."
+        return f"AI signal {sig} — reduce exposure while the setup is weak."
+    if action == "ADD":
+        return f"AI signal {sig}, up {pnl:.1f}% and underweight — let a working position run."
+    return f"AI signal {sig} — hold; no change warranted."
+
+
+def _baseline_plan(stocks: list[dict], signals: dict, risk: dict, opps: list[dict]) -> dict:
+    tv = sum(s["value"] for s in stocks) or 1.0
+    rows = []
+    for s in stocks:
+        w = s["value"] / tv
+        wp = w * 100
+        sig = signals.get(s["symbol"], {}).get("signal", "neutral")
+        pnl = s.get("gain_percent", 0.0)
+        if sig == "bearish" and pnl < -8:
+            act, f = "EXIT", 0.0
+        elif wp > 18:
+            act, f = "TRIM", 0.6
+        elif sig == "bearish":
+            act, f = "TRIM", 0.7
+        elif sig == "bullish" and wp < 8 and pnl >= 0:
+            act, f = "ADD", 1.4
+        else:
+            act, f = "HOLD", 1.0
+        rows.append((s, w, f, act, sig, pnl, wp))
+
+    raw_targets = {s["symbol"]: w * f for (s, w, f, *_rest) in rows}
+    tot = sum(raw_targets.values()) or 1.0
+    actions = []
+    for (s, w, f, act, sig, pnl, wp) in rows:
+        actions.append({
+            "symbol": s["symbol"],
+            "action": act,
+            "current_weight_pct": round(wp, 1),
+            "target_weight_pct": round(raw_targets[s["symbol"]] / tot * 100, 1),
+            "reason": _action_reason(act, sig, pnl, wp),
+        })
+    add_c = [{
+        "symbol": o["symbol"],
+        "suggested_weight_pct": 5.0,
+        "reason": f"AI watchlist grade {o.get('grade')} BUY"
+                  + (f" · {int((o.get('win_probability') or 0) * 100)}% win prob" if o.get("win_probability") else ""),
+    } for o in opps[:3]]
+
+    warnings = []
+    if risk["top_weight_pct"] > 20:
+        warnings.append(f"Concentration: {risk['top_symbol']} is {risk['top_weight_pct']:.0f}% of the portfolio.")
+    if risk["top_sector_pct"] > 40:
+        warnings.append(f"Sector skew: {risk['top_sector']} is {risk['top_sector_pct']:.0f}% of the book.")
+    if risk["losers"] >= max(1, int(risk["holdings"] * 0.6)):
+        warnings.append(f"{risk['losers']} of {risk['holdings']} holdings are underwater.")
+
+    n_exit = sum(1 for a in actions if a["action"] == "EXIT")
+    n_trim = sum(1 for a in actions if a["action"] == "TRIM")
+    n_add = sum(1 for a in actions if a["action"] == "ADD")
+    return {
+        "summary": f"{n_exit} exit, {n_trim} trim and {n_add} add suggestions across {len(stocks)} holdings, "
+                   f"with {len(add_c)} new high-conviction candidates from the AI scanner.",
+        "objective": "Cut weak/oversized positions, rotate into higher-conviction AI picks, and reduce concentration.",
+        "actions": actions,
+        "add_candidates": add_c,
+        "risk_warnings": warnings,
+        "expected_effect": "Lower single-name and sector concentration; tilt the book toward names the AI rates BUY.",
+    }
+
+
+def _parse_llm_json(text: str | None) -> dict | None:
+    if not text:
+        return None
+    t = text.strip()
+    if "```" in t:                                   # strip code fences
+        t = t.split("```")[1] if t.count("```") >= 2 else t
+        t = t.replace("json", "", 1).strip() if t.lower().startswith("json") else t
+    a, b = t.find("{"), t.rfind("}")
+    if a == -1 or b == -1 or b <= a:
+        return None
+    try:
+        obj = json.loads(t[a:b + 1])
+        return obj if isinstance(obj, dict) and obj.get("actions") else None
+    except Exception:
+        return None
+
+
+def _optimize_prompt(stocks: list[dict], signals: dict, risk: dict, opps: list[dict],
+                     total_value: float, gain_pct: float) -> str:
+    rows = "SYMBOL | SECTOR | WEIGHT% | P&L% | DAY% | AI SIGNAL | HEALTH | RSI | TREND | MOM%\n"
+    tv = sum(s["value"] for s in stocks) or 1.0
+    for s in stocks:
+        sg = signals.get(s["symbol"], {})
+        rows += (f"{s['symbol']} | {s.get('sector','Other')} | {s['value']/tv*100:.1f} | "
+                 f"{s.get('gain_percent',0):+.1f} | {round((s.get('day_change',0)/ (s['value'] or 1))*100,2):+.2f} | "
+                 f"{sg.get('signal','?')} | {sg.get('health','?')} | {sg.get('rsi','?')} | "
+                 f"{sg.get('sma_trend','?')} | {sg.get('momentum_pct','?')}\n")
+    opp_rows = "\n".join(
+        f"- {o['symbol']} ({o.get('grade')} BUY, "
+        f"{int((o.get('win_probability') or 0)*100)}% win prob): {o.get('reasoning','')}"
+        for o in opps) or "- (none surfaced right now)"
+    return f"""You are an expert Indian-equity (NSE) portfolio manager. Optimise this REAL portfolio.
+
+PORTFOLIO: value ₹{total_value:,.0f}, total return {gain_pct:+.1f}%, {risk['holdings']} holdings.
+CONCENTRATION: largest = {risk['top_symbol']} at {risk['top_weight_pct']:.0f}%; effective holdings ≈ {risk['effective_holdings']}; top sector = {risk['top_sector']} at {risk['top_sector_pct']:.0f}%; {risk['losers']} underwater.
+
+HOLDINGS (with live AI signals):
+{rows}
+HIGHER-CONVICTION OPPORTUNITIES (live AI scanner, not currently held):
+{opp_rows}
+
+Decide an action for EVERY holding (EXIT / TRIM / HOLD / ADD) and propose target weights that sum to ~100%. Favour trimming oversized or AI-bearish names, holding/adding AI-bullish ones, and rotating freed capital into the opportunities. Long-only.
+
+Respond with ONLY valid JSON (no prose, no code fence) in this exact schema:
+{{"summary": str, "objective": str,
+ "actions": [{{"symbol": str, "action": "EXIT|TRIM|HOLD|ADD", "current_weight_pct": number, "target_weight_pct": number, "reason": str}}],
+ "add_candidates": [{{"symbol": str, "suggested_weight_pct": number, "reason": str}}],
+ "risk_warnings": [str],
+ "expected_effect": str}}"""
+
+
+# ── Order-execution guardrails ────────────────────────────────────────────────
+_NSE_TICK         = 0.05                                              # standard NSE equity tick
+_ORDER_COLLAR_PCT = float(os.getenv("ORDER_COLLAR_PCT", "0.7")) / 100.0   # LIMIT band vs last price
+_MAX_ORDER_VALUE  = float(os.getenv("MAX_ORDER_VALUE", "300000"))    # per-order ₹ cap (fat-finger guard)
+
+
+def _round_tick(p: float) -> float:
+    return round(round(p / _NSE_TICK) * _NSE_TICK, 2)
+
+
+def _limit_price(side: str, price: float) -> float:
+    """A protective LIMIT price: pay a touch above (BUY) / accept a touch below
+    (SELL) the last price, never a blind MARKET fill. Band is at least 2 ticks so
+    it works on low-priced/illiquid names too."""
+    band = max(price * _ORDER_COLLAR_PCT, 2 * _NSE_TICK)
+    raw = price + band if side == "BUY" else price - band
+    return _round_tick(max(_NSE_TICK, raw))
+
+
+def _build_trade(side: str, qty: int, price: float, exchange: str) -> dict | None:
+    if qty <= 0 or price <= 0:
+        return None
+    if side == "BUY":                                   # cap order value to avoid fat-finger buys
+        qty = min(qty, int(_MAX_ORDER_VALUE // price))
+    if qty <= 0:
+        return None
+    lp = _limit_price(side, price)
+    return {
+        "transaction_type": side, "quantity": int(qty),
+        "order_type": "LIMIT", "limit_price": lp,
+        "exchange": exchange, "product": "CNC",
+        "est_value": round(qty * lp, 2),
+    }
+
+
+def _exchange_for(symbol: str, master: dict) -> str:
+    ex = (master.get(symbol, {}) or {}).get("exchange", "NSE")
+    return "BSE" if ex == "BSE" else "NSE"             # BOTH/NSE → NSE
+
+
+def _enrich_actions(plan: dict, stocks: list[dict], signals: dict, opps: list[dict], total_value: float) -> None:
+    """Attach executable trade quantities to every action and an AI 'best
+    alternative' (same-sector preferred) to every at-risk / non-performing one,
+    so the UI can show swaps and place real orders."""
+    hmap = {s["symbol"]: s for s in stocks}
+    try:
+        from app.data.stocks_master import STOCKS_BY_SYMBOL
+    except Exception:
+        STOCKS_BY_SYMBOL = {}
+    pool = [{**o, "sector": (STOCKS_BY_SYMBOL.get(o["symbol"], {}) or {}).get("sector", "Other")} for o in opps]
+
+    actions = plan.get("actions") or []
+    # 1) Protective LIMIT trades for every actionable row (per-holding exchange,
+    #    price collar, value cap — all from _build_trade).
+    for a in actions:
+        h = hmap.get(a.get("symbol"))
+        price = float(h["current_price"]) if h else 0.0
+        qty = int(h["quantity"]) if h else 0
+        cw = a.get("current_weight_pct") or 0
+        tw = a.get("target_weight_pct") or 0
+        ex = _exchange_for(a.get("symbol", ""), STOCKS_BY_SYMBOL)
+        a["current_price"] = round(price, 2)
+        a["quantity"] = qty
+        a["pnl_pct"] = round(float(h["gain_percent"]), 2) if h and h.get("gain_percent") is not None else None
+        trade = None
+        act = a.get("action")
+        if act == "EXIT" and qty > 0:
+            trade = _build_trade("SELL", qty, price, ex)            # full exit (no value cap on sells)
+        elif act == "TRIM" and qty > 0 and price > 0 and cw > tw:
+            sq = max(1, min(qty, round((cw - tw) / 100 * total_value / price)))
+            trade = _build_trade("SELL", sq, price, ex)
+        elif act == "ADD" and price > 0 and tw > cw:
+            bq = max(1, round((tw - cw) / 100 * total_value / price))
+            trade = _build_trade("BUY", bq, price, ex)
+        a["trade"] = trade
+
+    # 2) Best alternative for at-risk / non-performing holdings (biggest first)
+    at_risk = [a for a in actions
+               if a.get("action") in ("EXIT", "TRIM")
+               or signals.get(a.get("symbol"), {}).get("signal") == "bearish"]
+    at_risk.sort(key=lambda a: -(a.get("current_weight_pct") or 0))
+    used: set = set()
+    for a in at_risk:
+        h = hmap.get(a.get("symbol"))
+        sec = (h.get("sector") if h else "Other") or "Other"
+        cw = a.get("current_weight_pct") or 0
+        tw = a.get("target_weight_pct") or 0
+        freed = (cw if a.get("action") == "EXIT" else max(0.0, cw - tw)) / 100 * total_value
+        cand = next((o for o in pool if o["symbol"] not in used and o["sector"] == sec and sec != "Other"), None) \
+            or next((o for o in pool if o["symbol"] not in used), None)
+        if not cand:
+            continue
+        used.add(cand["symbol"])
+        ap = float(cand.get("price") or 0)
+        same = cand["sector"] == sec and sec != "Other"
+        raw_qty = max(1, round(freed / ap)) if ap > 0 and freed > 0 else 0
+        alt_ex = _exchange_for(cand["symbol"], STOCKS_BY_SYMBOL)
+        order = _build_trade("BUY", raw_qty, ap, alt_ex) if raw_qty > 0 else None
+        a["alternative"] = {
+            "symbol": cand["symbol"], "name": cand.get("name"), "grade": cand.get("grade"),
+            "win_probability": cand.get("win_probability"), "sector": cand["sector"],
+            "same_sector": same,
+            "scanner_reasoning": cand.get("reasoning"),          # the AI scanner's evidence for the pick
+            "price": round(ap, 2),
+            "buy_qty": (order["quantity"] if order else 0),     # value-capped qty
+            "order": order,
+            "reason": (f"Same sector ({sec}) · " if same else "")
+                      + f"AI {cand.get('grade')} BUY"
+                      + (f" · {int((cand.get('win_probability') or 0) * 100)}% win prob" if cand.get("win_probability") else ""),
+        }
+
+
+_OPT_CACHE_KEY = "portfolio:optimization:v4"   # bump to invalidate stale-shape caches
+
+
+async def _latest_scan_version() -> str | None:
+    """The scanner watchlist's updated_at — the optimization is keyed to it so it
+    auto-refreshes whenever a newer AI scan lands."""
+    try:
+        from app.utils.redis_client import cache_get
+        raw = await cache_get("ai_engine:watchlist")
+        return json.loads(raw).get("updated_at") if raw else None
+    except Exception:
+        return None
+
+
+@router.get("/optimize")
+async def optimize_portfolio(use_llm: bool = True, refresh: bool = False):
+    """AI-driven portfolio optimization: live signals + risk + scanner opportunities,
+    synthesised by the LLM into a rebalancing plan (deterministic fallback).
+
+    The result is persisted in Redis and keyed to the latest AI scan: it's served
+    from cache instantly while the scan is unchanged, and auto-recomputed when a
+    newer scan lands (or when refresh=true)."""
+    from app.utils.redis_client import cache_get, cache_set
+    scan_at = await _latest_scan_version()
+
+    # Serve the persisted plan unless a newer scan has landed or a refresh is forced.
+    if not refresh:
+        try:
+            raw = await cache_get(_OPT_CACHE_KEY)
+            if raw:
+                cached = json.loads(raw)
+                if cached.get("scan_at") == scan_at and cached.get("plan", {}).get("actions"):
+                    cached["cached"] = True
+                    return {"status": "success", "data": cached}
+        except Exception:
+            pass
+
+    port = (await get_portfolio())["data"]
+    stocks = port.get("stocks", [])
+    if not stocks:
+        return {"status": "success", "data": {"as_of": datetime.now().isoformat(),
+                "plan": {"summary": "No holdings to optimise.", "actions": [], "add_candidates": [],
+                         "risk_warnings": [], "objective": "", "expected_effect": ""},
+                "risk": {}, "signals": {}, "opportunities": [], "source": "none", "scan_at": scan_at, "cached": False}}
+
+    # Sector enrichment
+    try:
+        from app.data.stocks_master import STOCKS_BY_SYMBOL
+        for s in stocks:
+            s["sector"] = (STOCKS_BY_SYMBOL.get(s["symbol"], {}) or {}).get("sector", "Other")
+    except Exception:
+        for s in stocks:
+            s.setdefault("sector", "Other")
+
+    # Per-holding AI signals from live daily indicators (concurrent)
+    signals: dict = {}
+    sem = asyncio.Semaphore(8)
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+        async def sig(s):
+            async with sem:
+                series = await _daily_series(client, s["symbol"])
+                if series:
+                    signals[s["symbol"]] = _holding_signal(series)
+        await asyncio.gather(*(sig(s) for s in stocks))
+
+    risk = _portfolio_risk(stocks)
+    held = {s["symbol"] for s in stocks}
+    opps = await _ai_opportunities(held)
+    baseline = _baseline_plan(stocks, signals, risk, opps)
+
+    plan, source = baseline, "rule-based"
+    if use_llm:
+        try:
+            from app.utils.llm_client import llm_chat
+            text = await llm_chat(
+                _optimize_prompt(stocks, signals, risk, opps, port.get("total_value", 0), port.get("gain_percent", 0)),
+                system="You are a precise portfolio optimiser. Output only valid JSON.",
+                temperature=0.2, max_tokens=1600, timeout=45.0,
+            )
+            parsed = _parse_llm_json(text)
+            if parsed:
+                # Trust the platform for real current weights; the LLM only owns
+                # the action + target weight + reasoning. This guarantees the table
+                # always shows real NOW values and a numeric TARGET.
+                tv = sum(s["value"] for s in stocks) or 1.0
+                wmap = {s["symbol"]: round(s["value"] / tv * 100, 1) for s in stocks}
+                norm = []
+                for a in (parsed.get("actions") or []):
+                    sym = (a.get("symbol") or "").upper()
+                    cw = wmap.get(sym, a.get("current_weight_pct") or 0)
+                    try:
+                        tw = round(float(a.get("target_weight_pct")), 1)
+                    except (TypeError, ValueError):
+                        tw = cw
+                    act = (a.get("action") or "HOLD").upper()
+                    if act not in ("EXIT", "TRIM", "HOLD", "ADD"):
+                        act = "HOLD"
+                    norm.append({"symbol": sym, "action": act, "current_weight_pct": cw,
+                                 "target_weight_pct": tw, "reason": a.get("reason") or ""})
+                parsed["actions"] = norm or baseline["actions"]
+                parsed.setdefault("add_candidates", baseline["add_candidates"])
+                parsed.setdefault("risk_warnings", baseline["risk_warnings"])
+                parsed.setdefault("objective", baseline["objective"])
+                parsed.setdefault("expected_effect", baseline["expected_effect"])
+                plan, source = parsed, "ai"
+        except Exception as exc:
+            logger.warning("LLM optimize failed, using rule-based plan: %s", exc,
+                           extra={"log_type": "portfolio_event", "event": "optimize_llm_error"})
+
+    # Attach executable trade sizes + AI alternatives for at-risk holdings.
+    try:
+        _enrich_actions(plan, stocks, signals, opps, port.get("total_value", 0) or 0)
+    except Exception as exc:
+        logger.warning("action enrichment failed: %s", exc,
+                       extra={"log_type": "portfolio_event", "event": "optimize_enrich_error"})
+
+    data = {
+        "as_of": datetime.now().isoformat(),
+        "scan_at": scan_at,
+        "cached": False,
+        "source": source,
+        "portfolio": {"total_value": port.get("total_value"), "total_invested": port.get("total_invested"),
+                      "gain_percent": port.get("gain_percent"), "day_change": port.get("day_change")},
+        "risk": risk,
+        "signals": signals,
+        "opportunities": opps,
+        "plan": plan,
+    }
+    # Persist so the plan survives reloads/restarts and is shown instantly next time.
+    try:
+        await cache_set(_OPT_CACHE_KEY, json.dumps(data), expire=86400 * 7)
+    except Exception:
+        pass
+    return {"status": "success", "data": data}
+
+
+# ── AI "Invest this amount" — divide capital across the best AI-watchlist picks ─
+
+async def _invest_candidates(max_stocks: int) -> list[dict]:
+    """Best A/B-grade BUY names from the live AI scanner (delivery + intraday,
+    de-duplicated, ranked by grade then win-probability)."""
+    try:
+        from app.utils.redis_client import cache_get
+        raw = await cache_get("ai_engine:watchlist")
+        data = json.loads(raw) if raw else {}
+    except Exception:
+        data = {}
+    pool: dict = {}
+    for it in (data.get("delivery") or []) + (data.get("items") or []):   # delivery first (hold-friendly)
+        sym = (it.get("symbol") or "").upper()
+        if not sym or sym in pool:
+            continue
+        if it.get("grade") in ("A", "B") and it.get("action") == "BUY" and float(it.get("price") or 0) > 0:
+            pool[sym] = it
+    cands = list(pool.values())
+    gr = {"A": 0, "B": 1, "C": 2, "D": 3}
+    cands.sort(key=lambda x: (gr.get(x.get("grade", "D"), 3), -(x.get("win_probability") or 0)))
+    return cands[:max_stocks]
+
+
+@router.get("/invest-plan")
+async def invest_plan(amount: float, max_stocks: int = 6):
+    """Agentic allocation: split `amount` across the best AI picks, weighted by
+    conviction (win probability, capped for diversification), as protective LIMIT
+    buy orders sized to real prices."""
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="amount must be positive")
+    cands = await _invest_candidates(max_stocks)
+    if not cands:
+        return {"status": "success", "data": {"amount": amount, "deployed": 0, "leftover": amount,
+                "count": 0, "picks": [], "note": "No A/B-grade BUY picks available yet — try after the next AI scan."}}
+
+    try:
+        from app.data.stocks_master import STOCKS_BY_SYMBOL
+    except Exception:
+        STOCKS_BY_SYMBOL = {}
+
+    # Conviction weights (win probability), capped at 35% each for diversification.
+    raw_w = {c["symbol"]: max(0.05, float(c.get("win_probability") or 0.5)) for c in cands}
+    tot = sum(raw_w.values()) or 1.0
+    weights = {k: min(0.35, v / tot) for k, v in raw_w.items()}
+    s = sum(weights.values()) or 1.0
+    weights = {k: v / s for k, v in weights.items()}
+
+    picks = []
+    deployed = 0.0
+    for c in cands:
+        sym = c["symbol"]
+        price = float(c["price"])
+        ex = _exchange_for(sym, STOCKS_BY_SYMBOL)
+        limit = _limit_price("BUY", price)
+        alloc = amount * weights[sym]
+        qty = int(alloc // limit)
+        if qty < 1:
+            continue                                    # allocation can't afford one share
+        cost = round(qty * limit, 2)
+        deployed += cost
+        picks.append({
+            "symbol": sym, "name": c.get("name", sym), "grade": c.get("grade"),
+            "win_probability": c.get("win_probability"),
+            "sector": (STOCKS_BY_SYMBOL.get(sym, {}) or {}).get("sector", "Other"),
+            "price": round(price, 2), "limit_price": limit,
+            "quantity": qty, "est_cost": cost, "reasoning": c.get("reasoning"),
+            "order": {"transaction_type": "BUY", "quantity": qty, "order_type": "LIMIT",
+                      "limit_price": limit, "exchange": ex, "product": "CNC", "est_value": cost},
+        })
+
+    # Greedy top-up: spend leftover on the highest-conviction affordable pick.
+    leftover = round(amount - deployed, 2)
+    guard = 0
+    while picks and guard < 2000:
+        guard += 1
+        nxt = next((p for p in picks if p["limit_price"] <= leftover), None)
+        if not nxt:
+            break
+        nxt["quantity"] += 1
+        nxt["est_cost"] = round(nxt["quantity"] * nxt["limit_price"], 2)
+        nxt["order"]["quantity"] = nxt["quantity"]
+        nxt["order"]["est_value"] = nxt["est_cost"]
+        deployed = round(deployed + nxt["limit_price"], 2)
+        leftover = round(leftover - nxt["limit_price"], 2)
+
+    for p in picks:
+        p["weight_pct"] = round(p["est_cost"] / amount * 100, 1) if amount else 0.0
+
+    return {"status": "success", "data": {
+        "amount": round(amount, 2), "deployed": round(deployed, 2), "leftover": round(amount - deployed, 2),
+        "count": len(picks), "picks": picks,
+        "as_of": datetime.now().isoformat(),
+    }}
 
 
 @router.post("/add")
