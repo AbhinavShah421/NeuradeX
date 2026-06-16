@@ -159,6 +159,21 @@ async def _watchlist_symbols() -> list[str]:
     return []
 
 
+async def _committed_symbols() -> list[str]:
+    """High-conviction (committed) picks only — the selective tier the system
+    actually trades. Empty means the system abstains for now (no committed setup)."""
+    try:
+        r = await _get_redis()
+        raw = await r.get(WATCHLIST_KEY)
+        if raw:
+            data = json.loads(raw)
+            comm = data.get("committed") or [it for it in data.get("items", []) if it.get("committed")]
+            return [it["symbol"] for it in comm if it.get("symbol")]
+    except Exception:
+        pass
+    return []
+
+
 async def _start_session(payload: dict) -> str | None:
     try:
         async with httpx.AsyncClient(timeout=30.0) as c:
@@ -232,9 +247,10 @@ async def reset_cursor() -> dict:
 async def _do_paper_tick() -> None:
     if not _market_open():
         return
-    syms = await _watchlist_symbols()
+    # Paper trading acts ONLY on committed high-conviction picks (precision tier).
+    syms = await _committed_symbols()
     if not syms:
-        return
+        return                              # abstain — no high-conviction setup
     sessions = await _list_sessions()
     running = {s["symbol"] for s in sessions if s.get("status") == "running" and s.get("mode") == "paper"}
     today = _today()
@@ -417,6 +433,7 @@ async def status() -> dict:
     bt_running    = [s for s in sessions if s.get("status") == "running" and s.get("mode") == "replay"]
     st  = await _load_bt_state()
     syms = await _watchlist_symbols()
+    committed = await _committed_symbols()
     return {
         "paper": {
             "enabled": await _flag(PAPER_FLAG),
@@ -425,6 +442,8 @@ async def status() -> dict:
             "running": len(paper_running),
             "max_concurrent": PAPER_MAX,
             "watchlist_size": len(syms),
+            "committed_size": len(committed),
+            "source": "committed",
             "sessions": [{"id": s["id"], "symbol": s["symbol"],
                           "pnl": s.get("pnl", 0.0)} for s in paper_running],
         },

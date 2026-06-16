@@ -79,12 +79,33 @@ async def _load_hc_params() -> dict:
 
 
 def _is_committed(res: dict, p: dict) -> bool:
-    """A high-conviction long: top grade, BUY, enough independent confirmations,
-    and win-probability above the (adaptive) floor."""
-    return bool(res.get("action") == "BUY"
-                and res.get("grade") == "A"
-                and int(res.get("confirmed_factors", 0)) >= p["min_factors"]
-                and float(res.get("win_probability") or 0.0) >= p["wp_floor"])
+    """A high-conviction long: top grade BUY, enough short-term confirmations, a
+    win-probability above the (adaptive) floor, PLUS independent confirmation —
+    a confirmed higher-timeframe uptrend and no negative news catalyst. Requiring
+    signals that aren't all correlated technicals is what lifts precision."""
+    if not (res.get("action") == "BUY"
+            and res.get("grade") == "A"
+            and int(res.get("confirmed_factors", 0)) >= p["min_factors"]
+            and float(res.get("win_probability") or 0.0) >= p["wp_floor"]):
+        return False
+    # Independent signal 1 — long-term trend must agree (when computable).
+    if res.get("long_trend") is False:
+        return False
+    # Independent signal 2 — block on a negative news catalyst.
+    if float(res.get("catalyst_boost") or 0.0) < -0.05:
+        return False
+    return True
+
+
+def _independent_signals(res: dict) -> int:
+    """Count of confirming signals that are independent of the short-term technical
+    score: long-term trend agreement + a positive fresh news catalyst."""
+    n = 0
+    if res.get("long_trend") is True:
+        n += 1
+    if float(res.get("catalyst_boost") or 0.0) > 0.10:
+        n += 1
+    return n
 
 
 async def _tune_hc_params(accuracy: float, n: int, target: float) -> dict:
@@ -236,7 +257,11 @@ def _analyze(candles: list[dict], regime: int = 0, calib: dict | None = None) ->
     mom   = (closes[-1] - closes[-10]) / closes[-10] * 100 if len(closes) >= 10 else 0.0
     sma20 = _sma(closes, 20)
     sma50 = _sma(closes, 50)
+    sma100 = _sma(closes, 100) if len(closes) >= 100 else None
     sma_trend = 1 if sma20 > sma50 else -1
+    # Higher-timeframe (long-term) trend — a confirmation that's largely
+    # independent of the short-term daily signal; required for high-conviction.
+    long_trend = (price > sma100 and sma50 >= sma100) if sma100 is not None else None
     _, _, macd_hist = _macd(closes)
     gap_pct = (opens[-1] - closes[-2]) / closes[-2] * 100 if len(closes) >= 2 and closes[-2] else 0.0
     hi20 = max(highs[-20:]); lo20 = min(lows[-20:])
@@ -378,6 +403,7 @@ def _analyze(candles: list[dict], regime: int = 0, calib: dict | None = None) ->
         "grade": grade,
         "confirmed_factors": confirmed_factors,
         "confirmations": confirmations,
+        "long_trend": long_trend,
         "intraday_fit": fit,
         "delivery_fit": delivery_fit,
         "delivery_weeks": delivery_weeks,
@@ -704,6 +730,7 @@ async def scan_once(phase: str = "intraday") -> dict:
     hc = await _load_hc_params()
     for c in candidates:
         c["committed"] = _is_committed(c, hc)
+        c["independent_signals"] = _independent_signals(c)
     committed_list = [c for c in candidates if c["committed"]]
 
     # Full ranked board (top RANKED_MAX) for the Predictions page — each entry
