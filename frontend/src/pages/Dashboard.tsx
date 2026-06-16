@@ -470,7 +470,7 @@ const TradeGateCard: React.FC = () => {
   const opts: any[] = data.options ?? [];
   const active = opts.find(o => o.id === data.mode);
   return (
-    <div className="nd-card" style={{ padding: '14px 18px', marginBottom: 20 }}>
+    <div className="nd-card" style={{ padding: '16px 18px', marginBottom: 20 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
         <div className="nd-icon-chip"><span className="material-icons" style={{ color: 'var(--nd-text-2)' }}>tune</span></div>
         <div>
@@ -555,7 +555,7 @@ const AutopilotBanner: React.FC = () => {
     : 'Replays past days (walking back) outside market hours to train on dense real data';
 
   return (
-    <div className="nd-card" style={{ padding: '14px 18px', marginBottom: 20, borderLeft: `3px solid ${anyOn ? 'var(--nd-green)' : 'var(--nd-border)'}` }}>
+    <div className="nd-card" style={{ padding: '16px 18px', marginBottom: 20, borderLeft: `3px solid ${anyOn ? 'var(--nd-green)' : 'var(--nd-border)'}` }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 10 }}>
         <div className="nd-icon-chip" style={{ background: anyOn ? 'var(--nd-green-50)' : 'var(--nd-surface)' }}>
           <span className="material-icons" style={{ color: anyOn ? 'var(--nd-green)' : 'var(--nd-text-3)' }}>smart_toy</span>
@@ -848,13 +848,12 @@ const ScanAccuracyCard: React.FC = () => {
         </div>
       </div>
 
-      <div style={{ flex: 1, minHeight: 160, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
       {!hasData ? (
         <div style={{ fontSize: 12, color: 'var(--nd-text-3)', padding: '24px 0' }}>
           No graded scans yet — the morning watchlist is graded after each close (delivery picks after a {data?.latest?.horizon_days ?? 5}-day hold).
         </div>
       ) : (
-        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: '100%', minHeight: 160, flex: 1 }} preserveAspectRatio="none">
+        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 160 }} preserveAspectRatio="none">
           {[yMin, (yMin + yMax) / 2, yMax].map((v, i) => (
             <g key={i}>
               <line x1={PL} y1={sy(v)} x2={W - PR} y2={sy(v)} stroke="var(--nd-border)" strokeWidth="0.5" />
@@ -883,7 +882,10 @@ const ScanAccuracyCard: React.FC = () => {
           ))}
         </svg>
       )}
-      </div>
+
+      {/* spacer pushes the status note to the bottom so the card fills the row
+          height without stretching the chart */}
+      <div style={{ flex: 1, minHeight: 10 }} />
 
       {commBelow ? (
         <div style={{ marginTop: 8, fontSize: 11, color: '#d8b4fe', background: '#a855f715', border: '1px solid #a855f733', borderRadius: 8, padding: '6px 9px' }}>
