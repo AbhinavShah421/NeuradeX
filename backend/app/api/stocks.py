@@ -245,6 +245,39 @@ async def get_sentiment(symbol: str):
 
 # ── Full Stock Directory ───────────────────────────────────────────────────────
 
+import json as _json
+import time as _time
+from datetime import timezone as _tz
+
+# The curated master (~300 names, with sector metadata) augmented with the FULL
+# NSE universe the scanner discovered (~2100), so "All Stocks" lists everything.
+_dir_cache: dict = {"ts": 0.0, "list": None, "sectors": None}
+
+
+async def _augmented_directory() -> tuple[list[dict], list[str]]:
+    now = _time.monotonic()
+    if _dir_cache["list"] is not None and now - _dir_cache["ts"] < 3600:
+        return _dir_cache["list"], _dir_cache["sectors"]
+    merged = list(STOCKS_DEDUPED)
+    try:
+        from app.utils.redis_client import cache_get
+        ist = datetime.now(_tz(timedelta(hours=5, minutes=30))).strftime("%Y-%m-%d")
+        raw = await cache_get(f"ai_engine:scan_universe:{ist}")
+        if raw:
+            uni = _json.loads(raw)
+            items = uni.items() if isinstance(uni, dict) else [(s, s) for s in uni]
+            for sym, name in items:
+                su = str(sym).upper()
+                if su and su not in STOCKS_BY_SYMBOL:
+                    merged.append({"symbol": su, "name": name or su,
+                                   "sector": "Other", "exchange": "NSE"})
+    except Exception as exc:
+        logger.debug("directory augment failed: %s", exc)
+    sectors = sorted({s["sector"] for s in merged})
+    _dir_cache.update({"ts": now, "list": merged, "sectors": sectors})
+    return merged, sectors
+
+
 @router.get("/directory/list")
 async def get_stock_directory(
     q:        str = Query("",    description="Search by symbol or company name"),
@@ -254,10 +287,11 @@ async def get_stock_directory(
     limit:    int = Query(50,    ge=1, le=200),
 ):
     """
-    Paginated, searchable directory of all NSE/BSE stocks.
+    Paginated, searchable directory of all NSE/BSE stocks — the curated master
+    plus the full NSE universe discovered by the scanner.
     Returns metadata only (no live prices — use /directory/prices for those).
     """
-    results = STOCKS_DEDUPED
+    results, all_sectors = await _augmented_directory()
 
     q = q.strip().upper()
     if q:
@@ -283,7 +317,7 @@ async def get_stock_directory(
         "page": page,
         "limit": limit,
         "pages": max(1, (total + limit - 1) // limit),
-        "sectors": SECTORS,
+        "sectors": all_sectors,
         "data": page_results,
     }
 
