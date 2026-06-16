@@ -110,3 +110,77 @@ cases are preserved. Trigger manually from the **Pattern Memory** page.
 The **Pattern Memory** page (AI Engine → Pattern Memory) shows the live
 **Agent Learning** panel: predictions made, outcomes learned, overall accuracy,
 per-agent weights, memory size, and a *"trained in last 24h"* indicator.
+
+---
+
+## AI loss-learning
+
+The mechanisms above learn **quantitatively** — agent weights shift, the RL
+policy updates, and the memory gate vetoes setups whose similar fingerprints
+historically lost. The loss-learning layer adds the **explanatory** half: *why*
+a specific trade lost, captured as reusable lessons that feed back into
+decisions.
+
+```
+losing trade ─▶ LLM post-mortem (root cause + failure_mode + lesson)
+            ─▶ trade_postmortems ─▶ aggregate recurring failure modes
+            ─▶ ai_engine:active_lessons ─▶ prepended to the AI analysis prompt
+```
+
+1. **Pull losses** — `POST /api/ai-engine/loss-learning/run` reads recent losing
+   closed trades (with their recorded agent signals + market context) from the
+   [feedback-service](../microservices/feedback-trainer.md).
+2. **Explain each** — the LLM returns `root_cause`, a reusable `failure_mode`
+   (e.g. *"chased momentum into resistance"*), contributing `factors`, the
+   `lesson`, and an `avoid_when` condition (rule-based fallback if the LLM is
+   off). Stored in the `trade_postmortems` table.
+3. **Aggregate** — recurring failure modes become ranked **lessons**
+   (`GET /loss-learning/lessons`), cached to `ai_engine:active_lessons`.
+4. **Apply** — those lessons are **prepended to the AI's `/analyze` prompt**, so
+   the next decision weighs the mistakes already made and flags matching "avoid"
+   conditions — complementing the quantitative memory veto.
+
+Surfaced on the **Orders** page → **AI Loss Learning** panel (per-trade
+post-mortems + the lessons applied to future decisions). It's an LLM-reasoned
+knowledge base layered on the existing adaptive learning — not a separately
+trained model.
+
+| Method & path | Description |
+|---|---|
+| `POST /api/ai-engine/loss-learning/run` | Analyse new losing trades → store post-mortems + refresh lessons |
+| `GET /api/ai-engine/loss-learning/postmortems` | Recent per-trade loss explanations |
+| `GET /api/ai-engine/loss-learning/lessons` | Aggregated lessons (failure mode · occurrences · avg loss · avoid-when) |
+
+## Learning curve & system-event overlay
+
+The Dashboard **System Learning Curve** is the system's self-measurement over
+time. Win-rate alone is misleading for an asymmetric-payoff strategy (small
+losses, large wins), so `GET /api/ai-engine/learning-curve` returns three aligned
+series — **cumulative win-rate**, a **trailing-window rolling win-rate** (the
+recency-sensitive "is it learning lately?" signal), and the **equity curve**
+(cumulative return, which rises even when win-rate is below 50%) — plus a
+**per-source breakdown with expectancy** so you can see that win-rate ≠
+profitability. A `source` filter (PAPER/REPLAY/LIVE/BACKTEST) keeps the large
+historical-replay backlog from drowning real paper/live trades.
+
+Curve moves are correlated with platform changes via a **system-events overlay**:
+
+| Method & path | Description |
+|---|---|
+| `GET /api/ai-engine/learning-curve?source=&window=` | Cumulative + rolling win-rate, equity curve, per-source expectancy, events |
+| `GET /api/ai-engine/learning-events` | System-update markers shown on the curve |
+| `POST /api/ai-engine/learning-events` | Log a change (`title`, `category`, `detail`, optional ISO `occurred_at`) |
+
+Timing/config changes (autopilot entry-timing, paper-trading window) self-annotate
+the curve, so a regime shift can be read against what changed.
+
+## Calibrated entry band (confidence ceiling)
+
+Post-trade analysis of 7k+ intraday trades found ensemble **confidence is
+anti-predictive above ~0.70**: win-rate falls from ~40% in the 0.50–0.60 band to
+**16% above 0.90**, and per-trade expectancy goes negative past 0.70 (the most
+"confident" entries chase momentum that reverses intraday). The disciplined trade
+gates (**Strict**, **Gentle**) therefore enforce a confidence **band** — both a
+floor *and* a ceiling (`max_conf` ≈ 0.72) — skipping over-confident setups.
+Restricting historical entries to the band lifts REPLAY expectancy from
+≈ −0.10%/trade to ≈ +0.05%/trade. **Loose** stays uncapped by design.

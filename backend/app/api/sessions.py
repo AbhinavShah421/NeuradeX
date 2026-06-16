@@ -39,13 +39,19 @@ SPEEDS        = (1, 2, 5, 10)
 # ── Trade gate ────────────────────────────────────────────────────────────────
 # How selective session entries are; switchable at runtime from the dashboard.
 TRADE_GATE_KEY = "ai_engine:trade_gate"
+# NOTE on `max_conf` (confidence ceiling): post-trade analysis of 7k+ intraday
+# trades showed ensemble confidence is *anti-predictive* above ~0.70 — the most
+# "confident" entries (momentum chasing) reverse intraday and lose the most
+# (win-rate 16% at >0.90 vs 40% at 0.50–0.60). So disciplined gates also skip
+# OVER-confident setups. Expectancy on the [floor, ceiling] band is positive
+# where the unbounded gate was negative. "loose" stays uncapped by design.
 TRADE_GATES = {
-    "strict": {"label": "Strict", "require_buy": True,  "min_conf": 0.62,
-               "desc": "Only enters when the full 7-agent ensemble votes BUY. Fewest, highest-conviction trades."},
-    "gentle": {"label": "Gentle", "require_buy": False, "min_conf": 0.55,
-               "desc": "Enters on an intraday setup the ensemble doesn't oppose, above a confidence floor. Balanced."},
-    "loose":  {"label": "Loose",  "require_buy": False, "min_conf": 0.0,
-               "desc": "Enters on any intraday setup the ensemble isn't bearish on. Most trades."},
+    "strict": {"label": "Strict", "require_buy": True,  "min_conf": 0.58, "max_conf": 0.72,
+               "desc": "Enters only when the ensemble votes BUY within the calibrated confidence band (over-confident signals are skipped). Fewest, best-calibrated trades."},
+    "gentle": {"label": "Gentle", "require_buy": False, "min_conf": 0.52, "max_conf": 0.72,
+               "desc": "Enters on an intraday setup the ensemble doesn't oppose, inside the calibrated confidence band. Balanced."},
+    "loose":  {"label": "Loose",  "require_buy": False, "min_conf": 0.0,  "max_conf": 1.01,
+               "desc": "Enters on any intraday setup the ensemble isn't bearish on, at any confidence. Most trades."},
 }
 _gate_cache = {"mode": "", "ts": 0.0}
 
@@ -121,6 +127,8 @@ class StartSessionRequest(BaseModel):
     # Per-trade hold cap (minutes): force-exit any single position held longer
     # than this. 0 = disabled. Used by auto-traded watchlist stocks.
     max_hold_minutes: int = Field(default=0, ge=0, le=375)
+    # Entry-timing aggressiveness: "normal" | "aggressive" (looser triggers → more trades)
+    timing_mode: str = "normal"
 
 
 class SpeedRequest(BaseModel):
@@ -158,9 +166,11 @@ def _summary(s: dict) -> dict:
         "position":       pos.get("status", "NONE"),
         "speed":          s.get("speed", 1),
         "max_hold_minutes": s.get("max_hold_minutes", 0),
+        "timing_mode":    s.get("timing_mode", "normal"),
         "data_source":    s.get("data_source"),
         "agent_action":   s.get("agent_decision", {}).get("action"),
         "agent_confidence": s.get("agent_decision", {}).get("confidence"),
+        "last_decision":  s.get("last_decision"),
         "created_at":     s.get("created_at"),
         "updated_at":     s.get("updated_at"),
         "error":          s.get("error"),
@@ -183,6 +193,8 @@ def _detail(s: dict) -> dict:
         "position_detail":  s.get("position", {}),
         "metrics":          s.get("metrics", {}),
         "agent_decision":   s.get("agent_decision", {}),
+        "last_decision":    s.get("last_decision"),
+        "decision_log":     (s.get("decision_log") or [])[-60:],
         "agents":           s.get("agents", []),
         "model_used":       s.get("model"),
     }
@@ -236,6 +248,23 @@ _PAPER_PROFIT_TARGET_PCT = 0.6   # book profit at +0.6% gain
 _PAPER_DROP_CANDLES      = 3     # N consecutive lower closes = drop pattern
 
 
+def _timing_block_reason(ind: dict, candle: dict) -> str:
+    """Plain-English explanation of why the intraday timing signal didn't fire an
+    entry — so a paper/backtest session can show *why no trade yet*."""
+    rsi = ind.get("rsi", 50.0)
+    mom = ind.get("mom5", 0.0)
+    price = candle.get("close", 0.0)
+    vwap = ind.get("vwap", price)
+    sma5, sma20 = ind.get("sma5", price), ind.get("sma20", price)
+    if sma5 < sma20 and mom < -0.10:
+        return (f"downtrend filter active (SMA5 < SMA20, momentum {mom:+.2f}%) — "
+                f"holding off to avoid catching a falling knife")
+    return (f"no intraday trigger yet — needs an oversold bounce (RSI<38 & price≥VWAP & rising), "
+            f"a trend continuation (SMA5≥SMA20 & momentum>0.18%), or a momentum breakout "
+            f"(momentum>0.35% & price>VWAP). Now: RSI {rsi:.0f}, momentum {mom:+.2f}%, "
+            f"price {'above' if price >= vwap else 'below'} VWAP")
+
+
 async def _step(s: dict, window: list[dict], force_close: bool) -> None:
     """Run one candle: decide, execute against the session's position, update state."""
     if not window:
@@ -250,7 +279,8 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
 
     # Intraday rule signal times the entries/exits (RSI/VWAP/momentum + take-profit,
     # stop-loss, end-of-day square-off). 1 = buy, -1 = sell, 0 = hold.
-    tsig = -1 if (force_close and pos_status == "LONG") else _tech_signal(ind, pos_status, candle, entry_price)
+    aggressive = s.get("timing_mode") == "aggressive"
+    tsig = -1 if (force_close and pos_status == "LONG") else _tech_signal(ind, pos_status, candle, entry_price, aggressive=aggressive)
 
     # The 7-agent ensemble (+memory gate) is the decision brain: it provides the
     # confidence, the reasoning, and can confirm or veto what the timing signal proposes.
@@ -268,19 +298,36 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         action, conf, reason = "SELL", 0.99, "Session end — squared off automatically."
     elif pos_status == "NONE":
         # Entry is governed by the selected trade gate (strict / gentle / loose).
-        gate = TRADE_GATES[await get_trade_gate()]
-        if gate["require_buy"]:
-            enter = tsig == 1 and ens_action == "BUY" and conf >= gate["min_conf"]
-        else:
-            enter = tsig == 1 and ens_action != "SELL" and conf >= gate["min_conf"]
+        gate_mode = await get_trade_gate()
+        gate = TRADE_GATES[gate_mode]
+        blocked: list[str] = []
+        if tsig != 1:
+            blocked.append(_timing_block_reason(ind, candle))
+        if gate["require_buy"] and ens_action != "BUY":
+            blocked.append(f"ensemble did not vote BUY (it's {ens_action})")
+        elif not gate["require_buy"] and ens_action == "SELL":
+            blocked.append("ensemble is bearish (SELL)")
+        max_conf = gate.get("max_conf", 1.01)
+        if conf < gate["min_conf"]:
+            blocked.append(f"confidence {conf:.0%} below the {gate['min_conf']:.0%} floor")
+        if conf > max_conf:
+            blocked.append(f"confidence {conf:.0%} above the {max_conf:.0%} ceiling (over-confident setups historically reverse)")
+        enter = (tsig == 1
+                 and (ens_action == "BUY" if gate["require_buy"] else ens_action != "SELL")
+                 and gate["min_conf"] <= conf <= max_conf)
         action = "BUY" if enter else "HOLD"
         if action == "BUY":
-            reason = f"Entry: intraday signal + ensemble {ens_action} ({conf:.0%}). {reason}".strip()
+            reason = f"Entry: intraday buy-trigger + ensemble {ens_action} ({conf:.0%}). {reason}".strip()
+        else:
+            reason = f"No entry [{gate['label']} gate] — " + "; ".join(blocked) + "."
     else:  # LONG
-        # Exit on the intraday signal OR if the ensemble turns bearish
+        # Exit on the intraday signal OR if the ensemble turns bearish; otherwise hold.
         action = "SELL" if (tsig == -1 or ens_action == "SELL") else "HOLD"
         if action == "SELL":
             reason = f"Exit: intraday signal/ensemble {ens_action}. {reason}".strip()
+        else:
+            reason = (f"Holding position — exit needs a sell-trigger (stop/target/trend-break) "
+                      f"or the ensemble turning bearish. Ensemble {ens_action} ({conf:.0%}).")
 
     # ── Per-trade hold cap: force-exit any position held longer than the span ──
     # Applies to auto-traded watchlist stocks so no single trade overstays; the
@@ -434,6 +481,42 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
                            "trade_executed": trade_executed}
     s["agents"]         = agents
     s["updated_at"]     = datetime.now(IST).isoformat()
+
+    # ── Live decision trace — the per-candle "why" the UI shows, and a rolling
+    # log kept on the session for review + training. ──────────────────────────
+    _timing_label = {1: "BUY trigger", -1: "SELL/exit trigger", 0: "no trigger"}.get(tsig, "—")
+    decision = {
+        "time": candle.get("time"),
+        "price": round(candle["close"], 2),
+        "action": action,
+        "executed": trade_executed is not None,
+        "trade": trade_executed,
+        "position": pos_status,
+        "reason": reason,
+        "confidence": round(conf, 3),
+        "timing_signal": tsig,
+        "timing_label": _timing_label,
+        "timing_mode": "aggressive" if aggressive else "normal",
+        "ensemble_action": ens_action,
+        "indicators": {
+            "rsi": round(ind.get("rsi", 0.0), 1),
+            "momentum_pct": round(ind.get("mom5", 0.0), 2),
+            "vwap": round(ind.get("vwap", 0.0), 2),
+            "sma5": round(ind.get("sma5", 0.0), 2),
+            "sma20": round(ind.get("sma20", 0.0), 2),
+            "atr": round(ind.get("atr", 0.0), 2),
+        },
+        "agents": [{"agent": a.get("agent_name") or a.get("agent"), "action": a.get("action"),
+                    "confidence": a.get("confidence")} for a in (agents or [])][:8],
+    }
+    s["last_decision"] = decision
+    log = s.get("decision_log") or []
+    # one entry per candle — replace if we re-decided the same minute
+    if log and log[-1].get("time") == decision["time"]:
+        log[-1] = decision
+    else:
+        log.append(decision)
+    s["decision_log"] = log[-120:]   # keep the last ~2 hours of minute decisions
 
 
 # ── Advancement (called by the background loop) ───────────────────────────────
@@ -605,6 +688,7 @@ async def start_session(req: StartSessionRequest):
         "position": {"status": "NONE", "entry_price": 0.0, "quantity": 0, "entry_time": None, "current_pnl": 0.0},
         "trades": [], "agents": [], "agent_decision": {},
         "max_hold_minutes": req.max_hold_minutes,
+        "timing_mode": req.timing_mode if req.timing_mode in ("normal", "aggressive") else "normal",
         "metrics": _compute_metrics(req.capital, req.capital, []),
         "created_at": now.isoformat(), "updated_at": now.isoformat(),
     }
@@ -685,8 +769,19 @@ async def set_paper_trading_config(req: PaperConfigRequest):
     hhmm = re.compile(r"^\d{2}:\d{2}$")
     if not hhmm.match(req.no_entry_after) or not hhmm.match(req.squareoff_after):
         raise HTTPException(400, "Times must be HH:MM format")
+    prev = await get_paper_config()
     cfg = {"no_entry_after": req.no_entry_after, "squareoff_after": req.squareoff_after}
     await save_paper_config(cfg)
+    if cfg != prev:
+        try:
+            from app.api.ai_engine import _log_system_event
+            await _log_system_event(
+                "Paper trading window changed", "trading",
+                f"Entry cutoff {prev.get('no_entry_after')}→{cfg['no_entry_after']}, "
+                f"square-off {prev.get('squareoff_after')}→{cfg['squareoff_after']}.",
+            )
+        except Exception:
+            pass
     return {"status": "success", "data": cfg}
 
 

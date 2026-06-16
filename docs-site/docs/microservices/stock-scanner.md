@@ -29,10 +29,18 @@ maintains and serves it at `/api/ai-engine/watchlist`.
 
 ## The universe
 
-A curated dict of **108 liquid NSE symbols → names** (`UNIVERSE` in
-`universe.py`) — index heavyweights plus high-beta intraday favourites. The
-scanner sweeps this list and filters it down to the names that actually clear
-the intraday bar.
+By default the scanner sweeps the **entire NSE equity universe (~2,100 EQ-series
+stocks)** loaded from NSE's official equity master CSV (`SCAN_UNIVERSE_SOURCE=nse`),
+cached per trading day in Redis. It degrades gracefully: **nse → backend stock
+directory (~300) → the bundled `UNIVERSE` list (~108)** if a source is
+unavailable.
+
+Because a full sweep takes minutes, fetches are **rate-limited** (per-symbol
+delay + jitter, with 429 back-off), and the scanner **checkpoints progress**
+every `SCAN_CHECKPOINT_EVERY` symbols so the watchlist and ranked board fill in
+*during* the sweep (you watch the `scanned/universe` count climb). The
+`scanning` flag in `/status` is exposed centrally so a rescan disables the
+Rescan button across all pages.
 
 ---
 
@@ -67,7 +75,22 @@ price floor. Kept names get:
   **calibration multiplier** (below).
 
 The watchlist is ranked **BUY first, then by signal score**, and the top
-`SCAN_TOP_N` (default 15) are published.
+`SCAN_TOP_N` (default 15) are published as `items`.
+
+### Best Delivery (multi-week swing) picks
+
+The same sweep also scores each name for **delivery fitness** — a confirmed,
+*orderly* uptrend you can hold for weeks (price above SMA20 ≥ SMA50, positive
+momentum, healthy RSI, manageable volatility, enough liquidity), with an
+estimated **safe holding window** in weeks. The top delivery names are published
+as `delivery` in the watchlist payload (Dashboard → **Best Delivery** tab).
+
+### Ranked board (Predictions page)
+
+The top `SCAN_RANKED_MAX` (default 250) ranked candidates — each numbered and
+carrying its full evidence (factor confirmations, indicators, reasoning) — are
+written to `ai_engine:ranked` and served at `/api/ai-engine/ranked` for the
+**Predictions** rankings board (Top 10/20/50/100/All + per-stock "why this rank").
 
 ---
 
@@ -113,7 +136,9 @@ morning picks ─▶ end-of-day grade ─▶ accuracy ─▶ calibration multipl
 
 | Key | Writer | Reader(s) | Purpose |
 |---|---|---|---|
-| `ai_engine:watchlist` | stock-scanner | backend `/watchlist`, autopilot | Live ranked AI watchlist |
+| `ai_engine:watchlist` | stock-scanner | backend `/watchlist`, autopilot | Live AI watchlist (`items` intraday + `delivery`) |
+| `ai_engine:ranked` | stock-scanner | backend `/ranked` | Full ranked board (top `SCAN_RANKED_MAX`) for Predictions |
+| `ai_engine:scan_universe:{date}` | stock-scanner | scanner | Day-cached scan universe (NSE master) |
 | `ai_engine:watchlist:premarket:{date}` | stock-scanner | scanner (eval) | Morning snapshot graded after close |
 | `ai_engine:scan_calibration` | stock-scanner | scanner | Learned per-action confidence multipliers |
 | `ai_engine:scan_eval:latest` / `:{date}` | stock-scanner | backend `/scan-evaluation` | Post-market grade |
@@ -128,7 +153,14 @@ morning picks ─▶ end-of-day grade ─▶ accuracy ─▶ calibration multipl
 | `SCAN_MIN_VOLUME` | 300000 | Liquidity gate (avg daily volume) |
 | `SCAN_MIN_ATR_PCT` | 1.2 | Volatility gate (ATR %) |
 | `SCAN_MIN_PRICE` | 30 | Minimum price |
-| `SCAN_TOP_N` | 15 | Watchlist size |
+| `SCAN_TOP_N` | 15 | Intraday watchlist size |
+| `SCAN_UNIVERSE_SOURCE` | `nse` | `nse` (full ~2100) / `directory` / `bundled` |
+| `SCAN_RANKED_MAX` | 250 | Ranked-board size (Predictions) |
+| `SCAN_DELIVERY_TOP_N` | 10 | Best-Delivery list size |
+| `SCAN_DELIVERY_MAX_ATR_PCT` | 6.0 | Delivery volatility ceiling |
+| `SCAN_CHECKPOINT_EVERY` | 120 | Write partial results every N symbols |
+| `SCAN_FETCH_DELAY` | 0.30 | Base per-symbol delay (+jitter) — Yahoo rate-limit |
+| `SCAN_RATE_LIMIT_BACKOFF` | 5.0 | Back-off seconds on a Yahoo 429 |
 | `SCAN_PREMARKET_MIN` | 540 | Pre-open scan time (09:00 IST, minutes past midnight) |
 | `SCAN_POSTMARKET_MIN` | 940 | Post-close grade time (15:40 IST) |
 | `BACKEND_URL` | `http://backend:8000` | Where the post-market grade is pushed |

@@ -531,6 +531,10 @@ const AutopilotBanner: React.FC = () => {
     setBusy('reset');
     try { const r = await apiService.resetBacktestCursor(); setAp((r as any).data); } catch {} finally { setBusy(null); }
   };
+  const setPaperTiming = async (mode: 'normal' | 'aggressive') => {
+    setBusy('timing');
+    try { const r = await apiService.setAutopilotPaperTiming(mode); setAp((r as any).data); } catch {} finally { setBusy(null); }
+  };
   if (!ap) return null;
   const paper = ap.paper ?? {};
   const bt = ap.backtest ?? {};
@@ -563,6 +567,28 @@ const AutopilotBanner: React.FC = () => {
       </div>
       <APRow first icon="sync" title="Paper (live)" desc={paperDesc}
         on={!!paper.enabled} busy={busy === 'paper'} onToggle={() => toggle('paper', !paper.enabled)} />
+
+      {/* Paper entry-timing mode */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0 8px 30px', flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 11.5, color: 'var(--nd-text-3)' }}>Entry timing</span>
+        <div style={{ display: 'flex', gap: 2, background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 8, padding: 2 }}>
+          {(['normal', 'aggressive'] as const).map(m => {
+            const active = (paper.timingMode ?? 'normal') === m;
+            return (
+              <button key={m} onClick={() => setPaperTiming(m)} disabled={busy === 'timing'}
+                style={{ padding: '3px 12px', borderRadius: 6, border: 'none', cursor: busy === 'timing' ? 'wait' : 'pointer', fontSize: 11, fontWeight: 600, textTransform: 'capitalize',
+                  background: active ? (m === 'aggressive' ? '#f59e0b' : 'var(--nd-green)') : 'transparent',
+                  color: active ? '#fff' : 'var(--nd-text-2)' }}>
+                {m}
+              </button>
+            );
+          })}
+        </div>
+        <span style={{ fontSize: 10.5, color: 'var(--nd-text-3)' }}>
+          {(paper.timingMode ?? 'normal') === 'aggressive' ? 'looser triggers — more trades' : 'standard triggers'}
+        </span>
+      </div>
+
       <APRow icon="history" title="Backtest (1× replay)" desc={btDesc}
         on={!!bt.enabled} busy={busy === 'backtest'} onToggle={() => toggle('backtest', !bt.enabled)} />
       {/* Next trade date + reset */}
@@ -586,43 +612,175 @@ const AutopilotBanner: React.FC = () => {
 
 // ── Learning curve ────────────────────────────────────────────────────────────
 
+type LcMetric = 'equity' | 'rolling' | 'cumulative';
+
+const SOURCE_PRESETS: Record<string, string> = {
+  All: 'PAPER,LIVE,REPLAY',
+  Paper: 'PAPER,LIVE',
+  Replay: 'REPLAY',
+};
+
+const EVENT_COLOR: Record<string, string> = {
+  scanner: '#3b82f6', trading: '#f59e0b', learning: '#a855f7', update: '#94a3b8',
+};
+
 const LearningCurveCard: React.FC = () => {
   const [data, setData] = useState<any>(null);
-  useEffect(() => { apiService.learningCurve().then(r => setData((r as any).data)).catch(() => {}); }, []);
-  const pts: any[] = data?.points ?? [];
-  if (pts.length < 2) return null;
+  const [metric, setMetric] = useState<LcMetric>('equity');
+  const [srcKey, setSrcKey] = useState<string>('All');
+  const [hovEv, setHovEv] = useState<{ x: number; ev: any } | null>(null);
 
-  const W = 600, H = 160, PL = 36, PR = 12, PT = 12, PB = 22;
-  const xs = pts.map((_, i) => i);
-  const ys = pts.map(p => p.cumWinRate * 100);
-  const yMin = Math.max(0, Math.min(...ys) - 5), yMax = Math.min(100, Math.max(...ys) + 5);
-  const sx = (i: number) => PL + (i / (xs.length - 1)) * (W - PL - PR);
+  useEffect(() => {
+    apiService.learningCurve(SOURCE_PRESETS[srcKey], 50)
+      .then(r => setData((r as any).data)).catch(() => {});
+  }, [srcKey]);
+
+  const pts: any[] = data?.points ?? [];
+  const events: any[] = data?.events ?? [];
+  const bySource: any[] = data?.bySource ?? [];
+  if (pts.length < 2) {
+    return (
+      <div className="nd-card" style={{ padding: '16px 18px', marginBottom: 20 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>System Learning Curve</div>
+        <div style={{ fontSize: 12, color: 'var(--nd-text-3)', marginTop: 6 }}>
+          Not enough {srcKey.toLowerCase()} trades yet to plot.
+        </div>
+      </div>
+    );
+  }
+
+  const val = (p: any): number =>
+    metric === 'equity' ? p.cumEquity
+      : metric === 'rolling' ? p.rollWinRate * 100
+        : p.cumWinRate * 100;
+  const isPct = metric !== 'equity';
+  const color = metric === 'equity' ? 'var(--nd-green)' : metric === 'rolling' ? '#3b82f6' : '#a855f7';
+
+  const W = 600, H = 170, PL = 42, PR = 12, PT = 16, PB = 26;
+  const ys = pts.map(val);
+  const t0 = Date.parse(pts[0].ts) || 0;
+  const t1 = Date.parse(pts[pts.length - 1].ts) || (pts.length - 1);
+  const span = (t1 - t0) || 1;
+  const pad = (Math.max(...ys) - Math.min(...ys)) * 0.08 || 1;
+  let yMin = Math.min(...ys) - pad, yMax = Math.max(...ys) + pad;
+  if (isPct) { yMin = Math.max(0, yMin); yMax = Math.min(100, yMax); }
+  const tx = (ts: string | number) => {
+    const t = typeof ts === 'number' ? ts : (Date.parse(ts) || t0);
+    return PL + Math.max(0, Math.min(1, (t - t0) / span)) * (W - PL - PR);
+  };
+  const sx = (i: number) => tx(pts[i].ts);
   const sy = (v: number) => PT + (1 - (v - yMin) / (yMax - yMin || 1)) * (H - PT - PB);
-  const line = pts.map((p, i) => `${sx(i).toFixed(1)},${sy(p.cumWinRate * 100).toFixed(1)}`).join(' ');
+  const line = pts.map((p, i) => `${sx(i).toFixed(1)},${sy(val(p)).toFixed(1)}`).join(' ');
   const last = pts[pts.length - 1];
+  const fmt = (v: number) => isPct ? `${v.toFixed(0)}%` : `${v >= 0 ? '+' : ''}${v.toFixed(0)}%`;
+  const headline = isPct ? `${val(last).toFixed(1)}%`
+    : `${val(last) >= 0 ? '+' : ''}${val(last).toFixed(1)}%`;
+  const trend = val(last) - val(pts[Math.max(0, pts.length - 6)]);
+
+  const tabBtn = (label: string, active: boolean, onClick: () => void) => (
+    <button key={label} onClick={onClick} style={{
+      padding: '3px 10px', fontSize: 11, fontWeight: 600, borderRadius: 6, cursor: 'pointer',
+      border: `1px solid ${active ? color : 'var(--nd-border)'}`,
+      background: active ? color : 'transparent',
+      color: active ? '#fff' : 'var(--nd-text-2)',
+    }}>{label}</button>
+  );
 
   return (
-    <div className="nd-card" style={{ padding: '16px 18px', marginBottom: 20 }}>
+    <div className="nd-card" style={{ padding: '16px 18px', marginBottom: 20, position: 'relative' }}>
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
         <div>
           <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>System Learning Curve</div>
-          <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>Cumulative win-rate as the AI accumulates experience from every trade</div>
+          <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>
+            {metric === 'equity' ? 'Cumulative return (equity) — rises even when win-rate is below 50%'
+              : metric === 'rolling' ? 'Trailing-50-trade win-rate — recent skill, not dragged by old trades'
+                : 'Cumulative win-rate over all trades (lagging)'}
+          </div>
         </div>
         <div style={{ textAlign: 'right' }}>
-          <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--nd-green)' }}>{(last.cumWinRate * 100).toFixed(1)}%</div>
-          <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>{data.totalTrades} trades</div>
+          <div style={{ fontSize: 18, fontWeight: 700, color }}>{headline}</div>
+          <div style={{ fontSize: 11, color: trend >= 0 ? 'var(--nd-green)' : 'var(--nd-red)' }}>
+            {trend >= 0 ? '▲' : '▼'} {fmt(Math.abs(trend))} recent · {data.totalTrades} trades
+          </div>
         </div>
       </div>
-      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 150 }} preserveAspectRatio="none">
+
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
+        {tabBtn('Equity', metric === 'equity', () => setMetric('equity'))}
+        {tabBtn('Rolling WR', metric === 'rolling', () => setMetric('rolling'))}
+        {tabBtn('Cumulative WR', metric === 'cumulative', () => setMetric('cumulative'))}
+        <span style={{ width: 1, background: 'var(--nd-border)', margin: '0 4px' }} />
+        {Object.keys(SOURCE_PRESETS).map(k => tabBtn(k, srcKey === k, () => setSrcKey(k)))}
+      </div>
+
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 160 }} preserveAspectRatio="none"
+        onMouseLeave={() => setHovEv(null)}>
         {[yMin, (yMin + yMax) / 2, yMax].map((v, i) => (
           <g key={i}>
             <line x1={PL} y1={sy(v)} x2={W - PR} y2={sy(v)} stroke="var(--nd-border)" strokeWidth="0.5" />
-            <text x={4} y={sy(v) + 3} fontSize="9" fill="var(--nd-text-3)">{v.toFixed(0)}%</text>
+            <text x={4} y={sy(v) + 3} fontSize="9" fill="var(--nd-text-3)">{fmt(v)}</text>
           </g>
         ))}
-        <polyline points={line} fill="none" stroke="var(--nd-green)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-        <circle cx={sx(pts.length - 1)} cy={sy(last.cumWinRate * 100)} r="3.5" fill="var(--nd-green)" />
+        {metric === 'equity' && yMin < 0 && yMax > 0 && (
+          <line x1={PL} y1={sy(0)} x2={W - PR} y2={sy(0)} stroke="var(--nd-text-3)" strokeWidth="0.6" strokeDasharray="3 3" />
+        )}
+        {/* System-update event markers */}
+        {events.map((ev, i) => {
+          const t = Date.parse(ev.occurredAt);
+          if (isNaN(t) || t < t0 - span * 0.02 || t > t1 + span * 0.02) return null;
+          const x = tx(t);
+          const c = EVENT_COLOR[ev.category] || EVENT_COLOR.update;
+          return (
+            <g key={i} style={{ cursor: 'pointer' }}
+              onMouseEnter={() => setHovEv({ x, ev })} onMouseLeave={() => setHovEv(null)}>
+              <line x1={x} y1={PT} x2={x} y2={H - PB} stroke={c} strokeWidth="1" strokeDasharray="3 3" opacity={0.8} />
+              <polygon points={`${x - 3},${PT} ${x + 3},${PT} ${x},${PT + 5}`} fill={c} />
+              <rect x={x - 7} y={PT} width={14} height={H - PB - PT} fill="transparent" />
+            </g>
+          );
+        })}
+        <polyline points={line} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+        <circle cx={sx(pts.length - 1)} cy={sy(val(last))} r="3.5" fill={color} />
+        {/* x-axis date labels */}
+        {[0, Math.floor(pts.length / 2), pts.length - 1].map((i, k) => (
+          <text key={k} x={sx(i)} y={H - 8} fontSize="9" fill="var(--nd-text-3)"
+            textAnchor={k === 0 ? 'start' : k === 2 ? 'end' : 'middle'}>{pts[i].date}</text>
+        ))}
       </svg>
+
+      {hovEv && (
+        <div style={{
+          position: 'absolute', left: `${(hovEv.x / W) * 100}%`, top: 96, transform: 'translateX(-50%)',
+          background: 'var(--nd-bg-2, #1b2330)', border: '1px solid var(--nd-border)', borderRadius: 8,
+          padding: '8px 10px', maxWidth: 260, zIndex: 10, boxShadow: '0 6px 20px rgba(0,0,0,.35)',
+          pointerEvents: 'none',
+        }}>
+          <div style={{ fontSize: 10, color: EVENT_COLOR[hovEv.ev.category] || '#94a3b8', fontWeight: 700, textTransform: 'uppercase' }}>
+            {hovEv.ev.category}
+          </div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--nd-text-1)' }}>{hovEv.ev.title}</div>
+          <div style={{ fontSize: 10, color: 'var(--nd-text-3)', marginBottom: 4 }}>
+            {new Date(hovEv.ev.occurredAt).toLocaleString()}
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--nd-text-2)', lineHeight: 1.35 }}>{hovEv.ev.detail}</div>
+        </div>
+      )}
+
+      {/* Per-source breakdown — exposes that win-rate ≠ profitability */}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
+        {bySource.map((s) => (
+          <div key={s.source} style={{
+            border: '1px solid var(--nd-border)', borderRadius: 8, padding: '5px 9px', fontSize: 11,
+          }}>
+            <span style={{ fontWeight: 700, color: 'var(--nd-text-1)' }}>{s.source}</span>
+            <span style={{ color: 'var(--nd-text-3)' }}> · {s.trades} trades</span>
+            <span style={{ color: 'var(--nd-text-2)' }}> · WR {(s.winRate * 100).toFixed(0)}%</span>
+            <span style={{ color: s.expectancy >= 0 ? 'var(--nd-green)' : 'var(--nd-red)', fontWeight: 600 }}>
+              {' · exp '}{s.expectancy >= 0 ? '+' : ''}{s.expectancy.toFixed(2)}%/trade
+            </span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 };

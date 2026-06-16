@@ -728,8 +728,23 @@ class ApiService {
     const response = await this.api.post('/api/ai-engine/autopilot/reset-cursor');
     return response.data;
   }
-  async learningCurve(): Promise<ApiResponse<any>> {
-    const response = await this.api.get('/api/ai-engine/learning-curve');
+  async setAutopilotPaperTiming(mode: 'normal' | 'aggressive'): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/ai-engine/autopilot/paper-timing', { mode });
+    return response.data;
+  }
+  async learningCurve(source = 'PAPER,LIVE,REPLAY', window = 50): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/ai-engine/learning-curve', { params: { source, window } });
+    return response.data;
+  }
+  async learningEvents(): Promise<any> {
+    const response = await this.api.get('/api/ai-engine/learning-events');
+    return response.data;
+  }
+  async addLearningEvent(ev: { title: string; detail?: string; category?: string; occurredAt?: string }): Promise<any> {
+    const response = await this.api.post('/api/ai-engine/learning-events', {
+      title: ev.title, detail: ev.detail ?? '', category: ev.category ?? 'update',
+      occurred_at: ev.occurredAt,
+    });
     return response.data;
   }
 
@@ -774,7 +789,7 @@ class ApiService {
   async sessionStart(payload: {
     mode: 'replay' | 'paper'; symbol: string; date?: string;
     start_time?: string; capital?: number; speed?: number; model?: string;
-    max_hold_minutes?: number;
+    max_hold_minutes?: number; timing_mode?: 'normal' | 'aggressive';
   }): Promise<ApiResponse<any>> {
     const response = await this.api.post('/api/sessions/start', payload);
     return response.data;

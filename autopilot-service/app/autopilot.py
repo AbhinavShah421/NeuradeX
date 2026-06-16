@@ -33,6 +33,7 @@ WATCHLIST_KEY = "ai_engine:watchlist"
 
 # Redis flags / state (shared with the backend so the UI toggle takes effect)
 PAPER_FLAG     = "ai_engine:autopilot_enabled"
+PAPER_TIMING   = "ai_engine:autopilot_paper_timing"   # "normal" | "aggressive"
 BACKTEST_FLAG  = "ai_engine:autopilot_backtest_enabled"
 BACKTEST_STATE = "ai_engine:autopilot_backtest_state"
 
@@ -126,6 +127,23 @@ async def set_mode(mode: str, enabled: bool) -> None:
         await r.set(key, "1" if enabled else "0", ex=86400 * 30)
     except Exception as exc:
         logger.warning("set_mode failed: %s", exc)
+
+
+async def _paper_timing() -> str:
+    """Entry-timing mode for autopilot paper sessions: 'normal' | 'aggressive'."""
+    try:
+        r = await _get_redis()
+        return "aggressive" if (await r.get(PAPER_TIMING)) == "aggressive" else "normal"
+    except Exception:
+        return "normal"
+
+
+async def set_paper_timing(mode: str) -> None:
+    try:
+        r = await _get_redis()
+        await r.set(PAPER_TIMING, "aggressive" if mode == "aggressive" else "normal", ex=86400 * 30)
+    except Exception as exc:
+        logger.warning("set_paper_timing failed: %s", exc)
 
 
 # ── Backend HTTP ──────────────────────────────────────────────────────────────
@@ -224,6 +242,7 @@ async def _do_paper_tick() -> None:
     raw = await r.get(_paper_started_key(today))
     started = set(json.loads(raw)) if raw else set()
     slots = PAPER_MAX - len([1 for s in sessions if s.get("status") == "running" and s.get("mode") == "paper"])
+    timing = await _paper_timing()
 
     for sym in syms:
         if slots <= 0:
@@ -231,7 +250,7 @@ async def _do_paper_tick() -> None:
         if sym in running or sym in started:
             continue
         sid = await _start_session({"mode": "paper", "symbol": sym, "capital": CAPITAL, "speed": 1,
-                                    "max_hold_minutes": MAX_HOLD_MIN})
+                                    "max_hold_minutes": MAX_HOLD_MIN, "timing_mode": timing})
         if sid:
             started.add(sym)
             slots -= 1
@@ -402,6 +421,7 @@ async def status() -> dict:
         "paper": {
             "enabled": await _flag(PAPER_FLAG),
             "market_open": _market_open(),
+            "timing_mode": await _paper_timing(),
             "running": len(paper_running),
             "max_concurrent": PAPER_MAX,
             "watchlist_size": len(syms),
