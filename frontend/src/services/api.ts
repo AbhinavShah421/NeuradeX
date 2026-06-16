@@ -720,6 +720,20 @@ class ApiService {
     const response = await this.api.get('/api/ai-engine/scan-diff', { params: { limit }, timeout: 20000 });
     return response.data;
   }
+  async patternModelStatus(): Promise<any> {
+    const response = await this.api.get('/api/ai-engine/pattern-model/status');
+    return response.data;
+  }
+  async patternModelCurve(limit = 200): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/ai-engine/pattern-model/curve', { params: { limit } });
+    return response.data;
+  }
+  async trainPatternModel(body: { lookbackDays?: number; horizon?: number; stride?: number } = {}): Promise<any> {
+    const response = await this.api.post('/api/ai-engine/pattern-model/train', {
+      lookback_days: body.lookbackDays ?? 365, horizon: body.horizon ?? 3, stride: body.stride ?? 1,
+    });
+    return response.data;
+  }
   async getAutopilot(): Promise<ApiResponse<any>> {
     const response = await this.api.get('/api/ai-engine/autopilot');
     return response.data;

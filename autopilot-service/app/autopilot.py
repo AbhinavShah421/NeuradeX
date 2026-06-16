@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone, timedelta
 
 import httpx
@@ -367,6 +368,27 @@ async def _do_backtest_step() -> None:
                "last_completed": done_date, "days_back": days_back})
     await _save_bt_state(st)
     logger.info("backtest autopilot finished %s → next %s (day %d)", done_date, next_cursor, st["completed_days"])
+    # Backtesting also drives the dedicated pattern-recognition model: each
+    # completed day, retrain it on patterns only so the recogniser keeps learning.
+    await _train_pattern_model()
+
+
+_last_pattern_train = 0.0
+
+
+async def _train_pattern_model() -> None:
+    """Trigger a pattern-only training run on the backend (debounced ~30 min)."""
+    global _last_pattern_train
+    if time.time() - _last_pattern_train < 1800:
+        return
+    _last_pattern_train = time.time()
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as c:
+            await c.post(f"{BACKEND_URL}/api/ai-engine/pattern-model/train",
+                         json={"lookback_days": 365, "horizon": 3, "stride": 1})
+        logger.info("backtest autopilot kicked pattern-model training")
+    except Exception as exc:
+        logger.debug("pattern-model train kick failed: %s", exc)
 
 
 # ── Loops ─────────────────────────────────────────────────────────────────────

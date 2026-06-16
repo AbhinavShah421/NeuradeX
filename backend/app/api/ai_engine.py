@@ -1257,6 +1257,59 @@ async def memory_sweep_status():
     return {"running": is_running(), "last": get_last_sweep()}
 
 
+# ── Pattern Recognition Model (dedicated, continuously-learning) ───────────────
+
+class PatternTrainRequest(BaseModel):
+    symbols:       Optional[list[str]] = None
+    lookback_days: int = 365
+    horizon:       int = 3       # bars ahead used to label the pattern's outcome
+    stride:        int = 1
+
+
+@router.post("/pattern-model/train")
+async def pattern_model_train(req: PatternTrainRequest, background: bool = True):
+    """Train the pattern-recognition model from backtest history — patterns ONLY
+    (fingerprint → realised forward move). Keeps the recogniser getting smarter."""
+    await _db_once()
+    import asyncio
+    from app.agents.pattern_model import train_pattern_model, is_training
+    if is_training():
+        return {"status": "already_running"}
+    kw = dict(symbols=req.symbols, lookback_days=req.lookback_days,
+              horizon=req.horizon, stride=req.stride, trigger="manual")
+    if background:
+        asyncio.create_task(train_pattern_model(**kw))
+        return {"status": "started"}
+    return await train_pattern_model(**kw)
+
+
+@router.get("/pattern-model/status")
+async def pattern_model_status():
+    """Training state + the model's current accuracy."""
+    from app.agents import get_pattern_model
+    from app.agents.pattern_model import is_training, get_last_train
+    stats = await get_pattern_model().stats()
+    return {"running": is_training(), "last_train": get_last_train(), "model": stats}
+
+
+@router.get("/pattern-model/curve")
+async def pattern_model_curve(limit: int = 200):
+    """The model's accuracy as it has learned (for the 'getting smarter' chart)."""
+    from app.agents import get_pattern_model
+    pts = await get_pattern_model().curve(limit=limit)
+    return {"status": "success", "data": {"points": pts}}
+
+
+@router.post("/pattern-model/predict")
+async def pattern_model_predict(req: AnalyzeRequest):
+    """What does the pattern model say about this candle window's *pattern* alone?"""
+    from app.agents import get_pattern_model
+    pred = get_pattern_model().predict_candles(req.candles)
+    if pred is None:
+        return {"status": "error", "detail": "not enough candles for a pattern fingerprint"}
+    return {"status": "success", "data": pred}
+
+
 @router.post("/memory/seed")
 async def memory_seed(req: SeedMemoryRequest):
     """Bulk-seed the memory bank by replaying historical daily candles.

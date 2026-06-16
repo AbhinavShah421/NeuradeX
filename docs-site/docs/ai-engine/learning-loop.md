@@ -228,6 +228,36 @@ honest success metric is committed-tier **expectancy**, not raw hit-rate.
 Shown as the purple **High-conviction** line on the Dashboard AI Scan Accuracy
 card; `POST /api/ai-engine/backfill-committed` reconstructs its history.
 
+## Pattern Recognition Model — backtest as a pattern trainer
+
+A dedicated, continuously-learning model that considers **patterns only** — the
+19-dim scale-free fingerprint of a candle window (see fingerprint.py), with no
+indicators/news/RL. It is an **online logistic-regression** learner: every
+labelled example nudges the weights, so it keeps getting smarter as backtesting
+feeds it more `(pattern → realised forward move)` pairs. Weights, sample count
+and a learning curve are persisted in Postgres (`pattern_model_state`,
+`pattern_model_curve`) so progress survives restarts and is visualised on the
+Dashboard **Pattern Recognition Model** card.
+
+Training is pure pattern→outcome: `train_pattern_model` walks historical candles,
+builds the fingerprint of each window (no lookahead) and labels it by the
+realised return `horizon` bars later. The **backtest autopilot drives it** — each
+completed backtest day kicks a (debounced) retrain, so backtesting's job becomes
+making the recogniser smarter rather than only generating trades.
+
+| Method & path | Description |
+|---|---|
+| `POST /api/ai-engine/pattern-model/train` | Train on patterns from backtest history (`lookback_days`, `horizon`, `stride`) |
+| `GET /api/ai-engine/pattern-model/status` | Sample count + lifetime/recent accuracy + last-train summary |
+| `GET /api/ai-engine/pattern-model/curve` | Accuracy as it has learned (the "getting smarter" chart) |
+| `POST /api/ai-engine/pattern-model/predict` | P(up) for a candle window's pattern alone |
+
+This is intentionally separate from the Pattern Memory k-NN bank: the memory bank
+recalls specific past cases; this model generalises a smooth decision surface over
+pattern space and reports a single, improving accuracy. Patterns alone give a
+modest real edge (≈55% in training, up from a cold ~42%), so it is a *component*
+of conviction, not a standalone 90% oracle.
+
 ## Scan-to-scan diff — why a rank moved
 
 The scanner preserves the previous completed ranked board
