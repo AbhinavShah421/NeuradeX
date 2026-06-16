@@ -254,9 +254,20 @@ making the recogniser smarter rather than only generating trades.
 
 This is intentionally separate from the Pattern Memory k-NN bank: the memory bank
 recalls specific past cases; this model generalises a smooth decision surface over
-pattern space and reports a single, improving accuracy. Patterns alone give a
-modest real edge (≈55% in training, up from a cold ~42%), so it is a *component*
-of conviction, not a standalone 90% oracle.
+pattern space and reports a single, improving accuracy.
+
+**Full universe + growth.** Training is not limited to the curated list — it reads
+the scanner's full NSE universe (~2100) and trains a rotating `max_symbols` slice
+each run (persisted `ai_engine:pattern_train_offset`), so coverage and the learned
+sample count keep growing over time (e.g. 520k+ patterns and climbing).
+
+**High-confidence accuracy (the path toward a high hit-rate).** Patterns alone give
+a modest overall edge (~55%), and more data stabilises that — it does not make raw
+directional prediction 90%. The honest lever is **selectivity**: the model reports
+`high_conf_accuracy` — its accuracy on only the small subset where it is *sure*
+(`|p-0.5| ≥ 0.30`, abstaining otherwise). That subset runs meaningfully higher
+(~60%+) on a few % of patterns. Reaching 90% requires stacking this with the other
+*independent* signals in the committed tier, not the pattern model alone.
 
 ## Scan-to-scan diff — why a rank moved
 

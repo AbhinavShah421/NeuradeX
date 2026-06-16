@@ -915,6 +915,9 @@ const PatternModelCard: React.FC = () => {
   const m = status?.model ?? {};
   const recent = m.recentAccuracy != null ? m.recentAccuracy * 100 : null;
   const lifetime = m.lifetimeAccuracy != null ? m.lifetimeAccuracy * 100 : null;
+  const hcAcc = m.highConfAccuracy != null ? m.highConfAccuracy * 100 : null;
+  const hcCov = m.highConfCoverage != null ? m.highConfCoverage * 100 : null;
+  const slice = status?.lastTrain?.universeSlice;
   const running = status?.running;
 
   // sparkline of batch (generalisation) accuracy over training snapshots
@@ -933,13 +936,17 @@ const PatternModelCard: React.FC = () => {
         <div>
           <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>Pattern Recognition Model</div>
           <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>
-            A dedicated model that learns price <span style={{ color: '#06b6d4' }}>patterns only</span> from backtesting — gets smarter as it trains
+            Learns price <span style={{ color: '#06b6d4' }}>patterns only</span> across the full NSE universe. <span style={{ color: '#a855f7' }}>High-confidence</span> = accuracy when the model is sure (it abstains otherwise)
           </div>
         </div>
         <div style={{ display: 'flex', gap: 14, alignItems: 'center' }}>
           <div style={{ textAlign: 'right' }}>
+            <div style={{ fontSize: 18, fontWeight: 700, color: '#a855f7' }}>{hcAcc != null ? `${hcAcc.toFixed(1)}%` : '—'}</div>
+            <div style={{ fontSize: 10, color: 'var(--nd-text-3)' }}>high-confidence{hcCov != null ? ` · ${hcCov.toFixed(0)}% of picks` : ''}</div>
+          </div>
+          <div style={{ textAlign: 'right' }}>
             <div style={{ fontSize: 18, fontWeight: 700, color: '#06b6d4' }}>{recent != null ? `${recent.toFixed(1)}%` : '—'}</div>
-            <div style={{ fontSize: 10, color: 'var(--nd-text-3)' }}>recent · {lifetime != null ? `${lifetime.toFixed(0)}% lifetime` : 'untrained'}</div>
+            <div style={{ fontSize: 10, color: 'var(--nd-text-3)' }}>overall · {lifetime != null ? `${lifetime.toFixed(0)}% life` : 'untrained'}</div>
           </div>
           <button onClick={train} disabled={busy || running} style={{
             padding: '6px 12px', fontSize: 12, fontWeight: 600, borderRadius: 7, cursor: busy || running ? 'default' : 'pointer',
@@ -967,7 +974,8 @@ const PatternModelCard: React.FC = () => {
       )}
       <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginTop: 4 }}>
         {m.nSamples != null ? `${m.nSamples.toLocaleString()} patterns learned` : ''}
-        {pts.length ? ` · ${pts.length} training rounds` : ''}
+        {pts.length ? ` · ${pts.length} rounds` : ''}
+        {slice ? ` · universe ${slice}` : ''}
         {msg ? ` · ${msg}` : ''}
       </div>
     </div>
