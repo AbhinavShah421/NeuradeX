@@ -403,6 +403,21 @@ async def backfill_delivery(days: int = 14, limit: int = 250):
         return {"status": "error", "detail": str(exc)}
 
 
+@router.post("/backfill-committed")
+async def backfill_committed(days: int = 20, limit: int = 400):
+    """Ask the scanner to reconstruct the high-conviction tier's accuracy history."""
+    import httpx
+    from app.config import settings
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            await client.post(f"{settings.SCANNER_SERVICE_URL}/backfill-committed",
+                              params={"days": days, "limit": limit})
+        return {"status": "started", "days": days, "limit": limit}
+    except Exception as exc:
+        logger.warning("could not trigger committed backfill: %s", exc)
+        return {"status": "error", "detail": str(exc)}
+
+
 @router.get("/scan-status")
 async def scan_status():
     """Centralized scan status (shared by Dashboard / Predictions / Portfolio):
@@ -680,9 +695,10 @@ class ScanFeedback(BaseModel):
     trade_kind:              str = "intraday"   # "intraday" | "delivery"
 
 
-# Required accuracy the scans should clear; below this the system flags
-# under-performance and dampens conviction (see scanner calibration).
-SCAN_ACCURACY_TARGET = float(os.getenv("SCAN_ACCURACY_TARGET", "0.55"))
+# Accuracy goal. The broad scan realistically sits ~50% (markets are near-random
+# at the single-pick level); the high-conviction "committed" tier is what we tune
+# toward this target via selectivity + abstention.
+SCAN_ACCURACY_TARGET = float(os.getenv("SCAN_ACCURACY_TARGET", "0.90"))
 
 _SCAN_EVAL_DDL = """
 CREATE TABLE IF NOT EXISTS scan_evaluations (
@@ -786,10 +802,8 @@ async def scan_evaluation():
         logger.debug("scan eval read failed: %s", exc)
 
     target = SCAN_ACCURACY_TARGET
-    trend: list[dict] = []            # intraday (back-compat)
-    delivery_trend: list[dict] = []
-    overall = {"days": 0, "accuracy": None, "picks": 0}
-    overall_delivery = {"days": 0, "accuracy": None, "picks": 0}
+    trends: dict[str, list[dict]] = {"intraday": [], "delivery": [], "committed": []}
+    overalls: dict[str, dict] = {k: {"days": 0, "accuracy": None, "picks": 0} for k in trends}
     try:
         await _ensure_scan_eval()
         async with engine.begin() as conn:
@@ -803,34 +817,33 @@ async def scan_evaluation():
                 ORDER BY eval_date ASC
             """))).fetchall()
             for r in rows:
+                kind = r[1] if r[1] in trends else "intraday"
                 acc = round(float(r[2]), 4)
-                pt = {
+                trends[kind].append({
                     "date": r[0].strftime("%Y-%m-%d") if r[0] else None,
                     "accuracy": acc,
                     "avg_realized_return_pct": round(float(r[3] or 0.0), 2),
                     "picks": int(r[4]),
                     "meets_target": acc >= target,
-                }
-                (delivery_trend if r[1] == "delivery" else trend).append(pt)
+                })
             agg = (await conn.execute(text("""
                 SELECT COALESCE(trade_kind,'intraday') kind,
                        AVG(CASE WHEN correct THEN 1.0 ELSE 0.0 END), COUNT(*)
                 FROM scan_evaluations GROUP BY COALESCE(trade_kind,'intraday')
             """))).fetchall()
             for a in agg:
-                o = {"days": len(delivery_trend if a[0] == "delivery" else trend),
-                     "accuracy": round(float(a[1]), 4), "picks": int(a[2]),
-                     "meets_target": float(a[1]) >= target}
-                if a[0] == "delivery":
-                    overall_delivery = o
-                else:
-                    overall = o
+                kind = a[0] if a[0] in trends else "intraday"
+                overalls[kind] = {"days": len(trends[kind]), "accuracy": round(float(a[1]), 4),
+                                  "picks": int(a[2]), "meets_target": float(a[1]) >= target}
     except Exception as exc:
         logger.debug("scan eval trend failed: %s", exc)
 
     return {"status": "success", "data": {
-        "latest": latest, "trend": trend, "delivery_trend": delivery_trend,
-        "overall": overall, "overall_delivery": overall_delivery, "target": target,
+        "latest": latest, "target": target,
+        "trend": trends["intraday"], "delivery_trend": trends["delivery"],
+        "committed_trend": trends["committed"],
+        "overall": overalls["intraday"], "overall_delivery": overalls["delivery"],
+        "overall_committed": overalls["committed"],
     }}
 
 

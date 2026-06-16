@@ -789,15 +789,18 @@ const LearningCurveCard: React.FC = () => {
 
 const ScanAccuracyCard: React.FC = () => {
   const [data, setData] = useState<any>(null);
-  const [show, setShow] = useState<{ intraday: boolean; delivery: boolean }>({ intraday: true, delivery: true });
+  const [show, setShow] = useState<{ intraday: boolean; delivery: boolean; committed: boolean }>(
+    { intraday: true, delivery: true, committed: true });
   useEffect(() => { apiService.scanEvaluation().then(r => setData((r as any).data)).catch(() => {}); }, []);
 
   const intraday: any[] = data?.trend ?? [];
   const delivery: any[] = data?.deliveryTrend ?? [];
-  const target: number = (data?.target ?? 0.55) * 100;
-  const ov = data?.overall, ovd = data?.overallDelivery;
+  const committed: any[] = data?.committedTrend ?? [];
+  const target: number = (data?.target ?? 0.9) * 100;
+  const ov = data?.overall, ovd = data?.overallDelivery, ovc = data?.overallCommitted;
 
   const series = [
+    { key: 'committed', label: 'High-conviction', color: '#a855f7', pts: committed, on: show.committed, overall: ovc },
     { key: 'intraday', label: 'Intraday', color: '#22c55e', pts: intraday, on: show.intraday, overall: ov },
     { key: 'delivery', label: 'Delivery', color: '#3b82f6', pts: delivery, on: show.delivery, overall: ovd },
   ];
@@ -806,21 +809,22 @@ const ScanAccuracyCard: React.FC = () => {
 
   const W = 600, H = 170, PL = 40, PR = 12, PT = 16, PB = 26;
   // x-axis = union of dates across both series, ordered
-  const dates = Array.from(new Set([...intraday, ...delivery].map(p => p.date))).filter(Boolean).sort();
+  const dates = Array.from(new Set([...intraday, ...delivery, ...committed].map(p => p.date))).filter(Boolean).sort();
   const xi = (d: string) => dates.length <= 1 ? PL + (W - PL - PR) / 2 : PL + (dates.indexOf(d) / (dates.length - 1)) * (W - PL - PR);
   const ys = [...allPts.map(p => p.accuracy * 100), target];
   const yMin = Math.max(0, Math.min(...ys) - 8), yMax = Math.min(100, Math.max(...ys) + 8);
   const sy = (v: number) => PT + (1 - (v - yMin) / (yMax - yMin || 1)) * (H - PT - PB);
 
   const latestAcc = (s: any) => s.pts.length ? s.pts[s.pts.length - 1].accuracy * 100 : null;
-  const intradayBelow = ov?.accuracy != null && ov.accuracy * 100 < target;
+  const commAcc = ovc?.accuracy != null ? ovc.accuracy * 100 : null;
+  const commBelow = commAcc != null && commAcc < target;
 
   return (
     <div className="nd-card" style={{ padding: '16px 18px', marginBottom: 0 }}>
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
         <div>
           <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>AI Scan Accuracy</div>
-          <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>Picks graded vs the actual move, per trade day · target {target.toFixed(0)}%</div>
+          <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>Graded vs the actual move · <span style={{ color: '#a855f7' }}>High-conviction</span> is the selective tier tuned to the {target.toFixed(0)}% target</div>
         </div>
         <div style={{ display: 'flex', gap: 6 }}>
           {series.map(s => {
@@ -874,12 +878,15 @@ const ScanAccuracyCard: React.FC = () => {
         </svg>
       )}
 
-      {intradayBelow && (
-        <div style={{ marginTop: 8, fontSize: 11, color: '#fca5a5', background: '#ef444415', border: '1px solid #ef444433', borderRadius: 8, padding: '6px 9px' }}>
-          ⚠ Intraday accuracy {(ov.accuracy * 100).toFixed(0)}% is below the {target.toFixed(0)}% target — conviction is auto-dampened until it recovers.
-          {data?.latest?.learning_note ? ` ${data.latest.learning_note}` : ''}
+      {commBelow ? (
+        <div style={{ marginTop: 8, fontSize: 11, color: '#d8b4fe', background: '#a855f715', border: '1px solid #a855f733', borderRadius: 8, padding: '6px 9px' }}>
+          The high-conviction tier is at {commAcc!.toFixed(0)}% vs the {target.toFixed(0)}% target — the selectivity bar auto-tightens each session (fewer, higher-confluence picks) to close the gap. Broad intraday/delivery accuracy stays ~50% by nature and isn't traded.
         </div>
-      )}
+      ) : commAcc != null ? (
+        <div style={{ marginTop: 8, fontSize: 11, color: '#86efac', background: '#22c55e15', border: '1px solid #22c55e33', borderRadius: 8, padding: '6px 9px' }}>
+          ✓ High-conviction tier at {commAcc.toFixed(0)}% — meeting the {target.toFixed(0)}% target. Only these committed picks are acted on.
+        </div>
+      ) : null}
     </div>
   );
 };

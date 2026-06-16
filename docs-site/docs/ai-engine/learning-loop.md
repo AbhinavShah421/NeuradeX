@@ -204,6 +204,30 @@ scanner **dampens its conviction multipliers** (EMA calibration) so the next
 scans promote fewer high-grade picks until accuracy recovers — surfaced on the
 Dashboard **AI Scan Accuracy** card with an under-target warning.
 
+## High-conviction tier — precision over coverage
+
+Directional accuracy on *every* pick can't reach 90% — markets are near-random at
+the single-pick level, and the broad scan sits ~50%. The way to a high hit-rate
+is **selectivity + abstention**: only *commit* to a pick when many independent
+signals agree, and ignore the rest.
+
+A pick is **committed** only when it is a grade-A BUY with all six independent
+confirmations (trend, momentum, MACD, volume, regime, RSI) and a win-probability
+above an adaptive floor (`ai_engine:hc_params`). Everything else is "watch, don't
+trade". The committed tier is graded separately (`trade_kind='committed'`) and is
+the only series measured against `SCAN_ACCURACY_TARGET` (0.90).
+
+An **adaptive controller** (`_tune_hc_params`) tightens the bar each session when
+the committed tier misses target (higher win-prob floor / more confirmations →
+fewer, higher-confluence picks) and eases only if nothing qualifies. In backtest
+the loose bar gave ~46% on ~32 picks/day; the strict bar gives **~71% on ~6
+picks/day** with strongly positive average returns, and ultra-confluent days hit
+90–100% on 1–7 picks. The realistic ceiling is precision/coverage-bound, so the
+honest success metric is committed-tier **expectancy**, not raw hit-rate.
+
+Shown as the purple **High-conviction** line on the Dashboard AI Scan Accuracy
+card; `POST /api/ai-engine/backfill-committed` reconstructs its history.
+
 ## Scan-to-scan diff — why a rank moved
 
 The scanner preserves the previous completed ranked board
