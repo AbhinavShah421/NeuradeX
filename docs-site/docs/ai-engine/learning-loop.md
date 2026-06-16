@@ -184,3 +184,31 @@ gates (**Strict**, **Gentle**) therefore enforce a confidence **band** — both 
 floor *and* a ceiling (`max_conf` ≈ 0.72) — skipping over-confident setups.
 Restricting historical entries to the band lifts REPLAY expectancy from
 ≈ −0.10%/trade to ≈ +0.05%/trade. **Loose** stays uncapped by design.
+
+## Scan accuracy — learning from prediction vs. actual
+
+Every scan is graded against what actually happened, so the system measures and
+improves its hit-rate day by day:
+
+- **Intraday** — the morning watchlist is graded after the close on the realised
+  same-day move (`evaluate_day`).
+- **Delivery** — delivery picks are graded on their **N-trading-day forward
+  return** (`SCAN_DELIVERY_HORIZON`, default 5; "correct" if it gained
+  `SCAN_DELIVERY_TARGET_PCT`). The scheduler retries until the horizon elapses.
+
+Both feed `POST /scan-feedback` tagged with `trade_kind`, persisted in
+`scan_evaluations`. `GET /scan-evaluation` returns per-trade-day accuracy for
+**both** kinds (`trend`, `delivery_trend`), each point flagged `meets_target`
+against `SCAN_ACCURACY_TARGET` (default 0.55). When a day misses the target the
+scanner **dampens its conviction multipliers** (EMA calibration) so the next
+scans promote fewer high-grade picks until accuracy recovers — surfaced on the
+Dashboard **AI Scan Accuracy** card with an under-target warning.
+
+## Scan-to-scan diff — why a rank moved
+
+The scanner preserves the previous completed ranked board
+(`ai_engine:ranked:prev`). `GET /scan-diff` compares it to the current board and
+returns, per stock, the **rank delta**, names that **entered**/**dropped off**,
+and a **reason** synthesised from the scoring components (call change, grade
+change, win-probability shift, score delta, fresh news catalyst). Shown in the
+Dashboard **AI Watchlist → "What changed since the last scan"** panel.

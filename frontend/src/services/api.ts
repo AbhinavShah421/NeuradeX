@@ -716,6 +716,10 @@ class ApiService {
     const response = await this.api.get('/api/ai-engine/ranked', { params: { limit }, timeout: 20000 });
     return response.data;
   }
+  async scanDiff(limit = 60): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/ai-engine/scan-diff', { params: { limit }, timeout: 20000 });
+    return response.data;
+  }
   async getAutopilot(): Promise<ApiResponse<any>> {
     const response = await this.api.get('/api/ai-engine/autopilot');
     return response.data;

@@ -38,11 +38,19 @@ _YAHOO = "https://query1.finance.yahoo.com/v8/finance/chart/"
 _UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Accept": "application/json"}
 _WATCHLIST_KEY   = "ai_engine:watchlist"
 _RANKED_KEY      = "ai_engine:ranked"                    # full ranked board for the Predictions page
+_RANKED_PREV_KEY = "ai_engine:ranked:prev"               # last completed board — for scan-to-scan diff
 _CANDIDATES_KEY  = "ai_engine:scan_candidates"           # candidate pool for the sentiment-service
 _SENTIMENT_KEY   = "ai_engine:sentiment:{}"              # per-symbol news signal (sentiment-service)
 _PREMARKET_KEY   = "ai_engine:watchlist:premarket"   # snapshot graded after close
 _CALIBRATION_KEY = "ai_engine:scan_calibration"       # learned confidence multipliers
 _EVAL_KEY        = "ai_engine:scan_eval:latest"       # last post-market grade
+_DELIVERY_DONE_KEY = "ai_engine:delivery_eval_done:{}"  # per-entry-date delivery-grade marker
+
+# Delivery grading — picks are graded on their N-trading-day forward return.
+DELIVERY_HORIZON_DAYS = int(os.getenv("SCAN_DELIVERY_HORIZON", "5"))
+DELIVERY_TARGET_PCT   = float(os.getenv("SCAN_DELIVERY_TARGET_PCT", "1.5"))
+# Accuracy the scans should clear; below it we flag under-performance + damp conviction.
+SCAN_ACCURACY_TARGET  = float(os.getenv("SCAN_ACCURACY_TARGET", "0.55"))
 
 # Intraday-fitness gates — a stock must clear these to be tradable intraday
 MIN_AVG_VOLUME = float(os.getenv("SCAN_MIN_VOLUME", "300000"))   # liquidity
@@ -362,6 +370,7 @@ async def _fetch_chart(client: httpx.AsyncClient, ysym: str) -> list[dict]:
             if not res:
                 return []
             q = (res.get("indicators", {}).get("quote") or [{}])[0]
+            ts = res.get("timestamp", []) or []
             o, h, l, c, v = q.get("open", []), q.get("high", []), q.get("low", []), q.get("close", []), q.get("volume", [])
             out = []
             for i in range(len(c)):
@@ -369,8 +378,11 @@ async def _fetch_chart(client: httpx.AsyncClient, ysym: str) -> list[dict]:
                     cl = c[i]
                     if cl is None or float(cl) <= 0:
                         continue
-                    out.append({"o": float(o[i] or cl), "h": float(h[i] or cl),
-                                "l": float(l[i] or cl), "c": float(cl), "v": int(v[i] or 0)})
+                    bar = {"o": float(o[i] or cl), "h": float(h[i] or cl),
+                           "l": float(l[i] or cl), "c": float(cl), "v": int(v[i] or 0)}
+                    if i < len(ts) and ts[i]:
+                        bar["t"] = int(ts[i])      # epoch seconds — used for date alignment
+                    out.append(bar)
                 except (TypeError, ValueError, IndexError):
                     continue
             return out
@@ -522,6 +534,16 @@ async def scan_once(phase: str = "intraday") -> dict:
         return {}
     _state.update({"running": True, "run_started": time.time(), "scanning": True})
 
+    # Preserve the last *completed* ranked board as the diff baseline before the
+    # progressive checkpoints below start overwriting the live board.
+    try:
+        rc0 = await _get_redis()
+        prev_board = await rc0.get(_RANKED_KEY)
+        if prev_board:
+            await rc0.set(_RANKED_PREV_KEY, prev_board, ex=86400 * 2)
+    except Exception as exc:
+        logger.debug("ranked prev snapshot skipped: %s", exc)
+
     calib = await _load_calibration()
     universe = await _load_universe()
     total = len(universe)
@@ -671,7 +693,9 @@ async def scan_once(phase: str = "intraday") -> dict:
         r = await _get_redis()
         await r.set(_WATCHLIST_KEY, json.dumps(payload), ex=86400)
         if phase == "premarket":
-            await r.set(f"{_PREMARKET_KEY}:{now.strftime('%Y-%m-%d')}", json.dumps(payload), ex=86400 * 3)
+            # 14-day retention so delivery picks survive long enough to be graded
+            # on their multi-day forward return.
+            await r.set(f"{_PREMARKET_KEY}:{now.strftime('%Y-%m-%d')}", json.dumps(payload), ex=86400 * 14)
     except Exception as exc:
         logger.warning("watchlist write failed: %s", exc)
 
@@ -744,10 +768,18 @@ async def evaluate_day(date_str: str | None = None) -> dict:
         a = by_action.setdefault(g["action"], {"n": 0, "hits": 0})
         a["n"] += 1; a["hits"] += 1 if g["correct"] else 0
 
+    meets_target = accuracy >= SCAN_ACCURACY_TARGET
     eval_payload = {
-        "date": date_str, "evaluated_at": now.isoformat(),
+        "date": date_str, "evaluated_at": now.isoformat(), "trade_kind": "intraday",
         "picks": len(graded), "hits": hits,
         "accuracy": accuracy, "avg_realized_return_pct": avg_realized,
+        "target": SCAN_ACCURACY_TARGET, "meets_target": meets_target,
+        "learning_note": (
+            f"Intraday scan accuracy {accuracy:.0%} is BELOW the {SCAN_ACCURACY_TARGET:.0%} target — "
+            "conviction multipliers dampened; the next scans promote fewer high-grade picks until accuracy recovers."
+            if not meets_target else
+            f"Intraday scan accuracy {accuracy:.0%} meets the {SCAN_ACCURACY_TARGET:.0%} target."
+        ),
         "by_action": {k: {"n": v["n"], "accuracy": round(v["hits"] / v["n"], 4)} for k, v in by_action.items()},
         "results": sorted(graded, key=lambda g: -g["realized_return_pct"]),
     }
@@ -803,6 +835,112 @@ async def _push_feedback(eval_payload: dict) -> None:
         logger.debug("scan feedback push skipped: %s", exc)
 
 
+# ── Delivery (multi-day) evaluation ───────────────────────────────────────────
+
+def _bar_date(bar: dict) -> str | None:
+    t = bar.get("t")
+    if not t:
+        return None
+    return datetime.fromtimestamp(t, IST).strftime("%Y-%m-%d")
+
+
+async def evaluate_delivery(entry_date: str) -> dict:
+    """Grade the delivery picks made on `entry_date` against their forward return
+    over DELIVERY_HORIZON_DAYS trading days. Delivery setups are BUY/holds, so a
+    pick is 'correct' if it gained at least DELIVERY_TARGET_PCT within the horizon.
+
+    Returns {status:'not_ready'} until enough forward sessions exist, so the
+    post-close scheduler can keep retrying until the horizon has elapsed.
+    """
+    r = await _get_redis()
+    if await r.get(_DELIVERY_DONE_KEY.format(entry_date)):
+        return {"status": "already_graded", "date": entry_date}
+    raw = await r.get(f"{_PREMARKET_KEY}:{entry_date}")
+    if not raw:
+        return {"status": "no_snapshot", "date": entry_date}
+    items = (json.loads(raw) or {}).get("delivery", [])
+    if not items:
+        return {"status": "empty", "date": entry_date}
+
+    graded: list[dict] = []
+    not_ready = False
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        for w in items:
+            candles = await _fetch_daily(client, w["symbol"])
+            await asyncio.sleep(FETCH_DELAY)
+            if not candles:
+                continue
+            # locate the entry bar (last bar on/before entry_date)
+            ei = None
+            for i, b in enumerate(candles):
+                bd = _bar_date(b)
+                if bd and bd <= entry_date:
+                    ei = i
+                elif bd and bd > entry_date:
+                    break
+            if ei is None:
+                continue
+            if ei + DELIVERY_HORIZON_DAYS >= len(candles):
+                not_ready = True            # horizon hasn't elapsed yet — retry later
+                continue
+            entry_c = candles[ei]["c"]
+            fwd_c = candles[ei + DELIVERY_HORIZON_DAYS]["c"]
+            fwd_ret = (fwd_c - entry_c) / entry_c * 100 if entry_c else 0.0
+            graded.append({
+                "symbol": w["symbol"], "action": w.get("action", "BUY"),
+                "predicted_confidence": w.get("confidence"),
+                "predicted_signal_score": w.get("delivery_score") or w.get("signal_score"),
+                "day_return_pct": round(fwd_ret, 2),
+                "realized_return_pct": round(fwd_ret, 2),
+                "correct": bool(fwd_ret >= DELIVERY_TARGET_PCT),
+                "trade_kind": "delivery",
+            })
+
+    if not graded:
+        return {"status": "not_ready" if not_ready else "no_data", "date": entry_date}
+    if not_ready and len(graded) < max(1, len(items) // 2):
+        return {"status": "not_ready", "date": entry_date}   # too few have matured
+
+    hits = sum(1 for g in graded if g["correct"])
+    accuracy = round(hits / len(graded), 4)
+    avg_realized = round(sum(g["realized_return_pct"] for g in graded) / len(graded), 2)
+    meets_target = accuracy >= SCAN_ACCURACY_TARGET
+    eval_payload = {
+        "date": entry_date, "evaluated_at": _ist_now().isoformat(), "trade_kind": "delivery",
+        "picks": len(graded), "hits": hits, "accuracy": accuracy,
+        "avg_realized_return_pct": avg_realized,
+        "target": SCAN_ACCURACY_TARGET, "meets_target": meets_target,
+        "horizon_days": DELIVERY_HORIZON_DAYS,
+        "results": sorted(graded, key=lambda g: -g["realized_return_pct"]),
+    }
+    try:
+        await r.set(f"ai_engine:scan_eval:delivery:{entry_date}", json.dumps(eval_payload), ex=86400 * 90)
+        await r.set(_DELIVERY_DONE_KEY.format(entry_date), "1", ex=86400 * 30)
+    except Exception as exc:
+        logger.warning("delivery eval write failed: %s", exc)
+    await _push_feedback(eval_payload)
+    logger.info("delivery grade %s: %d picks, accuracy %.0f%%, avg %+.2f%% over %dd",
+                entry_date, len(graded), accuracy * 100, avg_realized, DELIVERY_HORIZON_DAYS)
+    return eval_payload
+
+
+async def grade_due_delivery() -> None:
+    """Grade any delivery snapshot whose horizon has now elapsed (scan back over
+    recent dated snapshots; each date is graded at most once)."""
+    r = await _get_redis()
+    today = _ist_now()
+    for back in range(DELIVERY_HORIZON_DAYS, DELIVERY_HORIZON_DAYS + 12):
+        d = (today - timedelta(days=back)).strftime("%Y-%m-%d")
+        if await r.get(_DELIVERY_DONE_KEY.format(d)):
+            continue
+        if not await r.get(f"{_PREMARKET_KEY}:{d}"):
+            continue
+        try:
+            await evaluate_delivery(d)
+        except Exception as exc:
+            logger.debug("delivery grade %s skipped: %s", d, exc)
+
+
 # ── Schedulers ────────────────────────────────────────────────────────────────
 
 async def scanner_loop() -> None:
@@ -835,6 +973,8 @@ async def schedule_loop() -> None:
             if weekday and minutes >= POSTMARKET_MIN and _state["last_eval_date"] != today:
                 logger.info("post-close evaluation for %s", today)
                 await evaluate_day(today)
+                # Grade any older delivery picks whose holding horizon has elapsed.
+                await grade_due_delivery()
         except asyncio.CancelledError:
             break
         except Exception as exc:

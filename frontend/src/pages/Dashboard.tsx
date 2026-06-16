@@ -785,6 +785,105 @@ const LearningCurveCard: React.FC = () => {
   );
 };
 
+// ── AI scan accuracy (predicted vs actual, per trade-day) ──────────────────────
+
+const ScanAccuracyCard: React.FC = () => {
+  const [data, setData] = useState<any>(null);
+  const [show, setShow] = useState<{ intraday: boolean; delivery: boolean }>({ intraday: true, delivery: true });
+  useEffect(() => { apiService.scanEvaluation().then(r => setData((r as any).data)).catch(() => {}); }, []);
+
+  const intraday: any[] = data?.trend ?? [];
+  const delivery: any[] = data?.deliveryTrend ?? [];
+  const target: number = (data?.target ?? 0.55) * 100;
+  const ov = data?.overall, ovd = data?.overallDelivery;
+
+  const series = [
+    { key: 'intraday', label: 'Intraday', color: '#22c55e', pts: intraday, on: show.intraday, overall: ov },
+    { key: 'delivery', label: 'Delivery', color: '#3b82f6', pts: delivery, on: show.delivery, overall: ovd },
+  ];
+  const allPts = series.filter(s => s.on).flatMap(s => s.pts);
+  const hasData = allPts.length >= 1;
+
+  const W = 600, H = 170, PL = 40, PR = 12, PT = 16, PB = 26;
+  // x-axis = union of dates across both series, ordered
+  const dates = Array.from(new Set([...intraday, ...delivery].map(p => p.date))).filter(Boolean).sort();
+  const xi = (d: string) => dates.length <= 1 ? PL + (W - PL - PR) / 2 : PL + (dates.indexOf(d) / (dates.length - 1)) * (W - PL - PR);
+  const ys = [...allPts.map(p => p.accuracy * 100), target];
+  const yMin = Math.max(0, Math.min(...ys) - 8), yMax = Math.min(100, Math.max(...ys) + 8);
+  const sy = (v: number) => PT + (1 - (v - yMin) / (yMax - yMin || 1)) * (H - PT - PB);
+
+  const latestAcc = (s: any) => s.pts.length ? s.pts[s.pts.length - 1].accuracy * 100 : null;
+  const intradayBelow = ov?.accuracy != null && ov.accuracy * 100 < target;
+
+  return (
+    <div className="nd-card" style={{ padding: '16px 18px', marginBottom: 0 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>AI Scan Accuracy</div>
+          <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>Picks graded vs the actual move, per trade day · target {target.toFixed(0)}%</div>
+        </div>
+        <div style={{ display: 'flex', gap: 6 }}>
+          {series.map(s => {
+            const la = latestAcc(s);
+            return (
+              <button key={s.key} onClick={() => setShow(p => ({ ...p, [s.key]: !(p as any)[s.key] }))} style={{
+                padding: '4px 9px', borderRadius: 7, cursor: 'pointer', textAlign: 'right',
+                border: `1px solid ${s.on ? s.color : 'var(--nd-border)'}`,
+                background: s.on ? `${s.color}1a` : 'transparent', opacity: s.on ? 1 : 0.5,
+              }}>
+                <div style={{ fontSize: 10, color: 'var(--nd-text-3)' }}>{s.label}</div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: s.color }}>{la != null ? `${la.toFixed(0)}%` : '—'}</div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {!hasData ? (
+        <div style={{ fontSize: 12, color: 'var(--nd-text-3)', padding: '24px 0' }}>
+          No graded scans yet — the morning watchlist is graded after each close (delivery picks after a {data?.latest?.horizon_days ?? 5}-day hold).
+        </div>
+      ) : (
+        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 160 }} preserveAspectRatio="none">
+          {[yMin, (yMin + yMax) / 2, yMax].map((v, i) => (
+            <g key={i}>
+              <line x1={PL} y1={sy(v)} x2={W - PR} y2={sy(v)} stroke="var(--nd-border)" strokeWidth="0.5" />
+              <text x={4} y={sy(v) + 3} fontSize="9" fill="var(--nd-text-3)">{v.toFixed(0)}%</text>
+            </g>
+          ))}
+          {/* target line */}
+          <line x1={PL} y1={sy(target)} x2={W - PR} y2={sy(target)} stroke="#f59e0b" strokeWidth="1" strokeDasharray="4 3" opacity={0.8} />
+          <text x={W - PR} y={sy(target) - 3} fontSize="9" fill="#f59e0b" textAnchor="end">target {target.toFixed(0)}%</text>
+          {series.filter(s => s.on && s.pts.length).map(s => {
+            const line = s.pts.map(p => `${xi(p.date).toFixed(1)},${sy(p.accuracy * 100).toFixed(1)}`).join(' ');
+            return (
+              <g key={s.key}>
+                {s.pts.length > 1
+                  ? <polyline points={line} fill="none" stroke={s.color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                  : null}
+                {s.pts.map((p, i) => (
+                  <circle key={i} cx={xi(p.date)} cy={sy(p.accuracy * 100)} r="3"
+                    fill={p.meetsTarget ? s.color : '#ef4444'} stroke={s.color} strokeWidth="1" />
+                ))}
+              </g>
+            );
+          })}
+          {dates.length > 0 && [dates[0], dates[dates.length - 1]].map((d, k) => (
+            <text key={k} x={xi(d)} y={H - 8} fontSize="9" fill="var(--nd-text-3)" textAnchor={k === 0 ? 'start' : 'end'}>{d}</text>
+          ))}
+        </svg>
+      )}
+
+      {intradayBelow && (
+        <div style={{ marginTop: 8, fontSize: 11, color: '#fca5a5', background: '#ef444415', border: '1px solid #ef444433', borderRadius: 8, padding: '6px 9px' }}>
+          ⚠ Intraday accuracy {(ov.accuracy * 100).toFixed(0)}% is below the {target.toFixed(0)}% target — conviction is auto-dampened until it recovers.
+          {data?.latest?.learning_note ? ` ${data.latest.learning_note}` : ''}
+        </div>
+      )}
+    </div>
+  );
+};
+
 // ── AI Watchlist tab (self-running scanner output + evidence) ──────────────────
 
 const ACTION_BG: Record<string, string> = { BUY: '#22c55e', SELL: '#ef4444', HOLD: '#f59e0b' };
@@ -911,9 +1010,77 @@ const WatchlistRow: React.FC<{ w: any; i: number; onClick: () => void; badge?: R
   );
 };
 
+// What changed between the last two completed scans — rank moves, new entrants,
+// drop-offs, each with the reason derived from the scoring components.
+const ScanDiffPanel: React.FC<{ diff: any }> = ({ diff }) => {
+  const [open, setOpen] = useState(false);
+  if (!diff) return null;
+  if (!diff.available) {
+    return (
+      <div className="nd-card" style={{ padding: '10px 14px', marginBottom: 12, fontSize: 12, color: 'var(--nd-text-3)' }}>
+        {diff.message || 'No previous scan to compare yet.'}
+      </div>
+    );
+  }
+  const moved: any[] = diff.moved ?? [];
+  const entered: any[] = diff.entered ?? [];
+  const dropped: any[] = diff.dropped ?? [];
+  const ups = moved.filter(m => m.direction === 'up');
+  const downs = moved.filter(m => m.direction === 'down');
+  const c = diff.counts ?? { moved: moved.length, entered: entered.length, dropped: dropped.length };
+
+  const Row: React.FC<{ m: any; kind: 'up' | 'down' | 'in' | 'out' }> = ({ m, kind }) => {
+    const color = kind === 'up' ? '#22c55e' : kind === 'down' ? '#ef4444' : kind === 'in' ? '#3b82f6' : '#94a3b8';
+    const badge = kind === 'up' ? `▲ ${m.delta}` : kind === 'down' ? `▼ ${Math.abs(m.delta)}` : kind === 'in' ? 'NEW' : 'OUT';
+    return (
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, padding: '4px 0', borderBottom: '1px solid var(--nd-border)' }}>
+        <span style={{ fontSize: 10, fontWeight: 700, color, minWidth: 38 }}>{badge}</span>
+        <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--nd-text-1)', minWidth: 80 }}>{m.symbol}</span>
+        <span style={{ fontSize: 11, color: 'var(--nd-text-3)', minWidth: 78 }}>
+          {kind === 'out' ? `was #${m.prevRank}` : kind === 'in' ? `#${m.rank}` : `#${m.prevRank}→#${m.rank}`}
+        </span>
+        <span style={{ fontSize: 11, color: 'var(--nd-text-2)' }}>{m.reason || ''}</span>
+      </div>
+    );
+  };
+
+  return (
+    <div className="nd-card" style={{ padding: '12px 14px', marginBottom: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', gap: 8 }}
+        onClick={() => setOpen(o => !o)}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--nd-text-1)' }}>What changed since the last scan</div>
+          <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>
+            <span style={{ color: '#22c55e' }}>▲ {ups.length}</span> · <span style={{ color: '#ef4444' }}>▼ {downs.length}</span>
+            {' · '}<span style={{ color: '#3b82f6' }}>{c.entered} new</span> · <span style={{ color: '#94a3b8' }}>{c.dropped} dropped</span>
+          </div>
+        </div>
+        <span className="material-icons" style={{ color: 'var(--nd-text-3)' }}>{open ? 'expand_less' : 'expand_more'}</span>
+      </div>
+      {open && (
+        <div style={{ marginTop: 10, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 14 }}>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: '#22c55e', marginBottom: 4 }}>Climbed ({ups.length})</div>
+            {ups.length ? ups.slice(0, 12).map((m, i) => <Row key={i} m={m} kind="up" />) : <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>—</div>}
+            <div style={{ fontSize: 11, fontWeight: 700, color: '#3b82f6', margin: '10px 0 4px' }}>Entered the board ({c.entered})</div>
+            {entered.length ? entered.slice(0, 10).map((m, i) => <Row key={i} m={m} kind="in" />) : <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>—</div>}
+          </div>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: '#ef4444', marginBottom: 4 }}>Slipped ({downs.length})</div>
+            {downs.length ? downs.slice(0, 12).map((m, i) => <Row key={i} m={m} kind="down" />) : <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>—</div>}
+            <div style={{ fontSize: 11, fontWeight: 700, color: '#94a3b8', margin: '10px 0 4px' }}>Dropped off ({c.dropped})</div>
+            {dropped.length ? dropped.slice(0, 10).map((m, i) => <Row key={i} m={m} kind="out" />) : <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>—</div>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const AiWatchlistTab: React.FC = () => {
   const [data, setData]         = useState<any>(null);
   const [evalData, setEvalData] = useState<any>(null);
+  const [diff, setDiff]         = useState<any>(null);
   const [sel, setSel]           = useState<any>(null);
   const [tab, setTab]           = useState<'intraday' | 'delivery' | 'fno'>('intraday');
   const [holdCap, setHoldCap]   = useState<number>(30);     // per-trade hold cap (min)
@@ -936,6 +1103,7 @@ const AiWatchlistTab: React.FC = () => {
   const load = useCallback(async () => {
     try { const r = await apiService.aiWatchlist(); setData((r as any).data); } catch {}
     try { const e = await apiService.scanEvaluation(); setEvalData((e as any).data); } catch {}
+    try { const d = await apiService.scanDiff(); setDiff((d as any).data); } catch {}
   }, []);
   useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, [load]);
 
@@ -959,6 +1127,7 @@ const AiWatchlistTab: React.FC = () => {
       </div>
 
       <SignalScorePanel ev={evalData} />
+      <ScanDiffPanel diff={diff} />
 
       {/* Category tabs */}
       <div style={{ display: 'flex', gap: 6, marginBottom: 14, borderBottom: '1px solid var(--nd-border)', paddingBottom: 0 }}>
@@ -1681,7 +1850,12 @@ const Dashboard: React.FC = () => {
       {/* Self-running autopilot + the system's learning curve */}
       <AutopilotBanner />
       <TradeGateCard />
-      <LearningCurveCard />
+
+      {/* Two-up: the system's learning curve + AI scan accuracy (intraday vs delivery) */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))', gap: 20, marginBottom: 20, alignItems: 'start' }}>
+        <LearningCurveCard />
+        <ScanAccuracyCard />
+      </div>
 
       {/* Tabbed card */}
       <div className="nd-card" style={{ padding: 0 }}>

@@ -1,5 +1,6 @@
 """AI Engine REST API — analyze, record outcomes, performance, history."""
 from __future__ import annotations
+import os
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
@@ -279,6 +280,97 @@ async def get_ranked(limit: int = 100):
     except Exception as exc:
         logger.debug("ranked board read failed: %s", exc)
     return {"status": "success", "data": {"updated_at": None, "scanned": 0, "universe": 0, "items": [], "returned": 0}}
+
+
+def _rank_change_reason(cur: dict, prev: dict) -> str:
+    """Explain *why* a stock's rank moved between two scans, from the components
+    the scanner actually ranks on (action, grade, win-prob, signal/rank score, news)."""
+    bits: list[str] = []
+    ca, pa = cur.get("action"), prev.get("action")
+    if ca != pa:
+        bits.append(f"call {pa}→{ca}")
+    cg, pg = cur.get("grade"), prev.get("grade")
+    if cg != pg:
+        bits.append(f"grade {pg}→{cg}")
+    cw, pw = cur.get("win_probability"), prev.get("win_probability")
+    if cw is not None and pw is not None and abs(cw - pw) >= 0.02:
+        bits.append(f"win-prob {pw*100:.0f}%→{cw*100:.0f}%")
+    cs, ps = cur.get("rank_score", cur.get("signal_score")), prev.get("rank_score", prev.get("signal_score"))
+    if cs is not None and ps is not None and abs(cs - ps) >= 0.5:
+        bits.append(f"score {ps:.0f}→{cs:.0f}")
+    cn = (cur.get("news") or {}).get("catalyst")
+    if cn and not (prev.get("news") or {}).get("catalyst"):
+        bits.append("fresh news catalyst")
+    return ", ".join(bits) if bits else "minor re-ordering vs other names"
+
+
+@router.get("/scan-diff")
+async def scan_diff(limit: int = 60):
+    """How this scan's ranking differs from the previous completed scan: per-stock
+    rank moves (with the reason), names that entered the board, and names that
+    dropped out. Powers the AI Watchlist 'what changed' view."""
+    import json
+    from app.utils.redis_client import cache_get
+    cur_items: list[dict] = []
+    prev_items: list[dict] = []
+    cur_meta: dict = {}
+    prev_meta: dict = {}
+    try:
+        raw = await cache_get("ai_engine:ranked")
+        if raw:
+            d = json.loads(raw); cur_items = d.get("items") or []
+            cur_meta = {"updated_at": d.get("updated_at"), "candidates": d.get("candidates")}
+        rawp = await cache_get("ai_engine:ranked:prev")
+        if rawp:
+            d = json.loads(rawp); prev_items = d.get("items") or []
+            prev_meta = {"updated_at": d.get("updated_at"), "candidates": d.get("candidates")}
+    except Exception as exc:
+        logger.debug("scan-diff read failed: %s", exc)
+
+    if not prev_items:
+        return {"status": "success", "data": {
+            "available": False, "current": cur_meta, "previous": prev_meta,
+            "moved": [], "entered": [], "dropped": [],
+            "message": "No previous scan to compare yet — diff appears after the next rescan.",
+        }}
+
+    cur_by = {(i.get("symbol") or "").upper(): i for i in cur_items}
+    prev_rank = {(i.get("symbol") or "").upper(): i.get("rank") for i in prev_items}
+    prev_by = {(i.get("symbol") or "").upper(): i for i in prev_items}
+
+    moved: list[dict] = []
+    entered: list[dict] = []
+    for sym, c in cur_by.items():
+        cr = c.get("rank")
+        if sym in prev_rank:
+            pr = prev_rank[sym]
+            if cr != pr:
+                moved.append({
+                    "symbol": sym, "name": c.get("name"), "rank": cr, "prev_rank": pr,
+                    "delta": pr - cr,                      # +ve = climbed (lower rank number)
+                    "direction": "up" if cr < pr else "down",
+                    "grade": c.get("grade"), "action": c.get("action"),
+                    "reason": _rank_change_reason(c, prev_by[sym]),
+                })
+        else:
+            entered.append({
+                "symbol": sym, "name": c.get("name"), "rank": cr,
+                "grade": c.get("grade"), "action": c.get("action"),
+                "reason": _rank_change_reason(c, {}),
+            })
+    dropped = [{
+        "symbol": sym, "name": p.get("name"), "prev_rank": p.get("rank"),
+        "grade": p.get("grade"), "action": p.get("action"),
+    } for sym, p in prev_by.items() if sym not in cur_by]
+
+    moved.sort(key=lambda m: -abs(m["delta"]))
+    entered.sort(key=lambda e: e["rank"] or 999)
+    dropped.sort(key=lambda d: d["prev_rank"] or 999)
+    return {"status": "success", "data": {
+        "available": True, "current": cur_meta, "previous": prev_meta,
+        "moved": moved[:limit], "entered": entered[:limit], "dropped": dropped[:limit],
+        "counts": {"moved": len(moved), "entered": len(entered), "dropped": len(dropped)},
+    }}
 
 
 @router.post("/watchlist/scan")
@@ -569,7 +661,12 @@ class ScanFeedback(BaseModel):
     avg_realized_return_pct: float = 0.0
     by_action:               dict = {}
     results:                 list[dict] = []
+    trade_kind:              str = "intraday"   # "intraday" | "delivery"
 
+
+# Required accuracy the scans should clear; below this the system flags
+# under-performance and dampens conviction (see scanner calibration).
+SCAN_ACCURACY_TARGET = float(os.getenv("SCAN_ACCURACY_TARGET", "0.55"))
 
 _SCAN_EVAL_DDL = """
 CREATE TABLE IF NOT EXISTS scan_evaluations (
@@ -582,10 +679,36 @@ CREATE TABLE IF NOT EXISTS scan_evaluations (
     day_return_pct         DOUBLE PRECISION,
     realized_return_pct    DOUBLE PRECISION,
     correct                BOOLEAN,
-    created_at             TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE (eval_date, symbol)
+    trade_kind             TEXT DEFAULT 'intraday',
+    created_at             TIMESTAMPTZ DEFAULT NOW()
 );
 """
+# Idempotent migrations (old installs had UNIQUE(eval_date,symbol) and no trade_kind).
+_SCAN_EVAL_MIGRATE = [
+    "ALTER TABLE scan_evaluations ADD COLUMN IF NOT EXISTS trade_kind TEXT DEFAULT 'intraday'",
+    "ALTER TABLE scan_evaluations DROP CONSTRAINT IF EXISTS scan_evaluations_eval_date_symbol_key",
+    "CREATE UNIQUE INDEX IF NOT EXISTS scan_evaluations_uniq ON scan_evaluations (eval_date, symbol, trade_kind)",
+]
+_scan_eval_ready = False
+
+
+async def _ensure_scan_eval() -> None:
+    """Create + migrate the scan_evaluations table once (each migration in its own
+    transaction so one no-op failure can't abort the rest)."""
+    global _scan_eval_ready
+    if _scan_eval_ready:
+        return
+    from sqlalchemy import text
+    from app.database.postgres import engine
+    async with engine.begin() as conn:
+        await conn.execute(text(_SCAN_EVAL_DDL))
+    for stmt in _SCAN_EVAL_MIGRATE:
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text(stmt))
+        except Exception as exc:
+            logger.debug("scan_eval migrate skipped (%s): %s", stmt[:40], exc)
+    _scan_eval_ready = True
 
 
 @router.post("/scan-feedback")
@@ -601,22 +724,23 @@ async def scan_feedback(req: ScanFeedback):
         eval_date = date.today()
     inserted = 0
     try:
+        await _ensure_scan_eval()
         async with engine.begin() as conn:
-            await conn.execute(text(_SCAN_EVAL_DDL))
             for g in req.results:
+                kind = g.get("trade_kind") or req.trade_kind or "intraday"
                 await conn.execute(text("""
                     INSERT INTO scan_evaluations
                       (eval_date, symbol, action, predicted_confidence,
-                       predicted_signal_score, day_return_pct, realized_return_pct, correct)
-                    VALUES (:d,:sym,:act,:pc,:ps,:dr,:rr,:ok)
-                    ON CONFLICT (eval_date, symbol) DO UPDATE SET
+                       predicted_signal_score, day_return_pct, realized_return_pct, correct, trade_kind)
+                    VALUES (:d,:sym,:act,:pc,:ps,:dr,:rr,:ok,:kind)
+                    ON CONFLICT (eval_date, symbol, trade_kind) DO UPDATE SET
                       action=:act, predicted_confidence=:pc, predicted_signal_score=:ps,
                       day_return_pct=:dr, realized_return_pct=:rr, correct=:ok
                 """), {
                     "d": eval_date, "sym": g.get("symbol"), "act": g.get("action"),
                     "pc": g.get("predicted_confidence"), "ps": g.get("predicted_signal_score"),
                     "dr": g.get("day_return_pct"), "rr": g.get("realized_return_pct"),
-                    "ok": bool(g.get("correct")),
+                    "ok": bool(g.get("correct")), "kind": kind,
                 })
                 inserted += 1
     except Exception as exc:
@@ -645,35 +769,53 @@ async def scan_evaluation():
     except Exception as exc:
         logger.debug("scan eval read failed: %s", exc)
 
-    trend: list[dict] = []
+    target = SCAN_ACCURACY_TARGET
+    trend: list[dict] = []            # intraday (back-compat)
+    delivery_trend: list[dict] = []
     overall = {"days": 0, "accuracy": None, "picks": 0}
+    overall_delivery = {"days": 0, "accuracy": None, "picks": 0}
     try:
+        await _ensure_scan_eval()
         async with engine.begin() as conn:
-            await conn.execute(text(_SCAN_EVAL_DDL))
             rows = (await conn.execute(text("""
-                SELECT eval_date,
+                SELECT eval_date, COALESCE(trade_kind,'intraday') kind,
                        AVG(CASE WHEN correct THEN 1.0 ELSE 0.0 END) AS acc,
                        AVG(realized_return_pct) AS avg_ret,
                        COUNT(*) AS n
                 FROM scan_evaluations
-                GROUP BY eval_date ORDER BY eval_date ASC
+                GROUP BY eval_date, COALESCE(trade_kind,'intraday')
+                ORDER BY eval_date ASC
             """))).fetchall()
             for r in rows:
-                trend.append({
+                acc = round(float(r[2]), 4)
+                pt = {
                     "date": r[0].strftime("%Y-%m-%d") if r[0] else None,
-                    "accuracy": round(float(r[1]), 4),
-                    "avg_realized_return_pct": round(float(r[2] or 0.0), 2),
-                    "picks": int(r[3]),
-                })
+                    "accuracy": acc,
+                    "avg_realized_return_pct": round(float(r[3] or 0.0), 2),
+                    "picks": int(r[4]),
+                    "meets_target": acc >= target,
+                }
+                (delivery_trend if r[1] == "delivery" else trend).append(pt)
             agg = (await conn.execute(text("""
-                SELECT AVG(CASE WHEN correct THEN 1.0 ELSE 0.0 END), COUNT(*) FROM scan_evaluations
-            """))).fetchone()
-            if agg and agg[1]:
-                overall = {"days": len(trend), "accuracy": round(float(agg[0]), 4), "picks": int(agg[1])}
+                SELECT COALESCE(trade_kind,'intraday') kind,
+                       AVG(CASE WHEN correct THEN 1.0 ELSE 0.0 END), COUNT(*)
+                FROM scan_evaluations GROUP BY COALESCE(trade_kind,'intraday')
+            """))).fetchall()
+            for a in agg:
+                o = {"days": len(delivery_trend if a[0] == "delivery" else trend),
+                     "accuracy": round(float(a[1]), 4), "picks": int(a[2]),
+                     "meets_target": float(a[1]) >= target}
+                if a[0] == "delivery":
+                    overall_delivery = o
+                else:
+                    overall = o
     except Exception as exc:
         logger.debug("scan eval trend failed: %s", exc)
 
-    return {"status": "success", "data": {"latest": latest, "trend": trend, "overall": overall}}
+    return {"status": "success", "data": {
+        "latest": latest, "trend": trend, "delivery_trend": delivery_trend,
+        "overall": overall, "overall_delivery": overall_delivery, "target": target,
+    }}
 
 
 # ── Autopilot ─────────────────────────────────────────────────────────────────
