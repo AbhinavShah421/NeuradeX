@@ -745,11 +745,12 @@ const LearningCurveCard: React.FC<{ embedded?: boolean }> = ({ embedded }) => {
         })}
         <polyline points={line} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
         <circle cx={sx(pts.length - 1)} cy={sy(val(last))} r="3.5" fill={color} />
-        {/* x-axis date labels */}
-        {[0, Math.floor(pts.length / 2), pts.length - 1].map((i, k) => (
-          <text key={k} x={sx(i)} y={H - 8} fontSize="9" fill="var(--nd-text-3)"
-            textAnchor={k === 0 ? 'start' : k === 2 ? 'end' : 'middle'}>{pts[i].date}</text>
-        ))}
+        {/* x-axis date labels — only the endpoints (time-clustered data makes a
+            middle label collide with the end one). */}
+        <text x={PL} y={H - 8} fontSize="9" fill="var(--nd-text-3)" textAnchor="start">{pts[0].date}</text>
+        {pts[pts.length - 1].date !== pts[0].date && (
+          <text x={W - PR} y={H - 8} fontSize="9" fill="var(--nd-text-3)" textAnchor="end">{pts[pts.length - 1].date}</text>
+        )}
       </svg>
 
       {hovEv && (
@@ -1957,9 +1958,9 @@ const Dashboard: React.FC = () => {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))', gap: 20, marginBottom: 20, alignItems: 'start' }}>
         {/* Unified "system learning" card: the equity/win-rate curve on top, the
             dedicated pattern-recognition model below the divider. */}
-        <div className="nd-card" style={{ padding: 0, position: 'relative' }}>
+        <div className="nd-card" style={{ padding: 0, position: 'relative', display: 'flex', flexDirection: 'column' }}>
           <LearningCurveCard embedded />
-          <div style={{ height: 1, background: 'var(--nd-border)', margin: '4px 18px 0' }} />
+          <div style={{ height: 1, background: 'var(--nd-border)', margin: '12px 18px 0' }} />
           <PatternModelCard embedded />
         </div>
         <ScanAccuracyCard />
