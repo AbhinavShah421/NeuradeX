@@ -624,11 +624,15 @@ const EVENT_COLOR: Record<string, string> = {
   scanner: '#3b82f6', trading: '#f59e0b', learning: '#a855f7', update: '#94a3b8',
 };
 
-const LearningCurveCard: React.FC = () => {
+const LearningCurveCard: React.FC<{ embedded?: boolean }> = ({ embedded }) => {
   const [data, setData] = useState<any>(null);
   const [metric, setMetric] = useState<LcMetric>('equity');
   const [srcKey, setSrcKey] = useState<string>('All');
   const [hovEv, setHovEv] = useState<{ x: number; ev: any } | null>(null);
+  const rootCls = embedded ? undefined : 'nd-card';
+  const rootStyle: React.CSSProperties = embedded
+    ? { padding: '16px 18px', position: 'relative' }
+    : { padding: '16px 18px', marginBottom: 20, position: 'relative' };
 
   useEffect(() => {
     apiService.learningCurve(SOURCE_PRESETS[srcKey], 50)
@@ -640,7 +644,7 @@ const LearningCurveCard: React.FC = () => {
   const bySource: any[] = data?.bySource ?? [];
   if (pts.length < 2) {
     return (
-      <div className="nd-card" style={{ padding: '16px 18px', marginBottom: 20 }}>
+      <div className={rootCls} style={{ padding: '16px 18px' }}>
         <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>System Learning Curve</div>
         <div style={{ fontSize: 12, color: 'var(--nd-text-3)', marginTop: 6 }}>
           Not enough {srcKey.toLowerCase()} trades yet to plot.
@@ -687,7 +691,7 @@ const LearningCurveCard: React.FC = () => {
   );
 
   return (
-    <div className="nd-card" style={{ padding: '16px 18px', marginBottom: 20, position: 'relative' }}>
+    <div className={rootCls} style={rootStyle}>
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
         <div>
           <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>System Learning Curve</div>
@@ -893,7 +897,7 @@ const ScanAccuracyCard: React.FC = () => {
 
 // ── Pattern Recognition Model (dedicated, continuously-learning) ───────────────
 
-const PatternModelCard: React.FC = () => {
+const PatternModelCard: React.FC<{ embedded?: boolean }> = ({ embedded }) => {
   const [status, setStatus] = useState<any>(null);
   const [curve, setCurve] = useState<any[]>([]);
   const [busy, setBusy] = useState(false);
@@ -931,7 +935,7 @@ const PatternModelCard: React.FC = () => {
   const line = pts.map((p, i) => `${sx(i).toFixed(1)},${sy(p.batchAccuracy * 100).toFixed(1)}`).join(' ');
 
   return (
-    <div className="nd-card" style={{ padding: '16px 18px', marginBottom: 20 }}>
+    <div className={embedded ? undefined : 'nd-card'} style={{ padding: '16px 18px', marginBottom: embedded ? 0 : 20 }}>
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
         <div>
           <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>Pattern Recognition Model</div>
@@ -1949,14 +1953,17 @@ const Dashboard: React.FC = () => {
       <AutopilotBanner />
       <TradeGateCard />
 
-      {/* Two-up: the system's learning curve + AI scan accuracy (intraday vs delivery) */}
+      {/* Two-up: the system's learning (curve + pattern model) | AI scan accuracy */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))', gap: 20, marginBottom: 20, alignItems: 'start' }}>
-        <LearningCurveCard />
+        {/* Unified "system learning" card: the equity/win-rate curve on top, the
+            dedicated pattern-recognition model below the divider. */}
+        <div className="nd-card" style={{ padding: 0, position: 'relative' }}>
+          <LearningCurveCard embedded />
+          <div style={{ height: 1, background: 'var(--nd-border)', margin: '4px 18px 0' }} />
+          <PatternModelCard embedded />
+        </div>
         <ScanAccuracyCard />
       </div>
-
-      {/* Dedicated pattern-recognition model (trained by backtesting, patterns only) */}
-      <PatternModelCard />
 
       {/* Tabbed card */}
       <div className="nd-card" style={{ padding: 0 }}>
