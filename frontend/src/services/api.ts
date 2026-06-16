@@ -248,6 +248,30 @@ class ApiService {
     }
   }
 
+  async listOrders(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/orders/', { timeout: 20000 });
+    return response.data;
+  }
+
+  async cancelOrder(orderId: string, segment = 'CASH'): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/orders/cancel', { order_id: orderId, segment });
+    return response.data;
+  }
+
+  async investPlan(amount: number, maxStocks = 6): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/portfolio/invest-plan', {
+      params: { amount, max_stocks: maxStocks }, timeout: 20000,
+    });
+    return response.data;
+  }
+
+  async optimizePortfolio(refresh = false): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/portfolio/optimize', {
+      params: { refresh }, timeout: 90000,
+    });
+    return response.data;
+  }
+
   async getAlerts(): Promise<ApiResponse<any>> {
     try {
       const response = await this.api.get('/api/portfolio/alerts');
@@ -672,6 +696,10 @@ class ApiService {
     const response = await this.api.post('/api/ai-engine/watchlist/scan');
     return response.data;
   }
+  async getScanStatus(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/ai-engine/scan-status', { timeout: 8000 });
+    return response.data;
+  }
   async scanEvaluation(): Promise<ApiResponse<any>> {
     const response = await this.api.get('/api/ai-engine/scan-evaluation');
     return response.data;
@@ -684,12 +712,20 @@ class ApiService {
     const response = await this.api.post('/api/ai-engine/trade-gate', { mode });
     return response.data;
   }
+  async getRanked(limit = 100): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/ai-engine/ranked', { params: { limit }, timeout: 20000 });
+    return response.data;
+  }
   async getAutopilot(): Promise<ApiResponse<any>> {
     const response = await this.api.get('/api/ai-engine/autopilot');
     return response.data;
   }
   async setAutopilot(enabled: boolean, mode: 'paper' | 'backtest' = 'paper'): Promise<ApiResponse<any>> {
     const response = await this.api.post('/api/ai-engine/autopilot', { enabled, mode });
+    return response.data;
+  }
+  async resetBacktestCursor(): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/ai-engine/autopilot/reset-cursor');
     return response.data;
   }
   async learningCurve(): Promise<ApiResponse<any>> {
@@ -809,6 +845,20 @@ class ApiService {
 
   async getLlmStatus(): Promise<ApiResponse<any>> {
     const response = await this.api.get('/api/ai-engine/llm-status');
+    return response.data;
+  }
+
+  // AI loss-learning: post-mortems on losing trades + aggregated lessons
+  async runLossLearning(): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/ai-engine/loss-learning/run', null, { timeout: 90000 });
+    return response.data;
+  }
+  async getLossPostmortems(limit = 50): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/ai-engine/loss-learning/postmortems', { params: { limit } });
+    return response.data;
+  }
+  async getLossLessons(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/ai-engine/loss-learning/lessons');
     return response.data;
   }
 

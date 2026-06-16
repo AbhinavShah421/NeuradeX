@@ -1,10 +1,11 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import apiService from '../services/api';
+import ScanControl from '../components/ScanControl';
 import { Portfolio, Performance, PortfolioStock } from '../types';
 
 type SortKey = keyof Pick<PortfolioStock, 'symbol' | 'quantity' | 'purchasePrice' | 'currentPrice' | 'value' | 'gain' | 'gainPercent'>;
 type SortDir = 'asc' | 'desc';
-type Tab = 'holdings' | 'performance' | 'risk';
+type Tab = 'holdings' | 'performance' | 'risk' | 'optimize' | 'invest';
 
 const inr = (v: number) =>
   v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -62,8 +63,201 @@ const PortfolioPage: React.FC = () => {
   const [sortKey,     setSortKey]     = useState<SortKey>('value');
   const [sortDir,     setSortDir]     = useState<SortDir>('desc');
   const [activeTab,   setActiveTab]   = useState<Tab>('holdings');
+  const [optimization, setOptimization] = useState<any>(null);
+  const [optimizing,   setOptimizing]   = useState(false);
 
   useEffect(() => { fetchPortfolioData(); }, []);
+
+  const [orders, setOrders] = useState<any[]>([]);
+  const [cancellingId, setCancellingId] = useState<string | null>(null);
+
+  // Load the persisted plan when the tab opens, then silently refresh while it's
+  // open so a newer AI scan auto-updates the recommendation (cheap when cached).
+  useEffect(() => {
+    if (activeTab !== 'optimize') return;
+    loadOptimization(!!optimization);                 // silent if we already have one
+    loadOrders();
+    const t = setInterval(() => loadOptimization(true), 120000);
+    const o = setInterval(loadOrders, 20000);
+    // Re-sync the order book the instant the user returns to this tab — e.g.
+    // right after cancelling an order directly in the Groww app/tab.
+    const onVisible = () => { if (document.visibilityState === 'visible') loadOrders(); };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+    return () => {
+      clearInterval(t); clearInterval(o);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+
+  const loadOrders = async () => {
+    try { const res = await apiService.listOrders(); setOrders(res.data || []); } catch { /* ignore */ }
+  };
+
+  const CANCELLABLE = ['NEW', 'OPEN', 'PENDING', 'ACKED', 'ACKNOWLEDGED', 'APPROVED', 'TRIGGER_PENDING', 'MODIFIED'];
+  const cancelPendingOrder = async (orderId: string, segment: string) => {
+    setCancellingId(orderId);
+    try {
+      const res = await apiService.cancelOrder(orderId, segment || 'CASH');
+      setOrderMsg({ ok: res.status === 'success', text: res.status === 'success' ? `Order ${orderId} cancelled.` : (res.message || 'Cancel failed') });
+    } catch (e: any) {
+      setOrderMsg({ ok: false, text: e?.response?.data?.detail || e?.message || 'Cancel failed' });
+    } finally {
+      setCancellingId(null);
+      loadOrders();
+    }
+  };
+
+  const loadOptimization = async (silent = false) => {
+    if (!silent) setOptimizing(true);
+    try {
+      const res = await apiService.optimizePortfolio(false);
+      if (res.data?.plan?.actions) setOptimization(res.data);
+    } catch (err) {
+      console.error('Optimization load failed:', err);
+    } finally {
+      if (!silent) setOptimizing(false);
+    }
+  };
+
+  const runOptimization = async () => {
+    setOptimizing(true);
+    try {
+      const res = await apiService.optimizePortfolio(true);   // force a fresh recompute
+      if (res.data) setOptimization(res.data);
+    } catch (err) {
+      console.error('Optimization failed:', err);
+    } finally {
+      setOptimizing(false);
+    }
+  };
+
+  // ── Direct Groww order placement (with confirmation) ──────────────────────
+  const [pendingOrder, setPendingOrder] = useState<any>(null);
+  const [orderMsg, setOrderMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [placing, setPlacing] = useState(false);
+
+  // Place one leg; never throws — returns {ok, text}.
+  const placeOne = async (spec: any): Promise<{ ok: boolean; text: string }> => {
+    try {
+      const res = await apiService.placeOrder({
+        symbol: spec.symbol,
+        quantity: spec.quantity,
+        transactionType: spec.transactionType,
+        orderType: spec.orderType || 'MARKET',
+        price: spec.price,
+        product: spec.product || 'CNC',
+        exchange: spec.exchange || 'NSE',
+      } as any);
+      const ok = res.status === 'success';
+      return { ok, text: ok
+        ? `${spec.transactionType} ${spec.quantity} ${spec.symbol} placed`
+        : `${spec.symbol}: ${res.message || 'failed'}` };
+    } catch (e: any) {
+      return { ok: false, text: `${spec.transactionType} ${spec.symbol} failed: ${e?.response?.data?.detail || e?.message || 'error'}` };
+    }
+  };
+
+  const confirmOrder = async () => {
+    if (!pendingOrder) return;
+    setPlacing(true);
+    try {
+      if (pendingOrder.kind === 'basket') {
+        // Place each buy sequentially; report how many landed.
+        let ok = 0; const fails: string[] = [];
+        for (const leg of pendingOrder.legs) {
+          const r = await placeOne(leg);
+          if (r.ok) ok += 1; else fails.push(r.text);
+        }
+        setOrderMsg({ ok: fails.length === 0,
+          text: `Placed ${ok}/${pendingOrder.legs.length} buy orders${fails.length ? ` · failed: ${fails.join('; ')}` : ''}.` });
+      } else if (pendingOrder.kind === 'swap') {
+        // Sell first, then buy the alternative — only buy if the sell was accepted.
+        const s = await placeOne(pendingOrder.sell);
+        if (!s.ok) {
+          setOrderMsg({ ok: false, text: `Swap stopped — SELL failed (${s.text}). BUY not placed.` });
+        } else {
+          const b = await placeOne(pendingOrder.buy);
+          setOrderMsg({ ok: b.ok, text: b.ok
+            ? `Swap placed: ${s.text}, then ${b.text}.`
+            : `Sell placed (${s.text}), but BUY failed: ${b.text}` });
+        }
+      } else {
+        setOrderMsg(await placeOne(pendingOrder));
+      }
+    } finally {
+      setPlacing(false);
+      setPendingOrder(null);
+      loadOrders();
+    }
+  };
+
+  const askOrder = (spec: any) => {
+    if (!spec?.quantity || spec.quantity <= 0) return;
+    setOrderMsg(null);
+    setPendingOrder(spec);
+  };
+
+  // ── AI Invest: allocate an amount across the best AI picks ────────────────
+  const [investAmount, setInvestAmount] = useState('10000');
+  const [investData, setInvestData] = useState<any>(null);
+  const [investLoading, setInvestLoading] = useState(false);
+
+  const generateInvestPlan = async () => {
+    const amt = parseFloat(investAmount);
+    if (!amt || amt <= 0) return;
+    setInvestLoading(true);
+    try {
+      const res = await apiService.investPlan(amt, 6);
+      if (res.data) setInvestData(res.data);
+    } catch (e) {
+      console.error('Invest plan failed:', e);
+    } finally {
+      setInvestLoading(false);
+    }
+  };
+
+  const askInvestAll = (picks: any[]) => {
+    const legs = picks.filter(p => p.order && p.order.quantity > 0).map(p => ({
+      symbol: p.symbol, transactionType: 'BUY', quantity: p.order.quantity,
+      orderType: p.order.orderType, price: p.order.limitPrice, exchange: p.order.exchange,
+      product: p.order.product, estValue: p.order.estValue,
+    }));
+    if (!legs.length) return;
+    setOrderMsg(null);
+    setPendingOrder({ kind: 'basket', legs, label: `Invest across ${legs.length} stocks` });
+  };
+
+  const askSwap = (a: any, sig: any) => {
+    const o = a.alternative?.order;
+    if (!a.trade || !o) return;
+    const alt = a.alternative;
+    setOrderMsg(null);
+    setPendingOrder({
+      kind: 'swap',
+      sell: { symbol: a.symbol, transactionType: 'SELL', quantity: a.trade.quantity,
+              orderType: a.trade.orderType, price: a.trade.limitPrice, exchange: a.trade.exchange,
+              product: a.trade.product, estValue: a.trade.estValue },
+      buy:  { symbol: alt.symbol, transactionType: 'BUY', quantity: o.quantity,
+              orderType: o.orderType, price: o.limitPrice, exchange: o.exchange,
+              product: o.product, estValue: o.estValue },
+      // Why the AI recommends this swap — shown in the confirm dialog.
+      basis: {
+        sell: {
+          action: a.action, reason: a.reason,
+          signal: sig?.signal, health: sig?.health, rsi: sig?.rsi,
+          momentum: sig?.momentumPct, trend: sig?.smaTrend, atr: sig?.atrPct,
+          weightNow: a.currentWeightPct, weightTarget: a.targetWeightPct, pnl: a.pnlPct,
+        },
+        buy: {
+          grade: alt.grade, winProb: alt.winProbability, sector: alt.sector,
+          sameSector: alt.sameSector, reasoning: alt.scannerReasoning, price: alt.price,
+        },
+      },
+    });
+  };
 
   const fetchPortfolioData = async () => {
     try {
@@ -141,14 +335,26 @@ const PortfolioPage: React.FC = () => {
     { id: 'holdings',    label: 'Holdings',    icon: 'account_balance_wallet' },
     { id: 'performance', label: 'Performance', icon: 'trending_up' },
     { id: 'risk',        label: 'Risk',        icon: 'security' },
+    { id: 'optimize',    label: 'AI Optimize', icon: 'auto_awesome' },
+    { id: 'invest',      label: 'AI Invest',   icon: 'savings' },
   ];
+
+  const ACTION_STYLE: Record<string, { bg: string; color: string }> = {
+    EXIT: { bg: '#ef444420', color: '#ef4444' },
+    TRIM: { bg: '#f59e0b20', color: '#f59e0b' },
+    HOLD: { bg: 'var(--nd-surface-2)', color: 'var(--nd-text-2)' },
+    ADD:  { bg: '#22c55e20', color: '#22c55e' },
+  };
 
   return (
     <div>
       {/* Page header */}
-      <div style={{ marginBottom: 20 }}>
-        <h1 className="nd-page-title">Portfolio</h1>
-        <p className="nd-page-sub">Holdings, performance & risk from your Groww account</p>
+      <div style={{ marginBottom: 20, display: 'flex', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap' }}>
+        <div style={{ flex: 1, minWidth: 200 }}>
+          <h1 className="nd-page-title">Portfolio</h1>
+          <p className="nd-page-sub" style={{ marginBottom: 0 }}>Holdings, performance & risk from your Groww account</p>
+        </div>
+        <ScanControl align="right" />
       </div>
 
       {portfolio && (
@@ -160,10 +366,10 @@ const PortfolioPage: React.FC = () => {
                 { label: 'Current Value',   value: `₹${inr(portfolio.totalValue)}`,    color: 'var(--nd-text-1)', icon: 'account_balance_wallet' },
                 { label: 'Invested Value',  value: `₹${inr(portfolio.totalInvested)}`, color: 'var(--nd-text-2)', icon: 'savings' },
                 { label: '1D Returns',
-                  value: `${portfolio.totalGain >= 0 ? '+' : '-'}₹${inr(Math.abs(portfolio.totalGain))}`,
-                  color: portfolio.totalGain >= 0 ? 'var(--nd-green)' : 'var(--nd-red)', icon: 'show_chart' },
+                  value: `${(portfolio.dayChange ?? 0) >= 0 ? '+' : '-'}₹${inr(Math.abs(portfolio.dayChange ?? 0))}${portfolio.dayChangePercent != null ? ` (${portfolio.dayChangePercent >= 0 ? '+' : ''}${portfolio.dayChangePercent.toFixed(2)}%)` : ''}`,
+                  color: (portfolio.dayChange ?? 0) >= 0 ? 'var(--nd-green)' : 'var(--nd-red)', icon: 'show_chart' },
                 { label: 'Total Returns',
-                  value: `${portfolio.gainPercent >= 0 ? '+' : ''}${portfolio.gainPercent.toFixed(2)}%`,
+                  value: `${portfolio.totalGain >= 0 ? '+' : '-'}₹${inr(Math.abs(portfolio.totalGain))} (${portfolio.gainPercent >= 0 ? '+' : ''}${portfolio.gainPercent.toFixed(2)}%)`,
                   color: portfolio.gainPercent >= 0 ? 'var(--nd-green)' : 'var(--nd-red)', icon: 'trending_up' },
               ].map((c) => (
                 <div key={c.label} className="nd-portfolio-stat">
@@ -398,7 +604,494 @@ const PortfolioPage: React.FC = () => {
               </div>
             )
           )}
+
+          {/* ── AI Optimize Tab ──────────────────────────────────────────────────── */}
+          {activeTab === 'optimize' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              {/* Intro / run */}
+              <div className="nd-card" style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
+                <span className="material-icons" style={{ fontSize: 26, color: 'var(--nd-green)' }}>auto_awesome</span>
+                <div style={{ flex: 1, minWidth: 220 }}>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--nd-text-1)' }}>AI Portfolio Optimizer</div>
+                  <div style={{ fontSize: 12.5, color: 'var(--nd-text-2)', marginTop: 2 }}>
+                    Scores every holding with live AI signals, measures concentration &amp; sector risk, pulls higher-conviction picks from the AI scanner, and proposes a rebalancing plan.
+                  </div>
+                </div>
+                <button onClick={runOptimization} disabled={optimizing}
+                  style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 18px', borderRadius: 10, border: 'none',
+                    background: 'var(--nd-green)', color: '#fff', fontWeight: 600, fontSize: 14, cursor: optimizing ? 'wait' : 'pointer' }}>
+                  <span className={`material-icons${optimizing ? ' nd-spin' : ''}`} style={{ fontSize: 18 }}>{optimizing ? 'autorenew' : 'insights'}</span>
+                  {optimizing ? 'Optimizing…' : optimization ? 'Re-run' : 'Run optimization'}
+                </button>
+              </div>
+
+              {/* Live Groww orders (today) with cancel */}
+              {orders.length > 0 && (
+                <div className="nd-card" style={{ padding: 0 }}>
+                  <div style={{ padding: '12px 18px', borderBottom: '1px solid var(--nd-border)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span className="material-icons" style={{ fontSize: 18, color: 'var(--nd-text-2)' }}>receipt_long</span>
+                    <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--nd-text-1)' }}>Today's Orders (Groww)</span>
+                    <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>{orders.length}</span>
+                    <button onClick={loadOrders} title="Refresh" style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--nd-text-3)', display: 'flex' }}>
+                      <span className="material-icons" style={{ fontSize: 16 }}>refresh</span>
+                    </button>
+                  </div>
+                  <div style={{ overflowX: 'auto' }}>
+                    <table className="nd-table">
+                      <thead><tr>
+                        <th>Symbol</th><th style={{ textAlign: 'center' }}>Side</th><th style={{ textAlign: 'right' }}>Qty</th>
+                        <th style={{ textAlign: 'center' }}>Type</th><th style={{ textAlign: 'center' }}>Status</th><th style={{ textAlign: 'center' }}>Action</th>
+                      </tr></thead>
+                      <tbody>
+                        {orders.map((o: any) => {
+                          const status = String(o.status || '').toUpperCase();
+                          const canCancel = CANCELLABLE.includes(status);
+                          const stColor = ['EXECUTED', 'COMPLETE', 'FILLED'].includes(status) ? 'var(--nd-green)'
+                            : ['FAILED', 'REJECTED', 'CANCELLED'].includes(status) ? 'var(--nd-red)' : 'var(--nd-orange, #f59e0b)';
+                          return (
+                            <tr key={o.orderId || o.referenceId}>
+                              <td style={{ fontWeight: 700, fontFamily: 'monospace', color: 'var(--nd-text-1)' }}>{o.symbol}</td>
+                              <td style={{ textAlign: 'center', color: o.transactionType === 'SELL' ? 'var(--nd-red)' : 'var(--nd-green)', fontWeight: 600, fontSize: 12 }}>{o.transactionType}</td>
+                              <td style={{ textAlign: 'right', fontSize: 12.5 }}>{o.quantity}</td>
+                              <td style={{ textAlign: 'center', fontSize: 11.5, color: 'var(--nd-text-2)' }}>{o.orderType}</td>
+                              <td style={{ textAlign: 'center', fontSize: 11, fontWeight: 700, color: stColor }}>{status}</td>
+                              <td style={{ textAlign: 'center' }}>
+                                {canCancel ? (
+                                  <button onClick={() => cancelPendingOrder(o.orderId, o.segment)} disabled={cancellingId === o.orderId}
+                                    style={{ fontSize: 11, fontWeight: 700, padding: '3px 10px', borderRadius: 6, border: '1px solid #ef444455', background: '#ef44441a', color: '#ef4444', cursor: cancellingId === o.orderId ? 'wait' : 'pointer' }}>
+                                    {cancellingId === o.orderId ? '…' : 'Cancel'}
+                                  </button>
+                                ) : (
+                                  <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>—</span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {!optimization && !optimizing && (
+                <div className="nd-card" style={{ textAlign: 'center', padding: 40, color: 'var(--nd-text-3)', fontSize: 13 }}>
+                  Click <strong>Run optimization</strong> to generate an AI-driven rebalancing plan for your live holdings.
+                </div>
+              )}
+
+              {optimization && (() => {
+                const plan = optimization.plan || {};
+                const risk = optimization.risk || {};
+                const signals = optimization.signals || {};
+                const actions: any[] = plan.actions || [];
+                return (
+                  <>
+                    {/* Summary */}
+                    <div className="nd-card" style={{ borderLeft: '3px solid var(--nd-green)' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--nd-text-1)' }}>Recommendation</span>
+                        <span style={{ fontSize: 10, fontWeight: 600, padding: '2px 8px', borderRadius: 6, background: 'var(--nd-surface-2)', color: 'var(--nd-text-3)' }}>
+                          {String(optimization.source || '').startsWith('ai') ? 'AI-generated' : 'rule-based'}
+                        </span>
+                        {optimization.scanAt && (
+                          <span style={{ fontSize: 10.5, color: 'var(--nd-text-3)', marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4 }}>
+                            <span className="material-icons" style={{ fontSize: 12 }}>sync</span>
+                            tracks AI scan · {new Date(optimization.scanAt).toLocaleString()}
+                          </span>
+                        )}
+                      </div>
+                      <div style={{ fontSize: 13.5, color: 'var(--nd-text-1)', lineHeight: 1.6 }}>{plan.summary}</div>
+                      {plan.objective && <div style={{ fontSize: 12, color: 'var(--nd-text-2)', marginTop: 8 }}><strong>Objective:</strong> {plan.objective}</div>}
+                      {plan.expectedEffect && <div style={{ fontSize: 12, color: 'var(--nd-text-2)', marginTop: 4 }}><strong>Expected effect:</strong> {plan.expectedEffect}</div>}
+                    </div>
+
+                    {/* Risk snapshot */}
+                    <div className="nd-grid-3" style={{ gap: 12 }}>
+                      {[
+                        { label: 'Largest Position', value: `${risk.topSymbol ?? '—'} · ${risk.topWeightPct ?? 0}%`, icon: 'pie_chart' },
+                        { label: 'Top Sector',       value: `${risk.topSector ?? '—'} · ${risk.topSectorPct ?? 0}%`, icon: 'category' },
+                        { label: 'Effective Holdings', value: `${risk.effectiveHoldings ?? '—'} of ${risk.holdings ?? 0}`, icon: 'donut_large' },
+                      ].map(c => (
+                        <div key={c.label} className="nd-card" style={{ padding: '14px 18px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                            <span className="material-icons" style={{ fontSize: 16, color: 'var(--nd-text-3)' }}>{c.icon}</span>
+                            <span style={{ fontSize: 11.5, color: 'var(--nd-text-3)' }}>{c.label}</span>
+                          </div>
+                          <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--nd-text-1)' }}>{c.value}</div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Per-holding action plan */}
+                    <div className="nd-card" style={{ padding: 0 }}>
+                      <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--nd-border)', fontSize: 14, fontWeight: 600, color: 'var(--nd-text-1)' }}>
+                        Rebalancing Plan
+                      </div>
+                      <div style={{ overflowX: 'auto' }}>
+                        <table className="nd-table">
+                          <thead><tr>
+                            <th>Symbol</th><th style={{ textAlign: 'center' }}>AI Signal</th><th style={{ textAlign: 'center' }}>Action</th>
+                            <th style={{ textAlign: 'right' }}>Now</th><th style={{ textAlign: 'right' }}>Target</th>
+                            <th>Reason / AI Alternative</th><th style={{ textAlign: 'center' }}>Execute</th>
+                          </tr></thead>
+                          <tbody>
+                            {actions.map((a: any) => {
+                              const st = ACTION_STYLE[a.action] || ACTION_STYLE.HOLD;
+                              const sg = signals[a.symbol]?.signal;
+                              const sgColor = sg === 'bullish' ? 'var(--nd-green)' : sg === 'bearish' ? 'var(--nd-red)' : 'var(--nd-text-3)';
+                              const trade = a.trade;
+                              const alt = a.alternative;
+                              return (
+                                <tr key={a.symbol}>
+                                  <td style={{ fontWeight: 700, color: 'var(--nd-text-1)', fontFamily: 'monospace' }}>{a.symbol}</td>
+                                  <td style={{ textAlign: 'center', color: sgColor, fontSize: 12, fontWeight: 600 }}>{sg ?? '—'}</td>
+                                  <td style={{ textAlign: 'center' }}>
+                                    <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 9px', borderRadius: 6, background: st.bg, color: st.color }}>{a.action}</span>
+                                  </td>
+                                  <td style={{ textAlign: 'right', fontSize: 12.5 }}>{a.currentWeightPct?.toFixed?.(1) ?? a.currentWeightPct ?? 0}%</td>
+                                  <td style={{ textAlign: 'right', fontSize: 12.5, fontWeight: 600, color: 'var(--nd-accent)' }}>{a.targetWeightPct?.toFixed?.(1) ?? a.targetWeightPct ?? 0}%</td>
+                                  <td style={{ fontSize: 11.5, color: 'var(--nd-text-2)', maxWidth: 380 }}>
+                                    <div>{a.reason}</div>
+                                    {alt && (
+                                      <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+                                        background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 8, padding: '6px 10px' }}>
+                                        <span className="material-icons" style={{ fontSize: 14, color: 'var(--nd-green)' }}>swap_horiz</span>
+                                        <span style={{ fontSize: 11.5, color: 'var(--nd-text-3)' }}>Swap into</span>
+                                        <span style={{ fontWeight: 700, fontFamily: 'monospace', color: 'var(--nd-green)' }}>{alt.symbol}</span>
+                                        <span style={{ fontSize: 10.5, color: 'var(--nd-text-3)' }}>{alt.reason}</span>
+                                        {alt.buyQty > 0 && !(trade && trade.transactionType === 'SELL') && (
+                                          <button onClick={() => askOrder({ symbol: alt.symbol, transactionType: 'BUY',
+                                            quantity: alt.order?.quantity ?? alt.buyQty, orderType: alt.order?.orderType,
+                                            price: alt.order?.limitPrice, exchange: alt.order?.exchange, product: alt.order?.product,
+                                            estValue: alt.order?.estValue })}
+                                            style={{ marginLeft: 'auto', fontSize: 11, fontWeight: 700, padding: '3px 10px', borderRadius: 6, border: '1px solid #22c55e55',
+                                              background: '#22c55e1a', color: '#22c55e', cursor: 'pointer' }}>
+                                            Buy {alt.buyQty}
+                                          </button>
+                                        )}
+                                      </div>
+                                    )}
+                                  </td>
+                                  <td style={{ textAlign: 'center' }}>
+                                    {trade && trade.transactionType === 'SELL' && alt?.order ? (
+                                      <button onClick={() => askSwap(a, signals[a.symbol])}
+                                        title={`Sell ${trade.quantity} ${a.symbol} → Buy ${alt.order.quantity} ${alt.symbol}`}
+                                        style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 700, padding: '4px 12px', borderRadius: 6, cursor: 'pointer',
+                                          border: '1px solid #8b5cf680', background: '#8b5cf61a', color: '#a78bfa' }}>
+                                        <span className="material-icons" style={{ fontSize: 13 }}>swap_horiz</span> Swap
+                                      </button>
+                                    ) : trade ? (
+                                      <button onClick={() => askOrder({ symbol: a.symbol, transactionType: trade.transactionType,
+                                        quantity: trade.quantity, orderType: trade.orderType, price: trade.limitPrice,
+                                        exchange: trade.exchange, product: trade.product, estValue: trade.estValue })}
+                                        style={{ fontSize: 11, fontWeight: 700, padding: '4px 12px', borderRadius: 6, cursor: 'pointer',
+                                          border: `1px solid ${trade.transactionType === 'SELL' ? '#ef444455' : '#22c55e55'}`,
+                                          background: trade.transactionType === 'SELL' ? '#ef44441a' : '#22c55e1a',
+                                          color: trade.transactionType === 'SELL' ? '#ef4444' : '#22c55e' }}>
+                                        {trade.transactionType} {trade.quantity}
+                                      </button>
+                                    ) : (
+                                      <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>—</span>
+                                    )}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    {/* Add candidates */}
+                    {Array.isArray(plan.addCandidates) && plan.addCandidates.length > 0 && (
+                      <div className="nd-card">
+                        <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--nd-text-1)', marginBottom: 10 }}>Rotate Into — AI High-Conviction Picks</div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                          {plan.addCandidates.map((c: any) => (
+                            <div key={c.symbol} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: '1px solid var(--nd-border)' }}>
+                              <span style={{ fontWeight: 700, fontFamily: 'monospace', color: 'var(--nd-green)', width: 110 }}>{c.symbol}</span>
+                              <span style={{ fontSize: 11, color: 'var(--nd-accent)', width: 70 }}>~{c.suggestedWeightPct}%</span>
+                              <span style={{ fontSize: 12, color: 'var(--nd-text-2)', flex: 1 }}>{c.reason}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Risk warnings */}
+                    {Array.isArray(plan.riskWarnings) && plan.riskWarnings.length > 0 && (
+                      <div style={{ background: '#f59e0b10', border: '1px solid #f59e0b30', borderRadius: 12, padding: '14px 18px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                          <span className="material-icons" style={{ color: '#f59e0b', fontSize: 18 }}>warning_amber</span>
+                          <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--nd-text-1)' }}>Risk Warnings</span>
+                        </div>
+                        <ul style={{ margin: 0, paddingLeft: 22, color: 'var(--nd-text-2)', fontSize: 12.5, lineHeight: 1.7 }}>
+                          {plan.riskWarnings.map((w: string, i: number) => <li key={i}>{w}</li>)}
+                        </ul>
+                      </div>
+                    )}
+
+                    <div style={{ fontSize: 11, color: 'var(--nd-text-3)', textAlign: 'center' }}>
+                      Advisory only — not investment advice. Source: {optimization.source}. Generated {optimization.asOf ? new Date(optimization.asOf).toLocaleString() : ''}.
+                    </div>
+                  </>
+                );
+              })()}
+            </div>
+          )}
+
+          {/* ── AI Invest Tab ────────────────────────────────────────────────────── */}
+          {activeTab === 'invest' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              <div className="nd-card" style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
+                <span className="material-icons" style={{ fontSize: 26, color: 'var(--nd-green)' }}>savings</span>
+                <div style={{ flex: 1, minWidth: 220 }}>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--nd-text-1)' }}>AI Invest</div>
+                  <div style={{ fontSize: 12.5, color: 'var(--nd-text-2)', marginTop: 2 }}>
+                    Enter an amount and the AI divides it across the best-performing stocks from its live scan (graded A/B, conviction-weighted) — then place them all in one go.
+                  </div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <div style={{ position: 'relative' }}>
+                    <span style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--nd-text-3)', fontSize: 14 }}>₹</span>
+                    <input type="number" min={0} value={investAmount} onChange={e => setInvestAmount(e.target.value)}
+                      placeholder="Amount" className="nd-input" style={{ width: 140, paddingLeft: 22 }} />
+                  </div>
+                  <button onClick={generateInvestPlan} disabled={investLoading}
+                    style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '9px 16px', borderRadius: 10, border: 'none',
+                      background: 'var(--nd-green)', color: '#fff', fontWeight: 600, fontSize: 14, cursor: investLoading ? 'wait' : 'pointer' }}>
+                    <span className={`material-icons${investLoading ? ' nd-spin' : ''}`} style={{ fontSize: 18 }}>{investLoading ? 'autorenew' : 'auto_awesome'}</span>
+                    {investLoading ? 'Building…' : 'Build plan'}
+                  </button>
+                </div>
+              </div>
+
+              {investData && investData.picks?.length > 0 && (
+                <>
+                  <div className="nd-card" style={{ display: 'flex', gap: 24, flexWrap: 'wrap', alignItems: 'center' }}>
+                    <div><div className="nd-label" style={{ margin: 0 }}>Amount</div><div style={{ fontSize: 18, fontWeight: 700 }}>₹{inr(investData.amount)}</div></div>
+                    <div><div className="nd-label" style={{ margin: 0 }}>Deploying</div><div style={{ fontSize: 18, fontWeight: 700, color: 'var(--nd-green)' }}>₹{inr(investData.deployed)}</div></div>
+                    <div><div className="nd-label" style={{ margin: 0 }}>Leftover</div><div style={{ fontSize: 18, fontWeight: 700, color: 'var(--nd-text-2)' }}>₹{inr(investData.leftover)}</div></div>
+                    <div><div className="nd-label" style={{ margin: 0 }}>Stocks</div><div style={{ fontSize: 18, fontWeight: 700 }}>{investData.count}</div></div>
+                    <button onClick={() => askInvestAll(investData.picks)}
+                      style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, padding: '10px 18px', borderRadius: 10, border: 'none',
+                        background: 'var(--nd-green)', color: '#fff', fontWeight: 700, fontSize: 14, cursor: 'pointer' }}>
+                      <span className="material-icons" style={{ fontSize: 18 }}>shopping_cart_checkout</span>
+                      Invest all
+                    </button>
+                  </div>
+
+                  <div className="nd-card" style={{ padding: 0 }}>
+                    <div style={{ overflowX: 'auto' }}>
+                      <table className="nd-table">
+                        <thead><tr>
+                          <th>Stock</th><th style={{ textAlign: 'center' }}>Grade</th><th style={{ textAlign: 'right' }}>Win%</th>
+                          <th style={{ textAlign: 'right' }}>Price</th><th style={{ textAlign: 'right' }}>Alloc</th>
+                          <th style={{ textAlign: 'right' }}>Qty</th><th style={{ textAlign: 'right' }}>Cost</th>
+                          <th>Why (AI)</th><th style={{ textAlign: 'center' }}>Buy</th>
+                        </tr></thead>
+                        <tbody>
+                          {investData.picks.map((p: any) => (
+                            <tr key={p.symbol}>
+                              <td><div style={{ fontWeight: 700, fontFamily: 'monospace', color: 'var(--nd-text-1)' }}>{p.symbol}</div>
+                                <div style={{ fontSize: 10.5, color: 'var(--nd-text-3)' }}>{p.name} · {p.sector}</div></td>
+                              <td style={{ textAlign: 'center', fontWeight: 700, color: p.grade === 'A' ? 'var(--nd-green)' : 'var(--nd-blue)' }}>{p.grade}</td>
+                              <td style={{ textAlign: 'right', fontSize: 12.5, color: 'var(--nd-green)' }}>{p.winProbability != null ? `${Math.round(p.winProbability * 100)}%` : '—'}</td>
+                              <td style={{ textAlign: 'right', fontSize: 12.5 }}>₹{inr(p.price)}</td>
+                              <td style={{ textAlign: 'right', fontSize: 12.5, fontWeight: 600, color: 'var(--nd-accent)' }}>{p.weightPct}%</td>
+                              <td style={{ textAlign: 'right', fontSize: 12.5 }}>{p.quantity}</td>
+                              <td style={{ textAlign: 'right', fontSize: 12.5 }}>₹{inr(p.estCost)}</td>
+                              <td style={{ fontSize: 11, color: 'var(--nd-text-3)', maxWidth: 320, lineHeight: 1.5 }}>{p.reasoning}</td>
+                              <td style={{ textAlign: 'center' }}>
+                                <button onClick={() => askOrder({ symbol: p.symbol, transactionType: 'BUY', quantity: p.order.quantity,
+                                  orderType: p.order.orderType, price: p.order.limitPrice, exchange: p.order.exchange, product: p.order.product, estValue: p.order.estValue })}
+                                  style={{ fontSize: 11, fontWeight: 700, padding: '4px 12px', borderRadius: 6, border: '1px solid #22c55e55', background: '#22c55e1a', color: '#22c55e', cursor: 'pointer' }}>
+                                  Buy {p.quantity}
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--nd-text-3)', textAlign: 'center' }}>
+                    Conviction-weighted (win probability, capped 35%/stock) protective LIMIT buys. Advisory only — not investment advice.
+                  </div>
+                </>
+              )}
+
+              {investData && (!investData.picks || investData.picks.length === 0) && (
+                <div className="nd-card" style={{ textAlign: 'center', padding: 40, color: 'var(--nd-text-3)', fontSize: 13 }}>
+                  {investData.note || 'No qualifying picks right now — try after the next AI scan, or increase the amount.'}
+                </div>
+              )}
+
+              {!investData && !investLoading && (
+                <div className="nd-card" style={{ textAlign: 'center', padding: 40, color: 'var(--nd-text-3)', fontSize: 13 }}>
+                  Enter the amount from your Groww wallet and click <strong>Build plan</strong> — the AI will split it across its best current picks.
+                </div>
+              )}
+            </div>
+          )}
         </>
+      )}
+
+      {/* ── Order result toast ── */}
+      {orderMsg && (
+        <div onClick={() => setOrderMsg(null)}
+          style={{ position: 'fixed', bottom: 20, right: 20, zIndex: 1100, maxWidth: 360, cursor: 'pointer',
+            background: orderMsg.ok ? 'var(--nd-green-50)' : 'var(--nd-red-50)',
+            border: `1px solid ${orderMsg.ok ? '#22c55e55' : '#ef444455'}`, borderRadius: 10, padding: '12px 16px',
+            display: 'flex', alignItems: 'center', gap: 10, boxShadow: 'var(--nd-shadow-md)' }}>
+          <span className="material-icons" style={{ color: orderMsg.ok ? 'var(--nd-green)' : 'var(--nd-red)', fontSize: 20 }}>
+            {orderMsg.ok ? 'check_circle' : 'error_outline'}
+          </span>
+          <span style={{ fontSize: 13, color: orderMsg.ok ? '#065f46' : 'var(--nd-red)' }}>{orderMsg.text}</span>
+        </div>
+      )}
+
+      {/* ── Order confirmation modal ── */}
+      {pendingOrder && (
+        <div onClick={e => { if (e.target === e.currentTarget && !placing) setPendingOrder(null); }}
+          style={{ position: 'fixed', inset: 0, background: '#00000080', zIndex: 1200, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
+          <div style={{ background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 14, width: '100%', maxWidth: 460, maxHeight: '88vh', overflow: 'auto', padding: 22 }}>
+            {pendingOrder.kind === 'basket' ? (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+                  <span className="material-icons" style={{ color: 'var(--nd-green)' }}>shopping_cart_checkout</span>
+                  <span style={{ fontSize: 16, fontWeight: 700, color: 'var(--nd-text-1)' }}>Confirm investment</span>
+                </div>
+                <div style={{ fontSize: 12.5, color: 'var(--nd-text-2)', marginBottom: 10 }}>
+                  Placing <strong style={{ color: 'var(--nd-text-1)' }}>{pendingOrder.legs.length}</strong> protective LIMIT buy orders
+                  {' '}(~₹{inr(pendingOrder.legs.reduce((s: number, l: any) => s + (l.estValue || 0), 0))} total):
+                </div>
+                <div style={{ maxHeight: 240, overflow: 'auto', marginBottom: 12 }}>
+                  {pendingOrder.legs.map((l: any) => (
+                    <div key={l.symbol} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 0', borderBottom: '1px solid var(--nd-border)', fontSize: 12.5 }}>
+                      <strong style={{ color: 'var(--nd-green)' }}>BUY {l.quantity}</strong>
+                      <strong style={{ fontFamily: 'monospace', color: 'var(--nd-text-1)' }}>{l.symbol}</strong>
+                      <span style={{ marginLeft: 'auto', color: 'var(--nd-text-3)' }}>{l.orderType === 'LIMIT' && l.price ? `LIMIT @ ₹${l.price}` : 'MARKET'} · ~₹{inr(l.estValue || 0)}</span>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ fontSize: 11.5, color: 'var(--nd-red)', background: 'var(--nd-red-50)', borderRadius: 8, padding: '8px 10px', marginBottom: 14 }}>
+                  Places <strong>{pendingOrder.legs.length} real orders on your Groww account</strong>, one after another. Executes during market hours; needs sufficient funds.
+                </div>
+              </>
+            ) : pendingOrder.kind === 'swap' ? (() => {
+              const { sell, buy } = pendingOrder;
+              const Leg = ({ leg, n }: { leg: any; n: string }) => (
+                <div style={{ border: '1px solid var(--nd-border)', borderRadius: 10, padding: '10px 12px', marginBottom: 8 }}>
+                  <div style={{ fontSize: 10.5, color: 'var(--nd-text-3)', fontWeight: 700, letterSpacing: 0.5, marginBottom: 3 }}>{n}</div>
+                  <div style={{ fontSize: 13.5 }}>
+                    <strong style={{ color: leg.transactionType === 'SELL' ? 'var(--nd-red)' : 'var(--nd-green)' }}>{leg.transactionType} {leg.quantity}</strong>
+                    {' '}<strong style={{ color: 'var(--nd-text-1)', fontFamily: 'monospace' }}>{leg.symbol}</strong>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: 'var(--nd-text-2)', marginTop: 2 }}>
+                    {leg.orderType === 'LIMIT' && leg.price ? `LIMIT @ ₹${leg.price}` : 'MARKET'} · {leg.exchange || 'NSE'} · CNC
+                    {leg.estValue ? ` · ~₹${inr(leg.estValue)}` : ''}
+                  </div>
+                </div>
+              );
+              return (
+                <>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+                    <span className="material-icons" style={{ color: '#a78bfa' }}>swap_horiz</span>
+                    <span style={{ fontSize: 16, fontWeight: 700, color: 'var(--nd-text-1)' }}>Confirm swap</span>
+                  </div>
+                  <Leg leg={sell} n="STEP 1 — SELL FIRST" />
+                  <div style={{ textAlign: 'center', color: 'var(--nd-text-3)', margin: '-2px 0 6px' }}>
+                    <span className="material-icons" style={{ fontSize: 18 }}>south</span>
+                  </div>
+                  <Leg leg={buy} n="STEP 2 — THEN BUY" />
+
+                  {/* Why the AI recommends this swap */}
+                  {pendingOrder.basis && (() => {
+                    const b = pendingOrder.basis;
+                    const sc = b.sell.signal === 'bullish' ? 'var(--nd-green)' : b.sell.signal === 'bearish' ? 'var(--nd-red)' : 'var(--nd-text-2)';
+                    const Fact = ({ k, v, c }: { k: string; v: any; c?: string }) => (v === undefined || v === null || v === '') ? null : (
+                      <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>{k} <strong style={{ color: c || 'var(--nd-text-1)' }}>{v}</strong></span>
+                    );
+                    return (
+                      <div style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 10, padding: '10px 12px', marginBottom: 10 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                          <span className="material-icons" style={{ fontSize: 14, color: 'var(--nd-accent)' }}>insights</span>
+                          <span style={{ fontSize: 11.5, fontWeight: 700, color: 'var(--nd-text-1)' }}>Why the AI suggests this swap</span>
+                        </div>
+                        <div style={{ fontSize: 11.5, color: 'var(--nd-text-2)', marginBottom: 4 }}>
+                          <strong style={{ color: 'var(--nd-red)' }}>Out — {sell.symbol}:</strong> {b.sell.reason}
+                        </div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 8 }}>
+                          <Fact k="AI signal" v={b.sell.signal} c={sc} />
+                          <Fact k="health" v={b.sell.health != null ? `${b.sell.health}/100` : null} />
+                          <Fact k="RSI" v={b.sell.rsi} />
+                          <Fact k="momentum" v={b.sell.momentum != null ? `${b.sell.momentum > 0 ? '+' : ''}${b.sell.momentum}%` : null} />
+                          <Fact k="trend" v={b.sell.trend} />
+                          <Fact k="P&L" v={b.sell.pnl != null ? `${b.sell.pnl > 0 ? '+' : ''}${b.sell.pnl}%` : null} c={(b.sell.pnl ?? 0) >= 0 ? 'var(--nd-green)' : 'var(--nd-red)'} />
+                          <Fact k="weight" v={`${b.sell.weightNow ?? '–'}% → ${b.sell.weightTarget ?? '–'}%`} />
+                        </div>
+                        <div style={{ fontSize: 11.5, color: 'var(--nd-text-2)', marginBottom: 4 }}>
+                          <strong style={{ color: 'var(--nd-green)' }}>In — {buy.symbol}:</strong>{' '}
+                          AI grade <strong style={{ color: 'var(--nd-text-1)' }}>{b.buy.grade}</strong>
+                          {b.buy.winProb != null ? <> · win prob <strong style={{ color: 'var(--nd-green)' }}>{Math.round(b.buy.winProb * 100)}%</strong></> : null}
+                          {b.buy.sameSector ? <> · <span style={{ color: 'var(--nd-accent)' }}>same sector ({b.buy.sector})</span></> : (b.buy.sector ? <> · {b.buy.sector}</> : null)}
+                        </div>
+                        {b.buy.reasoning && (
+                          <div style={{ fontSize: 11, color: 'var(--nd-text-3)', lineHeight: 1.5 }}>{b.buy.reasoning}</div>
+                        )}
+                      </div>
+                    );
+                  })()}
+
+                  <div style={{ fontSize: 11.5, color: 'var(--nd-red)', background: 'var(--nd-red-50)', borderRadius: 8, padding: '8px 10px', margin: '6px 0 14px' }}>
+                    Places <strong>two real orders on Groww</strong> — the SELL first, then the BUY (only if the sell is accepted). Executes during market hours.
+                  </div>
+                </>
+              );
+            })() : (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+                  <span className="material-icons" style={{ color: pendingOrder.transactionType === 'SELL' ? 'var(--nd-red)' : 'var(--nd-green)' }}>
+                    {pendingOrder.transactionType === 'SELL' ? 'sell' : 'shopping_cart'}
+                  </span>
+                  <span style={{ fontSize: 16, fontWeight: 700, color: 'var(--nd-text-1)' }}>Confirm {pendingOrder.transactionType} order</span>
+                </div>
+                <div style={{ fontSize: 13.5, color: 'var(--nd-text-2)', lineHeight: 1.7, marginBottom: 8 }}>
+                  <div><strong style={{ color: 'var(--nd-text-1)' }}>{pendingOrder.transactionType} {pendingOrder.quantity}</strong> × <strong style={{ color: 'var(--nd-text-1)', fontFamily: 'monospace' }}>{pendingOrder.symbol}</strong></div>
+                  <div>
+                    {pendingOrder.orderType === 'LIMIT' && pendingOrder.price
+                      ? <>Type: <strong style={{ color: 'var(--nd-text-1)' }}>LIMIT @ ₹{pendingOrder.price}</strong> (protective collar)</>
+                      : 'Type: MARKET'} · Product: CNC · {pendingOrder.exchange || 'NSE'}
+                  </div>
+                  {(pendingOrder.estValue || (pendingOrder.price && pendingOrder.quantity)) ? (
+                    <div>Est. value: ₹{inr(pendingOrder.estValue ?? pendingOrder.quantity * pendingOrder.price)}</div>
+                  ) : null}
+                </div>
+                <div style={{ fontSize: 11.5, color: 'var(--nd-red)', background: 'var(--nd-red-50)', borderRadius: 8, padding: '8px 10px', marginBottom: 14 }}>
+                  This places a <strong>real order on your Groww account</strong>. Executes only during market hours.
+                </div>
+              </>
+            )}
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+              <button onClick={() => setPendingOrder(null)} disabled={placing}
+                style={{ padding: '8px 16px', borderRadius: 8, border: '1px solid var(--nd-border)', background: 'var(--nd-surface)', color: 'var(--nd-text-2)', cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
+                Cancel
+              </button>
+              <button onClick={confirmOrder} disabled={placing}
+                style={{ padding: '8px 18px', borderRadius: 8, border: 'none', cursor: placing ? 'wait' : 'pointer', fontSize: 13, fontWeight: 700, color: '#fff',
+                  background: pendingOrder.kind === 'swap' ? '#8b5cf6'
+                    : pendingOrder.kind === 'basket' ? 'var(--nd-green)'
+                    : (pendingOrder.transactionType === 'SELL' ? 'var(--nd-red)' : 'var(--nd-green)') }}>
+                {placing ? 'Placing…'
+                  : pendingOrder.kind === 'swap' ? 'Confirm swap'
+                  : pendingOrder.kind === 'basket' ? `Invest in ${pendingOrder.legs.length} stocks`
+                  : `Confirm ${pendingOrder.transactionType}`}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

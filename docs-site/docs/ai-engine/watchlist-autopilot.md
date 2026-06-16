@@ -64,6 +64,22 @@ it steps **back to the previous trading day** and runs again — walking backwar
 through history. Days without real intraday data are skipped, and it wraps after
 `AUTOPILOT_BACKTEST_MAX_DAYS_BACK` so it keeps cycling.
 
+#### Resetting the next trade date
+
+The dashboard's Autopilot card shows the **next trade date** (the cursor the walk
+will replay next) with a **Reset to last trading day** button. Resetting:
+
+- moves the cursor to the **last trading day before the current date** (weekends
+  skipped),
+- **stops any in-flight replay queue** and clears the queue state,
+- **preserves training history** (`completed_days` / `last_completed`) — only the
+  walk position moves,
+- if backtest is enabled and inside its allowed window, **immediately starts a
+  fresh queue** for the new date.
+
+Use it after a gap (e.g. the service was off for a few days) to re-anchor the walk
+to the most recent session instead of resuming from a stale day.
+
 ### Time-coordination (backtest yields to paper)
 
 So the agents focus entirely on live decisions during market hours, backtest is
@@ -84,6 +100,7 @@ live. Net effect:
 | Mutually exclusive | Backtest never runs during the paper window or while paper sessions are live |
 | One per symbol per day | Paper tracks started symbols in Redis (`ai_engine:autopilot:started:{date}`), reset daily — no churn |
 | Instant response | Toggling a mode on kicks the first queue immediately (no wait for the loop) |
+| Resettable walk | The backtest cursor can be reset to the last trading day before today; in-flight queues stop, training history is kept |
 | Auto square-off | Sessions close themselves at end of day |
 
 ### Configuration (env)
@@ -124,6 +141,7 @@ uses the same accuracy to **calibrate** its future confidence.
 | `POST /api/ai-engine/watchlist/scan` | Proxy a manual full sweep to the scanner |
 | `GET /api/ai-engine/autopilot` | Combined status: `paper` (enabled, market, running, watchlist size) + `backtest` (enabled, active window, cursor day, queue progress, days trained) |
 | `POST /api/ai-engine/autopilot` | Enable / disable a mode (`{ "mode": "paper"\|"backtest", "enabled": true }`) — proxied to the autopilot-service |
+| `POST /api/ai-engine/autopilot/reset-cursor` | Reset the backtest next trade date to the last trading day before today (stops the queue, keeps training history) — proxied to the autopilot-service |
 | `GET /api/ai-engine/scan-evaluation` | Latest post-market signal score + accuracy trend |
 | `POST /api/ai-engine/scan-feedback` | (Internal) scanner pushes its grade here for persistence |
 | `GET /api/ai-engine/learning-curve` | Cumulative win-rate over the ordered trade history |
@@ -134,7 +152,7 @@ uses the same accuracy to **calibrate** its future confidence.
 
 | Dashboard element | Backed by |
 |---|---|
-| **Autopilot** banner (toggle + live status) | `/autopilot` |
+| **Autopilot** banner (toggle + live status + backtest next-trade-date reset) | `/autopilot`, `/autopilot/reset-cursor` |
 | **AI Watchlist** tab + evidence modal | `/watchlist` |
 | **Last signal score** panel | `/scan-evaluation` |
 | **System Learning Curve** | `/learning-curve` |

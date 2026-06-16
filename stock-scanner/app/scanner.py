@@ -22,6 +22,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import time
 from datetime import datetime, timezone, timedelta
 
@@ -36,6 +37,7 @@ IST = timezone(timedelta(hours=5, minutes=30))
 _YAHOO = "https://query1.finance.yahoo.com/v8/finance/chart/"
 _UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Accept": "application/json"}
 _WATCHLIST_KEY   = "ai_engine:watchlist"
+_RANKED_KEY      = "ai_engine:ranked"                    # full ranked board for the Predictions page
 _CANDIDATES_KEY  = "ai_engine:scan_candidates"           # candidate pool for the sentiment-service
 _SENTIMENT_KEY   = "ai_engine:sentiment:{}"              # per-symbol news signal (sentiment-service)
 _PREMARKET_KEY   = "ai_engine:watchlist:premarket"   # snapshot graded after close
@@ -47,9 +49,22 @@ MIN_AVG_VOLUME = float(os.getenv("SCAN_MIN_VOLUME", "300000"))   # liquidity
 MIN_ATR_PCT    = float(os.getenv("SCAN_MIN_ATR_PCT", "1.2"))     # daily true range %
 MIN_PRICE      = float(os.getenv("SCAN_MIN_PRICE", "30"))        # avoid illiquid penny stocks
 TOP_N          = int(os.getenv("SCAN_TOP_N", "15"))
+
+# Delivery-fitness gates — a stock must clear these to be a multi-week swing hold.
+# Unlike intraday (which fishes for high volatility), delivery wants an *orderly*
+# uptrend: enough liquidity, manageable volatility, and positive medium-term trend.
+DELIVERY_MIN_VOLUME  = float(os.getenv("SCAN_DELIVERY_MIN_VOLUME", "200000"))
+DELIVERY_MAX_ATR_PCT = float(os.getenv("SCAN_DELIVERY_MAX_ATR_PCT", "6.0"))   # too choppy = not holdable
+DELIVERY_MIN_MOM     = float(os.getenv("SCAN_DELIVERY_MIN_MOM", "0.0"))       # 10-day momentum must be positive
+DELIVERY_TOP_N       = int(os.getenv("SCAN_DELIVERY_TOP_N", "10"))
+RANKED_MAX           = int(os.getenv("SCAN_RANKED_MAX", "250"))   # full ranked board size
 CANDIDATE_POOL_N = int(os.getenv("SCAN_CANDIDATE_POOL", "30"))   # names the sentiment-service covers
 SCAN_INTERVAL  = int(os.getenv("SCAN_INTERVAL", str(20 * 60)))   # intraday sweep cadence
-FETCH_DELAY    = float(os.getenv("SCAN_FETCH_DELAY", "0.25"))    # be gentle on Yahoo
+FETCH_DELAY    = float(os.getenv("SCAN_FETCH_DELAY", "0.30"))    # base per-symbol delay (+jitter) — gentle on Yahoo
+# Full-universe (NSE ~1800) background scan controls
+SCAN_CHECKPOINT_EVERY = int(os.getenv("SCAN_CHECKPOINT_EVERY", "120"))  # write partial watchlist every N stocks
+RATE_LIMIT_BACKOFF    = float(os.getenv("SCAN_RATE_LIMIT_BACKOFF", "5.0"))  # sleep on a Yahoo 429
+STALE_RUN_SECS        = int(os.getenv("SCAN_STALE_RUN_SECS", "2400"))   # a 'running' flag older than this is stale
 
 # Trading-day schedule (IST, minutes past midnight)
 MARKET_OPEN_MIN  = int(os.getenv("SCAN_MARKET_OPEN_MIN", str(9 * 60 + 15)))    # 09:15
@@ -61,7 +76,8 @@ BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
 
 _redis: redis.Redis | None = None
 _state = {
-    "last_scan": None, "scanned": 0, "candidates": 0, "running": False,
+    "last_scan": None, "scanned": 0, "universe": 0, "candidates": 0,
+    "running": False, "scanning": False, "run_started": 0.0,
     "last_premarket_date": None, "last_eval_date": None,
     "last_eval": None, "calibration": None, "market_regime": "neutral",
 }
@@ -254,6 +270,40 @@ def _analyze(candles: list[dict], regime: int = 0, calib: dict | None = None) ->
                  f"gap {gap_pct:+.1f}%, market {regime_txt} — "
                  + ("strong intraday fit" if fit else "below intraday thresholds"))
 
+    # ── Delivery (multi-week swing) suitability ───────────────────────────────
+    # Delivery favours a confirmed, orderly uptrend you can hold for weeks: price
+    # above both SMAs, SMA20≥SMA50, positive 10-day momentum, healthy (not
+    # over-bought) RSI, manageable volatility and enough liquidity. Long-only.
+    uptrend       = price > sma20 and sma20 >= sma50
+    healthy_rsi   = 45 <= rsi <= 72
+    calm_enough   = atr_pct <= DELIVERY_MAX_ATR_PCT
+    liquid_enough = avg_vol >= DELIVERY_MIN_VOLUME
+    delivery_fit  = (action == "BUY" and uptrend and mom > DELIVERY_MIN_MOM and healthy_rsi
+                     and calm_enough and liquid_enough and price >= MIN_PRICE)
+
+    # Estimated safe holding window (weeks): stronger, calmer trends hold longer.
+    weeks = 1
+    if price > sma20 > sma50:   weeks += 1     # full trend alignment
+    if mom > 2.0:               weeks += 1     # real momentum behind it
+    if atr_pct <= 2.5:          weeks += 1     # orderly, low-noise climb
+    if macd_hist > 0:           weeks += 1     # MACD confirms
+    if 50 <= rsi <= 65:         weeks += 1     # healthy, room left to run
+    delivery_weeks = max(1, min(6, weeks))
+
+    # Delivery score (0..100): trend quality + conviction + momentum, and — unlike
+    # intraday — *low* volatility is a plus. Used to rank the delivery list.
+    trend_q = 1.0 if price > sma20 > sma50 else (0.5 if price > sma20 else 0.0)
+    calm_q  = max(0.0, min(1.0, (DELIVERY_MAX_ATR_PCT - atr_pct) / DELIVERY_MAX_ATR_PCT + 0.2))
+    mom_q   = max(0.0, min(1.0, mom / 6.0))
+    delivery_score = round((trend_q * 0.40 + conviction * 0.25 + mom_q * 0.20 + calm_q * 0.15) * 100, 1)
+
+    delivery_reasoning = (
+        f"{'Confirmed up' if uptrend else 'Unconfirmed '}trend "
+        f"(price {'>' if price > sma20 else '<'} SMA20 {'>' if sma20 >= sma50 else '<'} SMA50), "
+        f"momentum {mom:+.1f}%, RSI {rsi:.0f}, volatility {atr_pct:.1f}% ATR, "
+        f"liquidity {avg_vol/1e6:.1f}M/day — "
+        + (f"holdable ~{delivery_weeks} week(s)" if delivery_fit else "not a clean delivery setup"))
+
     return {
         "price": round(price, 2),
         "action": action,
@@ -266,6 +316,10 @@ def _analyze(candles: list[dict], regime: int = 0, calib: dict | None = None) ->
         "confirmed_factors": confirmed_factors,
         "confirmations": confirmations,
         "intraday_fit": fit,
+        "delivery_fit": delivery_fit,
+        "delivery_weeks": delivery_weeks,
+        "delivery_score": delivery_score,
+        "delivery_reasoning": delivery_reasoning,
         "reasoning": reasoning,
         "metrics": {
             "avg_volume": int(avg_vol),
@@ -293,34 +347,133 @@ def _analyze(candles: list[dict], regime: int = 0, calib: dict | None = None) ->
 async def _fetch_chart(client: httpx.AsyncClient, ysym: str) -> list[dict]:
     p2 = int(time.time())
     p1 = p2 - 140 * 86400
-    try:
-        r = await client.get(_YAHOO + ysym,
-                             params={"period1": p1, "period2": p2, "interval": "1d", "includePrePost": "false"},
-                             headers=_UA, timeout=12.0)
-        r.raise_for_status()
-        res = (r.json().get("chart", {}).get("result") or [None])[0]
-        if not res:
-            return []
-        q = (res.get("indicators", {}).get("quote") or [{}])[0]
-        o, h, l, c, v = q.get("open", []), q.get("high", []), q.get("low", []), q.get("close", []), q.get("volume", [])
-        out = []
-        for i in range(len(c)):
-            try:
-                cl = c[i]
-                if cl is None or float(cl) <= 0:
-                    continue
-                out.append({"o": float(o[i] or cl), "h": float(h[i] or cl),
-                            "l": float(l[i] or cl), "c": float(cl), "v": int(v[i] or 0)})
-            except (TypeError, ValueError, IndexError):
+    # Retry with backoff on rate-limiting (429) — essential when sweeping the
+    # full ~1800-symbol NSE universe so Yahoo doesn't shut us out mid-scan.
+    for attempt in range(3):
+        try:
+            r = await client.get(_YAHOO + ysym,
+                                 params={"period1": p1, "period2": p2, "interval": "1d", "includePrePost": "false"},
+                                 headers=_UA, timeout=12.0)
+            if r.status_code in (429, 999) or r.status_code >= 500:
+                await asyncio.sleep(RATE_LIMIT_BACKOFF * (attempt + 1) + random.uniform(0, 1.0))
                 continue
-        return out
-    except Exception as exc:
-        logger.debug("fetch %s failed: %s", ysym, exc)
-        return []
+            r.raise_for_status()
+            res = (r.json().get("chart", {}).get("result") or [None])[0]
+            if not res:
+                return []
+            q = (res.get("indicators", {}).get("quote") or [{}])[0]
+            o, h, l, c, v = q.get("open", []), q.get("high", []), q.get("low", []), q.get("close", []), q.get("volume", [])
+            out = []
+            for i in range(len(c)):
+                try:
+                    cl = c[i]
+                    if cl is None or float(cl) <= 0:
+                        continue
+                    out.append({"o": float(o[i] or cl), "h": float(h[i] or cl),
+                                "l": float(l[i] or cl), "c": float(cl), "v": int(v[i] or 0)})
+                except (TypeError, ValueError, IndexError):
+                    continue
+            return out
+        except Exception as exc:
+            logger.debug("fetch %s failed: %s", ysym, exc)
+            return []
+    return []
 
 
 async def _fetch_daily(client: httpx.AsyncClient, symbol: str) -> list[dict]:
     return await _fetch_chart(client, f"{symbol}.NS")
+
+
+# ── Scan universe ─────────────────────────────────────────────────────────────
+# Source (SCAN_UNIVERSE_SOURCE):
+#   "nse"       → the full NSE equity master (~1800 listed EQ-series stocks) from
+#                 the official archives CSV. This is *every* available stock.
+#   "directory" → the backend stock directory (~300 curated names).
+#   "bundled"   → the small hardcoded UNIVERSE (offline fallback).
+# Resolved once per trading day and cached in Redis (survives restarts), with
+# graceful degradation nse → directory → bundled if a source is unavailable.
+UNIVERSE_SOURCE      = os.getenv("SCAN_UNIVERSE_SOURCE", "nse").lower()
+NSE_EQUITY_LIST_URL  = os.getenv("NSE_EQUITY_LIST_URL",
+                                 "https://archives.nseindia.com/content/equities/EQUITY_L.csv")
+_UNIVERSE_CACHE_KEY  = "ai_engine:scan_universe"
+_universe_cache: dict = {"date": None, "universe": None}
+
+
+async def _fetch_nse_equity_universe() -> dict[str, str]:
+    """Every NSE-listed equity (EQ series) from the official equity master CSV."""
+    import csv, io
+    headers = {"User-Agent": _UA["User-Agent"], "Accept": "text/csv,application/csv,*/*"}
+    async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
+        r = await client.get(NSE_EQUITY_LIST_URL, headers=headers)
+        r.raise_for_status()
+        rows = list(csv.reader(io.StringIO(r.text)))
+    if not rows:
+        return {}
+    head = [h.strip().upper() for h in rows[0]]
+    i_sym = head.index("SYMBOL")
+    i_name = head.index("NAME OF COMPANY")
+    i_series = head.index("SERIES")
+    uni: dict[str, str] = {}
+    for row in rows[1:]:
+        if len(row) <= max(i_sym, i_name, i_series):
+            continue
+        sym, name, series = row[i_sym].strip(), row[i_name].strip(), row[i_series].strip().upper()
+        if sym and series == "EQ":            # EQ = rolling segment (intraday-eligible)
+            uni[sym] = name or sym
+    return uni
+
+
+async def _fetch_directory_universe() -> dict[str, str]:
+    """The backend's curated stock directory (NSE-listed)."""
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        r = await client.get(f"{BACKEND_URL}/api/stocks/directory/symbols",
+                              params={"tradable_only": "true"})
+        r.raise_for_status()
+        rows = r.json().get("data", []) or []
+    return {s["symbol"]: s.get("name", s["symbol"]) for s in rows if s.get("symbol")}
+
+
+async def _load_universe() -> dict[str, str]:
+    today = _ist_now().strftime("%Y-%m-%d")
+    if _universe_cache["universe"] and _universe_cache["date"] == today:
+        return _universe_cache["universe"]
+
+    # Redis day-cache (avoids re-hitting NSE every sweep; survives restarts).
+    try:
+        rc = await _get_redis()
+        raw = await rc.get(f"{_UNIVERSE_CACHE_KEY}:{today}")
+        if raw:
+            uni = json.loads(raw)
+            if uni:
+                _universe_cache.update({"date": today, "universe": uni})
+                return uni
+    except Exception:
+        pass
+
+    uni: dict[str, str] = {}
+    if UNIVERSE_SOURCE == "nse":
+        try:
+            uni = await _fetch_nse_equity_universe()
+            logger.info("scan universe: NSE equity master → %d symbols", len(uni))
+        except Exception as exc:
+            logger.warning("NSE equity list fetch failed (%s); falling back to directory", exc)
+    if not uni and UNIVERSE_SOURCE in ("nse", "directory"):
+        try:
+            uni = await _fetch_directory_universe()
+            logger.info("scan universe: backend directory → %d symbols", len(uni))
+        except Exception as exc:
+            logger.warning("directory universe fetch failed (%s); using bundled list", exc)
+    if not uni:
+        uni = dict(UNIVERSE)
+        logger.info("scan universe: bundled fallback → %d symbols", len(uni))
+
+    try:
+        rc = await _get_redis()
+        await rc.set(f"{_UNIVERSE_CACHE_KEY}:{today}", json.dumps(uni), ex=86400)
+    except Exception:
+        pass
+    _universe_cache.update({"date": today, "universe": uni})
+    return uni
 
 
 async def _market_regime(client: httpx.AsyncClient) -> int:
@@ -362,20 +515,77 @@ async def scan_once(phase: str = "intraday") -> dict:
 
     phase: "premarket" also stores a dated snapshot that gets graded after close.
     """
-    _state["running"] = True
+    # Don't start a second sweep on top of a running one (the full-universe scan
+    # takes minutes); a stale 'running' flag (e.g. after a crash) is overridden.
+    if _state.get("running") and (time.time() - _state.get("run_started", 0)) < STALE_RUN_SECS:
+        logger.info("scan(%s) skipped — a sweep is already running", phase)
+        return {}
+    _state.update({"running": True, "run_started": time.time(), "scanning": True})
+
     calib = await _load_calibration()
+    universe = await _load_universe()
+    total = len(universe)
+    _state["universe"] = total
     candidates: list[dict] = []
+    delivery_candidates: list[dict] = []
     scanned = 0
+    _grade_rank = {"A": 0, "B": 1, "C": 2, "D": 3}
+
+    def _progress_payload(scanning: bool) -> dict:
+        """Rank what we have so far so the UI updates live during a long sweep."""
+        wl = sorted(candidates, key=lambda r: (r["action"] != "BUY",
+                    _grade_rank.get(r.get("grade", "D"), 3),
+                    -r.get("rank_score", r.get("signal_score", 0.0))))[:TOP_N]
+        dl = sorted(delivery_candidates, key=lambda r: (_grade_rank.get(r.get("grade", "D"), 3),
+                    -r.get("delivery_score", 0.0)))[:DELIVERY_TOP_N]
+        for d in dl:
+            d["reasoning"] = d.get("delivery_reasoning") or d.get("reasoning")
+        gc = {g: sum(1 for w in wl if w.get("grade") == g) for g in ("A", "B", "C", "D")}
+        return {
+            "updated_at": _ist_now().isoformat(), "phase": phase, "scanned": scanned,
+            "universe": total, "candidates": len(candidates), "market_regime": _state["market_regime"],
+            "calibration": {"accuracy": calib.get("accuracy"), "samples": calib.get("samples", 0)},
+            "grade_counts": gc, "high_conviction": gc["A"] + gc["B"],
+            "scanning": scanning, "items": wl, "delivery": dl,
+        }
+
     async with httpx.AsyncClient(follow_redirects=True) as client:
         regime = await _market_regime(client)
         _state["market_regime"] = {1: "bullish", -1: "bearish", 0: "neutral"}[regime]
-        for sym, name in UNIVERSE.items():
+        for sym, name in universe.items():
             candles = await _fetch_daily(client, sym)
             scanned += 1
             res = _analyze(candles, regime=regime, calib=calib)
-            if res and res["intraday_fit"]:
-                candidates.append({"symbol": sym, "name": name, "source": "scanner", **res})
-            await asyncio.sleep(FETCH_DELAY)
+            if res:
+                base = {"symbol": sym, "name": name, "source": "scanner", **res}
+                if res["intraday_fit"]:
+                    candidates.append(base)
+                if res.get("delivery_fit"):
+                    # independent copy — the intraday list gets mutated by the
+                    # news-boost loop below; delivery should not be affected.
+                    delivery_candidates.append(dict(base))
+            _state["scanned"] = scanned
+            # Progressive checkpoint: write the partial watchlist so the dashboard
+            # shows the scan climbing through the universe and surfaces picks while
+            # the background sweep is still running.
+            if scanned % SCAN_CHECKPOINT_EVERY == 0:
+                try:
+                    rc = await _get_redis()
+                    await rc.set(_WATCHLIST_KEY, json.dumps(_progress_payload(True)), ex=86400)
+                    # Partial ranked board so the Predictions page fills during the sweep.
+                    rk = sorted(candidates, key=lambda r: (r["action"] != "BUY",
+                                _grade_rank.get(r.get("grade", "D"), 3),
+                                -r.get("rank_score", r.get("signal_score", 0.0))))[:RANKED_MAX]
+                    await rc.set(_RANKED_KEY, json.dumps({
+                        "updated_at": _ist_now().isoformat(), "scanned": scanned, "universe": total,
+                        "candidates": len(candidates), "market_regime": _state["market_regime"],
+                        "items": [{"rank": i + 1, **c} for i, c in enumerate(rk)],
+                    }), ex=86400)
+                except Exception:
+                    pass
+                logger.info("scan(%s) progress: %d/%d scanned, %d intraday-fit, %d delivery-fit",
+                            phase, scanned, total, len(candidates), len(delivery_candidates))
+            await asyncio.sleep(FETCH_DELAY + random.uniform(0.0, FETCH_DELAY))
 
     # ── News-catalyst boost ───────────────────────────────────────────────────
     # Pull the LLM news signal (written by the sentiment-service) for each
@@ -411,6 +621,27 @@ async def scan_once(phase: str = "intraday") -> dict:
     candidates.sort(key=lambda r: (r["action"] != "BUY", _grade_rank.get(r.get("grade", "D"), 3), -r["rank_score"]))
     watchlist = candidates[:TOP_N]
 
+    # Full ranked board (top RANKED_MAX) for the Predictions page — each entry
+    # numbered with its rank and carrying the full evidence used to score it.
+    try:
+        ranked = [{"rank": i + 1, **c} for i, c in enumerate(candidates[:RANKED_MAX])]
+        await r.set(_RANKED_KEY, json.dumps({
+            "updated_at": _ist_now().isoformat(), "scanned": scanned, "universe": len(universe),
+            "candidates": len(candidates), "market_regime": _state["market_regime"],
+            "items": ranked,
+        }), ex=86400)
+    except Exception as exc:
+        logger.debug("ranked board write failed: %s", exc)
+
+    # Delivery list: rank delivery-fit names by grade then delivery_score (all are
+    # already BUY + confirmed uptrend). Surface the delivery reasoning on `reasoning`
+    # so the evidence modal explains the multi-week thesis, not the intraday one.
+    delivery_candidates.sort(
+        key=lambda r: (_grade_rank.get(r.get("grade", "D"), 3), -r.get("delivery_score", 0.0)))
+    delivery_list = delivery_candidates[:DELIVERY_TOP_N]
+    for d in delivery_list:
+        d["reasoning"] = d.get("delivery_reasoning") or d.get("reasoning")
+
     # Publish the candidate pool so the sentiment-service analyses the names just
     # below the cut too — that's how a fresh catalyst can pull a stock *into* the
     # watchlist next cycle (otherwise news would only ever reinforce incumbents).
@@ -426,13 +657,15 @@ async def scan_once(phase: str = "intraday") -> dict:
         "updated_at": now.isoformat(),
         "phase": phase,
         "scanned": scanned,
-        "universe": len(UNIVERSE),
+        "universe": len(universe),
         "candidates": len(candidates),
         "market_regime": _state["market_regime"],
         "calibration": {"accuracy": calib.get("accuracy"), "samples": calib.get("samples", 0)},
         "grade_counts": grade_counts,
         "high_conviction": grade_counts["A"] + grade_counts["B"],
+        "scanning": False,
         "items": watchlist,
+        "delivery": delivery_list,
     }
     try:
         r = await _get_redis()
@@ -442,10 +675,11 @@ async def scan_once(phase: str = "intraday") -> dict:
     except Exception as exc:
         logger.warning("watchlist write failed: %s", exc)
 
-    _state.update({"last_scan": payload["updated_at"], "scanned": scanned,
-                   "candidates": len(candidates), "running": False, "calibration": payload["calibration"]})
-    logger.info("scan(%s) complete: %d scanned, %d intraday-fit, %d on watchlist, market %s",
-                phase, scanned, len(candidates), len(watchlist), _state["market_regime"])
+    _state.update({"last_scan": payload["updated_at"], "scanned": scanned, "universe": total,
+                   "candidates": len(candidates), "running": False, "scanning": False,
+                   "calibration": payload["calibration"]})
+    logger.info("scan(%s) complete: %d scanned, %d intraday-fit, %d on watchlist, %d delivery, market %s",
+                phase, scanned, len(candidates), len(watchlist), len(delivery_list), _state["market_regime"])
     return payload
 
 

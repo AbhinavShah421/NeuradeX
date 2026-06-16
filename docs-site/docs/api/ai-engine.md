@@ -29,6 +29,7 @@ loop**, the **AI watchlist + autopilot**, and **Pattern Memory**.
 | `POST` | `/api/ai-engine/watchlist/scan` | Proxy a manual full sweep to the scanner service |
 | `GET` | `/api/ai-engine/autopilot` | Combined autopilot status — `paper` + `backtest` (proxied from autopilot-service) |
 | `POST` | `/api/ai-engine/autopilot` | Enable / disable a mode (`{ "mode": "paper"\|"backtest", "enabled": true }`) |
+| `POST` | `/api/ai-engine/autopilot/reset-cursor` | Reset the backtest next trade date to the last trading day before today (stops the in-flight queue, keeps training history) |
 | `GET` | `/api/ai-engine/llm-status` | Active LLM provider (Anthropic vs Ollama), model, and a live probe |
 | `GET` | `/api/ai-engine/scan-evaluation` | Latest post-market signal-score grade + per-day accuracy trend |
 | `POST` | `/api/ai-engine/scan-feedback` | (Internal) the scanner pushes its post-market grade here → persisted to `scan_evaluations` |

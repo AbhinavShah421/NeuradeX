@@ -522,8 +522,17 @@ async def analyze_stock(
     # Step 2: compute indicators
     indicators = _compute_indicators(candles)
 
-    # Step 3: call LLM
+    # Step 3: call LLM — prepend the lessons learned from past losing trades so
+    # the AI factors in mistakes it has already made (the loss-learning loop).
     prompt   = _build_prompt(symbol, name, indicators, candles)
+    try:
+        from app.utils.redis_client import cache_get
+        lessons = await cache_get("ai_engine:active_lessons")
+        if lessons:
+            prompt = (f"{lessons}\n\nWeigh these hard-won lessons when judging the setup below — "
+                      f"flag the risk if this stock matches an 'avoid' condition.\n\n{prompt}")
+    except Exception:
+        pass
     analysis = await _call_ollama(prompt, llm_model)
 
     return {

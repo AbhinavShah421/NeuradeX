@@ -42,6 +42,8 @@ export interface Portfolio {
   totalInvested: number;
   totalGain: number;
   gainPercent: number;
+  dayChange?: number;
+  dayChangePercent?: number;
   stocks: PortfolioStock[];
   cashAvailable: number;
   updatedAt: string;

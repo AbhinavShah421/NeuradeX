@@ -109,6 +109,7 @@ async def place_order(order: OrderRequest):
                 },
             }
         except Exception as e:
+            msg = str(e)
             logger.error(
                 "Groww order placement failed",
                 extra={
@@ -118,10 +119,22 @@ async def place_order(order: OrderRequest):
                     "transaction_type": order.transaction_type,
                     "quantity": order.quantity,
                     "order_type": order.order_type,
-                    "error": str(e),
+                    "error": msg,
                 },
             )
-            raise HTTPException(status_code=502, detail=f"Order placement failed: {e}")
+            # Translate Groww auth errors into an actionable message. Read access
+            # (holdings) can work while the key still lacks trading authorization.
+            if "401" in msg or "Unauthorized" in msg.lower():
+                detail = ("Groww rejected the order (401 Unauthorized): your Groww API key is not "
+                          "authorized to place orders. In Groww → API/TradingView access, enable the "
+                          "Orders/trading scope for this key and complete today's TOTP approval, then retry. "
+                          f"(Holdings read-access already works.) Groww said: {msg}")
+            elif "403" in msg or "forbidden" in msg.lower():
+                detail = ("Groww rejected the order (403 Forbidden): this API key lacks the trading "
+                          f"entitlement. Enable order placement on the key and retry. Groww said: {msg}")
+            else:
+                detail = f"Order placement failed: {msg}"
+            raise HTTPException(status_code=400, detail=detail)
 
     # Groww not configured — return simulated confirmation
     logger.warning(
@@ -147,11 +160,57 @@ async def place_order(order: OrderRequest):
 
 @router.get("/")
 async def list_orders():
-    """List recent orders — simulated (Groww order history not yet integrated)."""
-    return {
-        "status": "success",
-        "data": [],
-    }
+    """Live order book from Groww (today's orders, newest first)."""
+    client = get_groww_client()
+    if not client:
+        return {"status": "success", "data": []}
+    try:
+        raw = await client.get_orders()
+        orders = []
+        for o in raw:
+            orders.append({
+                "order_id":         o.get("groww_order_id") or o.get("order_id") or o.get("orderId"),
+                "reference_id":     o.get("order_reference_id"),
+                "symbol":           o.get("trading_symbol") or o.get("symbol"),
+                "transaction_type": o.get("transaction_type"),
+                "quantity":         o.get("quantity"),
+                "filled_quantity":  o.get("filled_quantity"),
+                "order_type":       o.get("order_type"),
+                "product":          o.get("product"),
+                "status":           o.get("order_status") or o.get("status"),
+                "price":            o.get("price") or o.get("average_fill_price"),
+                "exchange":         o.get("exchange"),
+                "segment":          o.get("segment", "CASH"),
+                "created_at":       o.get("created_at") or o.get("order_timestamp"),
+            })
+        return {"status": "success", "data": orders}
+    except Exception as e:
+        logger.warning("Groww order list failed: %s", e,
+                       extra={"log_type": "order_event", "event": "order_list_failed", "error": str(e)})
+        return {"status": "success", "data": [], "note": "Could not read live orders from Groww."}
+
+
+class CancelRequest(BaseModel):
+    order_id: str
+    segment: str = "CASH"
+
+
+@router.post("/cancel")
+async def cancel_order(req: CancelRequest):
+    """Cancel a pending Groww order by its order id."""
+    client = get_groww_client()
+    if not client:
+        raise HTTPException(status_code=400, detail="Groww is not connected.")
+    try:
+        result = await client.cancel_order(req.order_id, req.segment)
+        logger.info("Groww order cancelled",
+                    extra={"log_type": "order_event", "event": "order_cancelled", "order_id": req.order_id})
+        return {"status": "success", "data": result}
+    except Exception as e:
+        msg = str(e)
+        logger.error("Groww order cancel failed",
+                     extra={"log_type": "order_event", "event": "order_cancel_failed", "order_id": req.order_id, "error": msg})
+        raise HTTPException(status_code=400, detail=f"Cancel failed: {msg}")
 
 
 # ── Feedback-service proxy ────────────────────────────────────────────────────

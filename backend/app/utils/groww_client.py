@@ -18,6 +18,7 @@ update_credentials() to recover.
 import asyncio
 import hashlib
 import time
+import uuid
 from collections import deque
 from datetime import datetime, timedelta
 from typing import Optional
@@ -429,7 +430,10 @@ class GrowwClient:
                         f"{BASE_URL}{path}", headers=self._headers(token), json=body
                     )
                 status_code = resp.status_code
-                resp.raise_for_status()
+                if not resp.is_success:
+                    # Surface Groww's actual error body (e.g. "trading not enabled",
+                    # "unauthorized") instead of httpx's generic status message.
+                    raise RuntimeError(f"Groww {resp.status_code}: {resp.text[:400]}")
                 return resp.json()
         except Exception as exc:
             error = str(exc)
@@ -504,10 +508,15 @@ class GrowwClient:
         price: float = 0.0,
         product: str = "CNC",
         exchange: str = "NSE",
+        validity: str = "DAY",
     ) -> dict:
         body: dict = {
             "trading_symbol": symbol,
             "quantity": quantity,
+            "validity": validity,        # required by Groww (GA001 if missing)
+            # Client-generated idempotency key — Groww requires a non-empty
+            # 8–20 char alphanumeric order_reference_id (GA001 if missing).
+            "order_reference_id": uuid.uuid4().hex[:20],
             "exchange": exchange,
             "segment": "CASH",
             "product": product,
@@ -517,6 +526,19 @@ class GrowwClient:
         if order_type == "LIMIT" and price > 0:
             body["price"] = price
         data = await self._post("/order/create", body)
+        return data.get("payload", data)
+
+    async def get_orders(self, segment: str = "CASH") -> list:
+        """The day's order book from Groww."""
+        data = await self._get("/order/list", {"segment": segment, "page": 0, "page_size": 50})
+        payload = data.get("payload", data)
+        if isinstance(payload, dict):
+            return payload.get("order_list") or payload.get("orders") or []
+        return payload if isinstance(payload, list) else []
+
+    async def cancel_order(self, groww_order_id: str, segment: str = "CASH") -> dict:
+        """Cancel a pending order by its Groww order id."""
+        data = await self._post("/order/cancel", {"groww_order_id": groww_order_id, "segment": segment})
         return data.get("payload", data)
 
 
