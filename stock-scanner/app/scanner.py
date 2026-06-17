@@ -66,7 +66,7 @@ HC_MIN_FACTORS        = int(os.getenv("SCAN_HC_MIN_FACTORS", "5"))   # of 6 conf
 HC_WP_FLOOR           = float(os.getenv("SCAN_HC_WP_FLOOR", "0.72")) # min win-probability
 # Hard cap on how many picks the committed tier holds, no matter how many clear
 # the bar — keeps "high conviction" genuinely selective (paper trades only these).
-COMMITTED_MAX         = int(os.getenv("SCAN_COMMITTED_MAX", "6"))
+COMMITTED_MAX         = int(os.getenv("SCAN_COMMITTED_MAX", "3"))
 
 
 async def _load_hc_params() -> dict:
