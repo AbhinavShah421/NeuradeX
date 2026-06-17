@@ -64,6 +64,9 @@ _HC_PARAMS_KEY        = "ai_engine:hc_params"
 # (≈46%). The adaptive controller tightens further toward the target.
 HC_MIN_FACTORS        = int(os.getenv("SCAN_HC_MIN_FACTORS", "5"))   # of 6 confirmations
 HC_WP_FLOOR           = float(os.getenv("SCAN_HC_WP_FLOOR", "0.72")) # min win-probability
+# Hard cap on how many picks the committed tier holds, no matter how many clear
+# the bar — keeps "high conviction" genuinely selective (paper trades only these).
+COMMITTED_MAX         = int(os.getenv("SCAN_COMMITTED_MAX", "6"))
 
 
 async def _load_hc_params() -> dict:
@@ -862,9 +865,21 @@ async def scan_once(phase: str = "intraday") -> dict:
     # target — everything else is "watch, don't trade".
     hc = await _load_hc_params()
     for c in candidates:
-        c["committed"] = _is_committed(c, hc)
         c["independent_signals"] = _independent_signals(c)
+        c["committed"] = False
+    # Of everything that clears the bar, commit only the TOP few by conviction —
+    # paper trading trades the *cream*, not every grade-A name that passes (that
+    # would dilute the whole point of a high-conviction tier).
+    qualified = sorted(
+        (c for c in candidates if _is_committed(c, hc)),
+        key=lambda c: (c.get("win_probability") or 0.0,
+                       c.get("independent_signals") or 0,
+                       c.get("pattern_p_up") or 0.0),
+        reverse=True)
+    for c in qualified[:COMMITTED_MAX]:
+        c["committed"] = True
     committed_list = [c for c in candidates if c["committed"]]
+    logger.info("committed tier: %d qualified, top %d committed", len(qualified), len(committed_list))
 
     # Full ranked board (top RANKED_MAX) for the Predictions page — each entry
     # numbered with its rank and carrying the full evidence used to score it.
