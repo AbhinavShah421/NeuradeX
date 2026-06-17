@@ -62,8 +62,8 @@ _HC_PARAMS_KEY        = "ai_engine:hc_params"
 # independent confirmations and a high win-probability. This keeps the committed
 # tier to a handful of names a day (≈70%+ hit-rate in backtest) rather than many
 # (≈46%). The adaptive controller tightens further toward the target.
-HC_MIN_FACTORS        = int(os.getenv("SCAN_HC_MIN_FACTORS", "6"))   # of 6 confirmations
-HC_WP_FLOOR           = float(os.getenv("SCAN_HC_WP_FLOOR", "0.85")) # min win-probability
+HC_MIN_FACTORS        = int(os.getenv("SCAN_HC_MIN_FACTORS", "5"))   # of 6 confirmations
+HC_WP_FLOOR           = float(os.getenv("SCAN_HC_WP_FLOOR", "0.72")) # min win-probability
 
 
 async def _load_hc_params() -> dict:
@@ -82,7 +82,13 @@ async def _load_hc_params() -> dict:
 # Pattern-recognition model gate — the scanner pulls the backend model's learned
 # weights once per sweep and scores each pattern locally (no per-stock HTTP). A
 # committed pick must have the *learned pattern model* agree it's an up-pattern.
-PATTERN_MIN_P  = float(os.getenv("SCAN_PATTERN_MIN_P", "0.55"))   # model must say P(up) ≥ this
+# The pattern model is used as a VETO (block clearly-bearish patterns) rather than
+# a hard high-bar gate — the model's P(up) clusters low (base rate of "up" < 50%),
+# so a 0.55 floor vetoed everything and starved paper trading. A pick is blocked
+# only if the model is clearly bearish (P < PATTERN_VETO); P ≥ PATTERN_MIN_P counts
+# as a positive independent confirmation.
+PATTERN_VETO   = float(os.getenv("SCAN_PATTERN_VETO", "0.30"))    # block only clearly-bearish patterns
+PATTERN_MIN_P  = float(os.getenv("SCAN_PATTERN_MIN_P", "0.45"))   # ≥ this = bullish-pattern confirmation
 _FP_SHAPE_LEN  = 10
 _FP_DIM        = 19
 _pattern_wb_cache: dict = {"w": None, "b": 0.0, "ts": 0.0, "trained": False}
@@ -211,9 +217,9 @@ def _is_committed(res: dict, p: dict) -> bool:
     # Independent signal 2 — block on a negative news catalyst.
     if float(res.get("catalyst_boost") or 0.0) < -0.05:
         return False
-    # Independent signal 3 — the learned pattern model must agree (when trained).
+    # Independent signal 3 — the learned pattern model must not be clearly bearish.
     pp = res.get("pattern_p_up")
-    if pp is not None and pp < PATTERN_MIN_P:
+    if pp is not None and pp < PATTERN_VETO:
         return False
     return True
 
@@ -228,7 +234,7 @@ def _independent_signals(res: dict) -> int:
     if float(res.get("catalyst_boost") or 0.0) > 0.10:
         n += 1
     pp = res.get("pattern_p_up")
-    if pp is not None and pp >= 0.60:
+    if pp is not None and pp >= PATTERN_MIN_P:
         n += 1
     return n
 
