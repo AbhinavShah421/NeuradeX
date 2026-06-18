@@ -1212,12 +1212,21 @@ const AiWatchlistTab: React.FC = () => {
     }
   }, [holdCap]);
 
+  const [wlMax, setWlMax] = useState<number>(6);
+  const [wlSaving, setWlSaving] = useState(false);
   const load = useCallback(async () => {
     try { const r = await apiService.aiWatchlist(); setData((r as any).data); } catch {}
     try { const e = await apiService.scanEvaluation(); setEvalData((e as any).data); } catch {}
     try { const d = await apiService.scanDiff(); setDiff((d as any).data); } catch {}
   }, []);
   useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, [load]);
+  useEffect(() => { apiService.getWatchlistConfig().then(r => setWlMax((r as any).data?.max ?? 6)).catch(() => {}); }, []);
+
+  const changeWlMax = async (n: number) => {
+    setWlMax(n); setWlSaving(true);
+    try { await apiService.setWatchlistConfig(n); await apiService.scanWatchlist(); } catch {}
+    setTimeout(() => setWlSaving(false), 2000);
+  };
 
   const intraday: any[] = data?.intraday ?? data?.items ?? [];
   const delivery: any[] = data?.delivery ?? [];
@@ -1233,9 +1242,18 @@ const AiWatchlistTab: React.FC = () => {
 
   return (
     <div>
-      {/* Header — centralized scan status + rescan */}
+      {/* Header — watchlist size + centralized scan status + rescan */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
-        <ScanControl align="right" />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--nd-text-3)' }}>
+          <span className="material-icons" style={{ fontSize: 15 }}>tune</span>
+          Show top
+          <select value={wlMax} onChange={e => changeWlMax(Number(e.target.value))} className="nd-input"
+            style={{ width: 64, padding: '4px 6px' }}>
+            {[3, 5, 6, 8, 10, 15].map(n => <option key={n} value={n}>{n}</option>)}
+          </select>
+          most-convicted{wlSaving ? ' · rescanning…' : ''}
+        </div>
+        <div style={{ marginLeft: 'auto' }}><ScanControl align="right" /></div>
       </div>
 
       <SignalScorePanel ev={evalData} />

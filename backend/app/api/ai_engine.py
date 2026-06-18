@@ -894,6 +894,32 @@ async def get_trade_gate_endpoint():
     }}
 
 
+class WatchlistConfigRequest(BaseModel):
+    max: int = 6
+
+
+@router.get("/watchlist-config")
+async def get_watchlist_config():
+    """Current intraday watchlist size (how many most-convicted picks are shown +
+    graded for the signal score)."""
+    from app.utils.redis_client import cache_get
+    raw = await cache_get("ai_engine:watchlist_max")
+    return {"status": "success", "data": {"max": int(raw) if raw else 6}}
+
+
+@router.post("/watchlist-config")
+async def set_watchlist_config(req: WatchlistConfigRequest):
+    """Set how many most-convicted intraday picks the watchlist surfaces + grades
+    (3–25). Applies on the next scan; trigger a Rescan to apply immediately."""
+    n = max(3, min(25, int(req.max)))
+    try:
+        from app.utils.redis_client import cache_set
+        await cache_set("ai_engine:watchlist_max", str(n), expire=86400 * 365)
+    except Exception as exc:
+        logger.warning("watchlist-config set failed: %s", exc)
+    return {"status": "success", "data": {"max": n}}
+
+
 @router.post("/trade-gate")
 async def set_trade_gate_endpoint(req: TradeGateRequest):
     """Switch how selective session entries are (applies to paper, replay & autopilot)."""
