@@ -13,7 +13,7 @@ from app.config import settings
 from app.database.mongodb import init_mongodb, close_mongodb
 from app.database.postgres import init_postgres, close_postgres
 from app.utils.redis_client import init_redis, close_redis
-from app.api import stocks, predictions, portfolio, risk, orders, agent, backtest, auth, paper_trading, ai_engine, mlflow_proxy, sessions, user_settings, mutual_funds
+from app.api import stocks, predictions, portfolio, risk, orders, agent, backtest, auth, paper_trading, ai_engine, mlflow_proxy, sessions, user_settings, mutual_funds, delivery_paper
 from app.websocket.socket_manager import sio
 from app.ml_core.initializer import initialize_ml_models
 from app.utils.groww_client import init_groww_client
@@ -66,6 +66,15 @@ async def lifespan(app: FastAPI):
                         extra={"log_type": "app_lifecycle", "event": "memory_sweep_scheduled"})
         except Exception as exc:
             logger.warning("Could not schedule memory sweep: %s", exc)
+
+        # Delivery (multi-day) paper-trading autopilot — ticks once a day when enabled
+        try:
+            from app.api.delivery_paper import delivery_autopilot_loop
+            app.state.delivery_paper_task = asyncio.create_task(delivery_autopilot_loop())
+            logger.info("Delivery paper autopilot scheduled",
+                        extra={"log_type": "app_lifecycle", "event": "delivery_paper_scheduled"})
+        except Exception as exc:
+            logger.warning("Could not schedule delivery paper autopilot: %s", exc)
 
         # Background runner that advances live trading sessions server-side
         try:
@@ -172,6 +181,7 @@ app.include_router(mlflow_proxy.router, prefix="/api/mlflow", tags=["mlflow"])
 app.include_router(sessions.router, prefix="/api/sessions", tags=["sessions"])
 app.include_router(user_settings.router, prefix="/api/settings", tags=["settings"])
 app.include_router(mutual_funds.router, prefix="/api/mutual-funds", tags=["mutual-funds"])
+app.include_router(delivery_paper.router, prefix="/api/delivery-paper", tags=["delivery-paper"])
 
 # Socket.IO ASGI app
 app_sio = socketio.ASGIApp(sio, app)
