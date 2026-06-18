@@ -58,3 +58,21 @@ NSE industry → curated stock master → `Other`. Names outside the NSE index l
 are filled via Yahoo `assetProfile` (`POST /api/stocks/directory/backfill-sectors`,
 persisted), taking coverage toward 100%. Used by sector-exposure, fund-baskets and
 the All Stocks directory.
+
+## AI portfolio intelligence
+
+Higher-level planning/analytics on the live holdings. All are AI/quant-driven and
+degrade gracefully (rule-based fallbacks where an LLM is used).
+
+| Method & path | Description |
+|---|---|
+| `GET /api/portfolio/health` | **Health Score** — a 0-100 score + grade from a weighted multi-factor model (diversification, concentration, sector balance, holding quality via live AI grades, performance, drawdown) with issues + top fixes. |
+| `GET /api/portfolio/sip-planner` | **Goal planner** — `goal_amount`, `years`, `risk`, `current_corpus`, `monthly`. Returns required SIP (or projected corpus), a year-by-year projection with optimistic/pessimistic bands, a risk-based equity/debt/gold allocation and per-sleeve fund routing. |
+| `GET /api/portfolio/tax-harvest` | **Tax-loss harvesting** — unrealised gains/losses, harvest candidates, potential offset and estimated LTCG tax saved (12.5% over the ₹1.25L exemption), ELSS/80C tips. *Buy dates aren't in Groww's API, so LTCG/STCG isn't split — guidance only.* |
+| `GET /api/portfolio/benchmark` | Value-weighted portfolio **1M/3M/1Y returns vs NIFTY 50** (Yahoo) with per-period **alpha**. |
+| `GET /api/portfolio/advisor` | **AI Advisor** — LLM-generated plain-English insights synthesising health + sector + benchmark + tax (rule-based fallback). |
+| `GET /api/portfolio/risk-lab` | **AI Risk Lab** (one pass over holdings' history + NIFTY): true (correlation) diversification score + hidden-concentration pairs; scenario **stress-test** (per-holding beta → market/sector/rate shocks + fragile names); **ATR smart exits** (stop/target/trailing + scan-downgrade flags); **dividend income forecast** (trailing divs → income + yield). |
+
+The AI here is multi-factor scoring + projection/allocation models + the live AI
+scan grades — deterministic finance maths and the existing scanner intelligence
+rather than a separately trained model.

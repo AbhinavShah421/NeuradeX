@@ -42,6 +42,26 @@ Dashboard mounts
           body: { symbols: string[] }
 ```
 
+## AI learning cards (above the tabs)
+
+A two-up section plus the All Stocks directory now sits above the watchlist tabs:
+
+- **System Learning Curve** — three aligned series (cumulative win-rate, trailing
+  rolling win-rate, **equity curve**) with a per-source breakdown + **expectancy**,
+  a source filter (Paper/Replay/Live), and **vertical event markers** (date-time
+  tooltips) so curve moves can be read against system changes. Merged in the same
+  card with the **Pattern Recognition Model** sparkline (a continuously-learning
+  model trained on patterns only across the full NSE universe, with high-confidence
+  accuracy + Train-now). Backed by `/api/ai-engine/learning-curve`,
+  `/learning-events`, `/pattern-model/*`.
+- **AI Scan Accuracy** — predicted-vs-actual hit-rate per trade day, separate
+  **Intraday / Delivery / High-conviction** lines vs a target line.
+  Backed by `/api/ai-engine/scan-evaluation`.
+- **AI Watchlist → "What changed since the last scan"** — scan-to-scan diff:
+  rank movers (with reasons), entrants and drop-offs. Backed by `/scan-diff`.
+
+See [Learning loop](../ai-engine/learning-loop.md) for the AI behind these.
+
 ## UI Tabs
 
 ### Tab 1: AI Watchlist

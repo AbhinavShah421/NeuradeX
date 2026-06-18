@@ -32,6 +32,16 @@ order management.
 | **Risk** | HHI concentration, VaR, sector breakdown |
 | **AI Optimize** | Scan-keyed rebalancing plan: per-holding AI signal + EXIT/TRIM/HOLD/ADD + target weight; for at-risk holdings an AI **alternative** and a one-click **Swap** (sell→buy, with the basis shown); live "Today's Orders" panel with cancel |
 | **AI Invest** | Enter an amount → AI divides it across the best A/B picks (conviction-weighted) as protective LIMIT buys; per-stock Buy + **Invest all** |
+| **AI Advisor** | Portfolio-vs-NIFTY alpha (1M/3M/1Y) + an LLM insights feed synthesising health, sector, benchmark and tax |
+| **AI Risk Lab** | True (correlation) diversification score + hidden-concentration pairs; scenario stress-test (market/sector/rate shocks + fragile names); ATR smart-exit levels (stop/target/trail + downgrade flags); dividend income forecast |
+| **Health Score** | 0-100 health gauge + factor bars (diversification, concentration, sector, quality, performance, drawdown) + issues & fixes |
+| **Sector Exposure** | Donut of current sector weights vs an AI-favoured target, over/under-exposure bars + rebalance moves |
+| **AI Funds** | AI-scanned mutual-fund-style stock baskets (Top Picks, Sector Leaders, Momentum, Balanced, High-Conviction) with one-click invest |
+| **Goal Planner** | Goal → required SIP / projected corpus + growth chart + risk-based allocation; **"Find my risk"** questionnaire |
+| **Tax Harvest** | Unrealised gains/losses, loss-harvest candidates + estimated tax saved, ELSS/80C tips |
+
+See [Portfolio API](../api/portfolio.md#ai-portfolio-intelligence) for the
+endpoints behind the AI tabs.
 
 Every page (Holdings header, Predictions, Dashboard) shares one **ScanControl**
 (scan status + Rescan) backed by [`scanStore`](https://github.com/AbhinavShah421/NeuradeX/blob/main/frontend/src/stores/scanStore.ts);

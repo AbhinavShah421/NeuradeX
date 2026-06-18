@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import apiService from '../services/api';
 
-type Tab = 'holdings' | 'optimize' | 'screener';
+type Tab = 'holdings' | 'optimize' | 'screener' | 'all';
 
 const pct = (v: any) => (v === null || v === undefined) ? '—' : `${v > 0 ? '+' : ''}${Number(v).toFixed(1)}%`;
 const pctColor = (v: any) => v === null || v === undefined ? 'var(--nd-text-3)' : v >= 0 ? 'var(--nd-green)' : 'var(--nd-red)';
@@ -39,6 +39,23 @@ const MutualFunds: React.FC = () => {
     try { setOpt((await apiService.mfOptimize(r) as any).data); } catch {} finally { setOptLoading(false); }
   }, []);
   useEffect(() => { if (tab === 'optimize' && !opt) runOptimize(optRisk); /* eslint-disable-next-line */ }, [tab]);
+
+  // all funds (browse)
+  const [allData, setAllData] = useState<any>(null);
+  const [allQ, setAllQ] = useState('');
+  const [allLoading, setAllLoading] = useState(false);
+  const [allSort, setAllSort] = useState<{ key: string; dir: 'asc' | 'desc' }>({ key: 'name', dir: 'asc' });
+  const loadAll = useCallback(async (q: string, page: number) => {
+    setAllLoading(true);
+    try { setAllData((await apiService.mfAll(q, page, 25) as any).data); } catch {} finally { setAllLoading(false); }
+  }, []);
+  useEffect(() => { if (tab === 'all' && !allData) loadAll('', 1); /* eslint-disable-next-line */ }, [tab]);
+  useEffect(() => {
+    if (tab !== 'all') return;
+    const t = setTimeout(() => { loadAll(allQ, 1); }, 400);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line
+  }, [allQ]);
 
   // screener
   const [cats, setCats] = useState<string[]>([]);
@@ -95,7 +112,7 @@ const MutualFunds: React.FC = () => {
 
       <div className="nd-card" style={{ padding: 0 }}>
         <div style={{ display: 'flex', borderBottom: '1px solid var(--nd-border)', padding: '0 16px' }}>
-          {([['holdings', 'My Funds'], ['optimize', 'Optimize'], ['screener', 'Screener']] as [Tab, string][]).map(([id, label]) => (
+          {([['holdings', 'My Funds'], ['optimize', 'Optimize'], ['screener', 'Screener'], ['all', 'All Funds']] as [Tab, string][]).map(([id, label]) => (
             <button key={id} onClick={() => setTab(id)} style={{
               padding: '12px 16px', border: 'none', background: 'none', cursor: 'pointer', fontSize: 13,
               fontWeight: tab === id ? 700 : 500, color: tab === id ? 'var(--nd-green)' : 'var(--nd-text-2)',
@@ -313,6 +330,79 @@ const MutualFunds: React.FC = () => {
             )}
           </div>
         )}
+
+        {tab === 'all' && (() => {
+          const cols: [string, string][] = [
+            ['name', 'Fund'], ['nav', 'NAV'], ['1m', '1M'], ['3m', '3M'], ['6m', '6M'],
+            ['1y', '1Y'], ['3y', '3Y'], ['vol', 'Vol'], ['riskAdjusted', 'Risk-adj'],
+          ];
+          const funds: any[] = (allData?.funds ?? []).slice();
+          const { key, dir } = allSort;
+          funds.sort((a, b) => {
+            const va = a[key], vb = b[key];
+            if (va == null && vb == null) return 0;
+            if (va == null) return 1; if (vb == null) return -1;     // nulls last
+            const cmp = typeof va === 'string' ? va.localeCompare(vb) : va - vb;
+            return dir === 'asc' ? cmp : -cmp;
+          });
+          const toggle = (k: string) => setAllSort(s => s.key === k ? { key: k, dir: s.dir === 'asc' ? 'desc' : 'asc' } : { key: k, dir: k === 'name' ? 'asc' : 'desc' });
+          const pages = allData?.pages ?? 1; const cur = allData?.page ?? 1;
+          const go = (p: number) => { loadAll(allQ, p); };
+          const pageNums = Array.from({ length: pages }, (_, i) => i + 1).filter(p => p === 1 || p === pages || Math.abs(p - cur) <= 2);
+          return (
+            <div style={{ padding: '16px 20px' }}>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
+                <input className="nd-input" style={{ flex: '1 1 280px' }} placeholder="Search all mutual funds…" value={allQ} onChange={e => setAllQ(e.target.value)} />
+                <span style={{ fontSize: 11.5, color: 'var(--nd-text-3)' }}>{allData ? `${allData.total.toLocaleString('en-IN')} funds · click any column to sort` : ''}</span>
+              </div>
+              {allLoading ? (
+                <div style={{ textAlign: 'center', padding: 40, color: 'var(--nd-text-3)', fontSize: 13 }}>Loading funds…</div>
+              ) : !funds.length ? (
+                <div style={{ textAlign: 'center', padding: 40, color: 'var(--nd-text-3)', fontSize: 13 }}>No funds match your search.</div>
+              ) : (
+                <>
+                  <div style={{ overflowX: 'auto', width: '100%' }}>
+                    <table style={{ minWidth: 760, width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
+                      <thead><tr style={{ color: 'var(--nd-text-3)', fontSize: 11 }}>
+                        {cols.map(([k, label]) => (
+                          <th key={k} onClick={() => toggle(k)} style={{ textAlign: k === 'name' ? 'left' : 'right', padding: '6px 10px', whiteSpace: 'nowrap', cursor: 'pointer', fontWeight: 600, color: allSort.key === k ? 'var(--nd-green)' : undefined }}>
+                            {label}{allSort.key === k ? (allSort.dir === 'asc' ? ' ▲' : ' ▼') : ' ⇅'}
+                          </th>
+                        ))}
+                      </tr></thead>
+                      <tbody>
+                        {funds.map((f: any) => (
+                          <tr key={f.schemeCode} style={{ borderTop: '1px solid var(--nd-border)' }}>
+                            <td style={{ padding: '8px 10px', maxWidth: 280 }}>
+                              <div style={{ fontWeight: 600, color: 'var(--nd-text-1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={f.name}>{f.name}</div>
+                              <div style={{ fontSize: 10.5, color: 'var(--nd-text-3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{f.category}</div>
+                            </td>
+                            <td style={{ textAlign: 'right', padding: '8px 10px', whiteSpace: 'nowrap' }}>{f.nav != null ? `₹${f.nav}` : '—'}</td>
+                            <ReturnCells f={f} />
+                            <td style={{ textAlign: 'right', padding: '8px 10px', whiteSpace: 'nowrap', color: 'var(--nd-text-2)' }}>{f.vol != null ? `${f.vol.toFixed(0)}%` : '—'}</td>
+                            <td style={{ textAlign: 'right', padding: '8px 10px', whiteSpace: 'nowrap', fontWeight: 700, color: pctColor(f.riskAdjusted) }}>{f.riskAdjusted != null ? f.riskAdjusted.toFixed(2) : '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {/* pagination */}
+                  <div style={{ display: 'flex', gap: 6, alignItems: 'center', justifyContent: 'center', marginTop: 14, flexWrap: 'wrap' }}>
+                    <button disabled={cur <= 1} onClick={() => go(cur - 1)} style={{ padding: '5px 12px', borderRadius: 7, border: '1px solid var(--nd-border)', background: 'transparent', color: cur <= 1 ? 'var(--nd-text-3)' : 'var(--nd-text-1)', cursor: cur <= 1 ? 'default' : 'pointer', fontSize: 12 }}>← Prev</button>
+                    {pageNums.map((p, i) => (
+                      <React.Fragment key={p}>
+                        {i > 0 && p - pageNums[i - 1] > 1 && <span style={{ color: 'var(--nd-text-3)' }}>…</span>}
+                        <button onClick={() => go(p)} style={{ minWidth: 30, padding: '5px 9px', borderRadius: 7, border: `1px solid ${p === cur ? 'var(--nd-green)' : 'var(--nd-border)'}`, background: p === cur ? 'var(--nd-green)' : 'transparent', color: p === cur ? '#fff' : 'var(--nd-text-2)', cursor: 'pointer', fontSize: 12 }}>{p}</button>
+                      </React.Fragment>
+                    ))}
+                    <button disabled={cur >= pages} onClick={() => go(cur + 1)} style={{ padding: '5px 12px', borderRadius: 7, border: '1px solid var(--nd-border)', background: 'transparent', color: cur >= pages ? 'var(--nd-text-3)' : 'var(--nd-text-1)', cursor: cur >= pages ? 'default' : 'pointer', fontSize: 12 }}>Next →</button>
+                  </div>
+                  <div style={{ fontSize: 10.5, color: 'var(--nd-text-3)', textAlign: 'center', marginTop: 6 }}>Page {cur} of {pages} · sorting applies to this page · returns ≥1Y are annualised (CAGR)</div>
+                </>
+              )}
+            </div>
+          );
+        })()}
       </div>
     </div>
   );
