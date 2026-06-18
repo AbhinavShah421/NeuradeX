@@ -911,14 +911,8 @@ async def create_alert(alert: Alert):
 # compares the book's sector weights against an AI-favoured target.
 
 def _sector_of(symbol: str) -> str:
-    try:
-        from app.data.stocks_master import STOCKS_BY_SYMBOL
-        s = STOCKS_BY_SYMBOL.get((symbol or "").upper())
-        if s and s.get("sector"):
-            return s["sector"]
-    except Exception:
-        pass
-    return "Other"
+    from app.utils.sector_map import sector_of
+    return sector_of(symbol)
 
 
 async def _ranked_items() -> list[dict]:
@@ -972,6 +966,8 @@ async def _sector_ai_scores() -> dict:
 async def sector_exposure():
     """AI sector-exposure scanner + optimizer: the book's current sector weights
     vs an AI-favoured target, with over/under-exposure and rebalance moves."""
+    from app.utils.sector_map import ensure_loaded
+    await ensure_loaded()
     pf = (await get_portfolio()).get("data", {})
     stocks = pf.get("stocks", [])
     tv = float(pf.get("total_value") or 0.0) or 1.0
@@ -1155,6 +1151,8 @@ async def _build_baskets() -> list[dict]:
 async def fund_baskets():
     """AI-scanned mutual-fund-style baskets — themed, weighted stock baskets built
     from the live AI ranked board."""
+    from app.utils.sector_map import ensure_loaded
+    await ensure_loaded()
     baskets = await _build_baskets()
     return {"status": "success", "data": {"baskets": baskets, "count": len(baskets),
             "updated_at": datetime.now().isoformat(),
@@ -1167,6 +1165,8 @@ async def fund_basket_invest(basket: str, amount: float):
     LIMIT buy orders sized to real prices."""
     if amount <= 0:
         raise HTTPException(status_code=400, detail="amount must be positive")
+    from app.utils.sector_map import ensure_loaded
+    await ensure_loaded()
     baskets = await _build_baskets()
     b = next((x for x in baskets if x["id"] == basket), None)
     if not b:

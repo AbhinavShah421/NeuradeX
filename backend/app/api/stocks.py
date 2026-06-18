@@ -261,6 +261,8 @@ async def _augmented_directory() -> tuple[list[dict], list[str]]:
     merged = list(STOCKS_DEDUPED)
     try:
         from app.utils.redis_client import cache_get
+        from app.utils.sector_map import ensure_loaded, sector_of
+        await ensure_loaded()                       # real NSE industry per symbol
         ist = datetime.now(_tz(timedelta(hours=5, minutes=30))).strftime("%Y-%m-%d")
         raw = await cache_get(f"ai_engine:scan_universe:{ist}")
         if raw:
@@ -270,7 +272,7 @@ async def _augmented_directory() -> tuple[list[dict], list[str]]:
                 su = str(sym).upper()
                 if su and su not in STOCKS_BY_SYMBOL:
                     merged.append({"symbol": su, "name": name or su,
-                                   "sector": "Other", "exchange": "NSE"})
+                                   "sector": sector_of(su), "exchange": "NSE"})
     except Exception as exc:
         logger.debug("directory augment failed: %s", exc)
     sectors = sorted({s["sector"] for s in merged})
