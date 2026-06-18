@@ -32,6 +32,12 @@ def get_pattern_model() -> PatternRecognitionModel:
     return _pattern_model
 
 
+def get_pattern_engine():
+    """Unified pattern AI engine (model P(up) + memory win-rate → A/B/C/D grade)."""
+    from .pattern_engine import get_pattern_engine as _g
+    return _g()
+
+
 def get_engine() -> EnsembleEngine:
     global _engine, _rl_agent
     if _engine is None:

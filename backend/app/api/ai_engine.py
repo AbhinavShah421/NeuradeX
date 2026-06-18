@@ -1348,6 +1348,16 @@ async def pattern_model_predict(req: AnalyzeRequest):
     return {"status": "success", "data": pred}
 
 
+@router.post("/pattern-model/grade")
+async def pattern_model_grade(req: AnalyzeRequest):
+    """Graded pattern signal (A/B/C/D) from the unified pattern engine — model P(up)
+    blended with the memory bank's win-rate. The same grading used to gate trades."""
+    await _db_once()
+    from app.agents import get_pattern_engine
+    sig = await get_pattern_engine().signal(req.candles, (req.symbol or "").upper() or None)
+    return {"status": "success", "data": sig}
+
+
 @router.post("/memory/seed")
 async def memory_seed(req: SeedMemoryRequest):
     """Bulk-seed the memory bank by replaying historical daily candles.

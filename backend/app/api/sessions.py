@@ -9,6 +9,7 @@ and be reopenable as a live chart.
 """
 from __future__ import annotations
 import asyncio
+import os
 import uuid
 from datetime import datetime, timedelta
 
@@ -54,6 +55,15 @@ TRADE_GATES = {
                "desc": "Enters on any intraday setup the ensemble isn't bearish on, at any confidence. Most trades."},
 }
 _gate_cache = {"mode": "", "ts": 0.0}
+
+
+def _min_pattern_grade(mode: str) -> str:
+    """Required pattern grade to enter, by trading mode. Backtest/replay trade only
+    A-grade patterns (stop the losing churn); paper/live require at least B."""
+    if mode in ("replay", "backtest"):
+        return os.getenv("PATTERN_MIN_GRADE_BACKTEST", "A").upper()
+    return os.getenv("PATTERN_MIN_GRADE_LIVE", "B").upper()
+
 
 # ── Paper trading time config ─────────────────────────────────────────────────
 _PAPER_CONFIG_KEY     = "paper_trading:config"
@@ -315,6 +325,21 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         enter = (tsig == 1
                  and (ens_action == "BUY" if gate["require_buy"] else ens_action != "SELL")
                  and gate["min_conf"] <= conf <= max_conf)
+        # Pattern-quality gate (shared pattern AI engine): only trade good patterns.
+        # Backtest/replay require an A-grade pattern; paper/live require ≥ B.
+        if enter:
+            try:
+                from app.agents import get_pattern_engine
+                from app.agents.pattern_engine import grade_rank
+                psig = await get_pattern_engine().signal(window, symbol)
+                s["last_pattern"] = psig
+                min_grade = _min_pattern_grade(s.get("mode", "paper"))
+                if psig.get("ok") and grade_rank(psig["grade"]) > grade_rank(min_grade):
+                    enter = False
+                    blocked.append(f"pattern grade {psig['grade']} below required {min_grade} "
+                                   f"(model P(up) {psig.get('p_up')}, memory WR {psig.get('memory_winrate')})")
+            except Exception as exc:
+                logger.debug("pattern gate skipped: %s", exc)
         action = "BUY" if enter else "HOLD"
         if action == "BUY":
             reason = f"Entry: intraday buy-trigger + ensemble {ens_action} ({conf:.0%}). {reason}".strip()
