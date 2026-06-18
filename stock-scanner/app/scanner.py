@@ -273,6 +273,20 @@ MIN_AVG_VOLUME = float(os.getenv("SCAN_MIN_VOLUME", "300000"))   # liquidity
 MIN_ATR_PCT    = float(os.getenv("SCAN_MIN_ATR_PCT", "1.2"))     # daily true range %
 MIN_PRICE      = float(os.getenv("SCAN_MIN_PRICE", "30"))        # avoid illiquid penny stocks
 TOP_N          = int(os.getenv("SCAN_TOP_N", "15"))
+# The intraday "Best Intraday" watchlist (and its post-close signal score) is the
+# top few MOST-CONVICTED picks only — grade-A/B BUYs, capped small. Grading fewer,
+# higher-conviction names lifts the signal score (precision over coverage).
+WATCHLIST_MAX  = int(os.getenv("SCAN_WATCHLIST_MAX", "6"))
+
+
+def _top_watchlist(cands: list[dict], grade_rank: dict) -> list[dict]:
+    """Most-convicted intraday picks: grade-A/B BUYs, ranked, capped at WATCHLIST_MAX
+    (falls back to the best available if too few high-grade BUYs exist)."""
+    ranked = sorted(cands, key=lambda r: (r.get("action") != "BUY",
+                    grade_rank.get(r.get("grade", "D"), 3),
+                    -r.get("rank_score", r.get("signal_score", 0.0))))
+    hi = [c for c in ranked if c.get("action") == "BUY" and c.get("grade") in ("A", "B")]
+    return (hi or ranked)[:WATCHLIST_MAX]
 
 # Delivery-fitness gates — a stock must clear these to be a multi-week swing hold.
 # Unlike intraday (which fishes for high volatility), delivery wants an *orderly*
@@ -778,9 +792,7 @@ async def scan_once(phase: str = "intraday") -> dict:
 
     def _progress_payload(scanning: bool) -> dict:
         """Rank what we have so far so the UI updates live during a long sweep."""
-        wl = sorted(candidates, key=lambda r: (r["action"] != "BUY",
-                    _grade_rank.get(r.get("grade", "D"), 3),
-                    -r.get("rank_score", r.get("signal_score", 0.0))))[:TOP_N]
+        wl = _top_watchlist(candidates, _grade_rank)
         dl = sorted(delivery_candidates, key=lambda r: (_grade_rank.get(r.get("grade", "D"), 3),
                     -r.get("delivery_score", 0.0)))[:DELIVERY_TOP_N]
         for d in dl:
@@ -864,7 +876,7 @@ async def scan_once(phase: str = "intraday") -> dict:
     # Rank: BUY calls first, then by grade (A→D), then by composite rank score.
     _grade_rank = {"A": 0, "B": 1, "C": 2, "D": 3}
     candidates.sort(key=lambda r: (r["action"] != "BUY", _grade_rank.get(r.get("grade", "D"), 3), -r["rank_score"]))
-    watchlist = candidates[:TOP_N]
+    watchlist = _top_watchlist(candidates, _grade_rank)   # most-convicted few, graded post-close
 
     # High-conviction tier: tag every candidate the system would *commit* to, given
     # the current adaptive bar. These are the only picks measured against the 90%
