@@ -5,10 +5,13 @@ import { Portfolio, Performance, PortfolioStock } from '../types';
 
 type SortKey = keyof Pick<PortfolioStock, 'symbol' | 'quantity' | 'purchasePrice' | 'currentPrice' | 'value' | 'gain' | 'gainPercent'>;
 type SortDir = 'asc' | 'desc';
-type Tab = 'holdings' | 'performance' | 'risk' | 'optimize' | 'invest' | 'sectors' | 'funds' | 'health' | 'planner' | 'tax';
+type Tab = 'holdings' | 'performance' | 'risk' | 'optimize' | 'invest' | 'sectors' | 'funds' | 'health' | 'planner' | 'tax' | 'advisor';
 
 const inr = (v: number) =>
   v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+const pct = (v: any) => (v === null || v === undefined) ? '—' : `${v > 0 ? '+' : ''}${Number(v).toFixed(1)}%`;
+const pctColor = (v: any) => (v === null || v === undefined) ? 'var(--nd-text-3)' : v >= 0 ? 'var(--nd-green)' : 'var(--nd-red)';
 
 const COLUMNS: { key: SortKey; label: string; align: 'left' | 'right' }[] = [
   { key: 'symbol',        label: 'Company',       align: 'left'  },
@@ -54,6 +57,16 @@ function RiskMeter({ score, label }: { score: 'LOW' | 'MEDIUM' | 'HIGH'; label: 
     </div>
   );
 }
+
+// Risk-profiling questionnaire — points → conservative/moderate/aggressive.
+const RISK_QUIZ: { q: string; opts: [string, number][] }[] = [
+  { q: 'Your age band', opts: [['Under 35', 3], ['35–50', 2], ['Over 50', 1]] },
+  { q: 'When do you need this money?', opts: [['10+ years', 3], ['3–10 years', 2], ['Under 3 years', 1]] },
+  { q: 'If your portfolio dropped 20% in a month, you would', opts: [['Buy more', 3], ['Hold', 2], ['Sell some', 1]] },
+  { q: 'Investing experience', opts: [['Experienced', 3], ['Some', 2], ['New', 1]] },
+  { q: 'Primary goal', opts: [['Grow wealth aggressively', 3], ['Steady growth', 2], ['Protect capital', 1]] },
+];
+const riskFromScore = (pts: number) => pts >= 13 ? 'aggressive' : pts >= 9 ? 'moderate' : 'conservative';
 
 const PortfolioPage: React.FC = () => {
   const [portfolio,   setPortfolio]   = useState<Portfolio | null>(null);
@@ -216,12 +229,20 @@ const PortfolioPage: React.FC = () => {
   const [plan, setPlan] = useState<any>(null);
   const [planForm, setPlanForm] = useState({ goalAmount: '5000000', years: '15', risk: 'moderate', currentCorpus: '0', monthly: '' });
   const [planning, setPlanning] = useState(false);
+  const [advisor, setAdvisor] = useState<any>(null);
+  const [bench, setBench] = useState<any>(null);
+  const [quizOpen, setQuizOpen] = useState(false);
+  const [quizAns, setQuizAns] = useState<number[]>(Array(RISK_QUIZ.length).fill(2));
 
   useEffect(() => {
     if (activeTab === 'sectors') apiService.sectorExposure().then(r => setSectorData((r as any).data)).catch(() => {});
     if (activeTab === 'funds') apiService.fundBaskets().then(r => setBaskets((r as any).data?.baskets ?? [])).catch(() => {});
     if (activeTab === 'health') apiService.portfolioHealth().then(r => setHealth((r as any).data)).catch(() => {});
     if (activeTab === 'tax') apiService.taxHarvest().then(r => setTax((r as any).data)).catch(() => {});
+    if (activeTab === 'advisor') {
+      apiService.portfolioBenchmark().then(r => setBench((r as any).data)).catch(() => {});
+      apiService.portfolioAdvisor().then(r => setAdvisor((r as any).data)).catch(() => {});
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
 
@@ -387,6 +408,7 @@ const PortfolioPage: React.FC = () => {
     { id: 'risk',        label: 'Risk',        icon: 'security' },
     { id: 'optimize',    label: 'AI Optimize', icon: 'auto_awesome' },
     { id: 'invest',      label: 'AI Invest',   icon: 'savings' },
+    { id: 'advisor',     label: 'AI Advisor',  icon: 'support_agent' },
     { id: 'health',      label: 'Health Score', icon: 'health_and_safety' },
     { id: 'sectors',     label: 'Sector Exposure', icon: 'donut_large' },
     { id: 'funds',       label: 'AI Funds',    icon: 'inventory_2' },
@@ -1142,6 +1164,43 @@ const PortfolioPage: React.FC = () => {
             </div>
           )}
 
+          {/* ── AI Advisor ── */}
+          {activeTab === 'advisor' && (
+            <div style={{ padding: '18px 20px' }}>
+              {/* Benchmark vs NIFTY */}
+              <div className="nd-card" style={{ padding: '14px 18px', marginBottom: 14 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>Portfolio vs NIFTY 50</div>
+                {!bench ? <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>Comparing to benchmark…</div>
+                  : bench.note ? <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>{bench.note}</div>
+                  : (
+                    <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap' }}>
+                      {(bench.periods ?? []).map((p: any) => (
+                        <div key={p.key} style={{ minWidth: 120 }}>
+                          <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>{p.label}</div>
+                          <div style={{ fontSize: 14 }}>You <strong style={{ color: pctColor(p.portfolio) }}>{pct(p.portfolio)}</strong></div>
+                          <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>NIFTY {pct(p.benchmark)}</div>
+                          <div style={{ fontSize: 12, fontWeight: 700, color: pctColor(p.alpha) }}>{p.alpha >= 0 ? 'α +' : 'α '}{p.alpha != null ? `${p.alpha}%` : '—'}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+              </div>
+              {/* AI insights feed */}
+              <div className="nd-card" style={{ padding: '14px 18px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700 }}>AI advisor insights</div>
+                  {advisor?.source && <span style={{ fontSize: 10, color: 'var(--nd-text-3)' }}>{advisor.source === 'llm' ? 'AI-generated' : 'rule-based'}{advisor.score != null ? ` · health ${advisor.score}/100` : ''}</span>}
+                </div>
+                {!advisor ? <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>Analysing your portfolio…</div>
+                  : (advisor.insights ?? []).map((ins: string, i: number) => (
+                    <div key={i} style={{ display: 'flex', gap: 8, padding: '7px 0', borderBottom: '1px solid var(--nd-border)', fontSize: 12.5 }}>
+                      <span style={{ color: 'var(--nd-green)' }}>▸</span><span style={{ color: 'var(--nd-text-2)' }}>{ins}</span>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          )}
+
           {/* ── Portfolio Health Score ── */}
           {activeTab === 'health' && (
             <div style={{ padding: '18px 20px' }}>
@@ -1200,6 +1259,7 @@ const PortfolioPage: React.FC = () => {
                   <select className="nd-input" value={planForm.risk} onChange={e => setPlanForm({ ...planForm, risk: e.target.value })}>
                     <option value="conservative">Conservative</option><option value="moderate">Moderate</option><option value="aggressive">Aggressive</option>
                   </select></div>
+                <button onClick={() => setQuizOpen(true)} style={{ padding: '9px 14px', borderRadius: 8, border: '1px solid var(--nd-blue)', background: 'transparent', color: 'var(--nd-blue)', fontWeight: 600, fontSize: 12, cursor: 'pointer' }}>📋 Find my risk</button>
                 <button onClick={runPlan} disabled={planning} style={{ padding: '9px 18px', borderRadius: 8, border: 'none', background: 'var(--nd-green)', color: '#fff', fontWeight: 700, fontSize: 12.5, cursor: 'pointer' }}>{planning ? 'Planning…' : 'Plan'}</button>
               </div>
               {plan && (
@@ -1293,6 +1353,39 @@ const PortfolioPage: React.FC = () => {
             </div>
           )}
         </>
+      )}
+
+      {/* ── Risk-profile questionnaire ── */}
+      {quizOpen && (
+        <div onClick={() => setQuizOpen(false)} style={{ position: 'fixed', inset: 0, background: '#00000080', zIndex: 1200, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
+          <div onClick={e => e.stopPropagation()} style={{ background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 14, width: '100%', maxWidth: 460, maxHeight: '88vh', overflow: 'auto', padding: 22 }}>
+            <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>Find your risk profile</div>
+            <div style={{ fontSize: 12, color: 'var(--nd-text-3)', marginBottom: 14 }}>5 quick questions → recommended risk level for your plan.</div>
+            {RISK_QUIZ.map((item, qi) => (
+              <div key={qi} style={{ marginBottom: 12 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 5 }}>{item.q}</div>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  {item.opts.map(([label, pts]) => (
+                    <button key={label} onClick={() => setQuizAns(a => a.map((v, i) => i === qi ? pts : v))} style={{
+                      padding: '5px 10px', fontSize: 11.5, borderRadius: 7, cursor: 'pointer',
+                      border: `1px solid ${quizAns[qi] === pts ? 'var(--nd-green)' : 'var(--nd-border)'}`,
+                      background: quizAns[qi] === pts ? 'rgba(34,197,94,0.12)' : 'transparent',
+                      color: quizAns[qi] === pts ? 'var(--nd-green)' : 'var(--nd-text-2)',
+                    }}>{label}</button>
+                  ))}
+                </div>
+              </div>
+            ))}
+            {(() => { const total = quizAns.reduce((s, v) => s + v, 0); const risk = riskFromScore(total);
+              return (
+                <div style={{ marginTop: 8, padding: '10px 12px', background: 'var(--nd-surface)', borderRadius: 8, fontSize: 12.5 }}>
+                  Recommended: <strong style={{ color: 'var(--nd-green)', textTransform: 'capitalize' }}>{risk}</strong>
+                  <span style={{ color: 'var(--nd-text-3)' }}> (score {total}/15)</span>
+                  <button onClick={() => { setPlanForm({ ...planForm, risk }); setQuizOpen(false); }} style={{ float: 'right', padding: '6px 14px', borderRadius: 7, border: 'none', background: 'var(--nd-green)', color: '#fff', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>Use this</button>
+                </div>
+              ); })()}
+          </div>
+        </div>
       )}
 
       {/* ── Order result toast ── */}

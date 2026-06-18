@@ -1415,3 +1415,125 @@ async def tax_harvest():
         "caveat": "Buy dates aren't available from Groww's API, so LTCG vs STCG can't be split exactly — treat figures as guidance, not filing advice.",
         "updated_at": datetime.now().isoformat(),
     }}
+
+
+# ── Benchmark / alpha (portfolio vs NIFTY 50) ─────────────────────────────────
+
+_YH_UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+          "Accept": "application/json"}
+
+
+async def _yahoo_returns(client: httpx.AsyncClient, ysym: str) -> dict | None:
+    """1M/3M/1Y returns from a Yahoo 1-year daily chart."""
+    try:
+        r = await client.get(_YH_BASE + ysym, params={"range": "1y", "interval": "1d"}, headers=_YH_UA)
+        res = (r.json().get("chart", {}).get("result") or [None])[0]
+        closes = [c for c in (res["indicators"]["quote"][0]["close"] or []) if c]
+    except Exception:
+        return None
+    if len(closes) < 30:
+        return None
+    last = closes[-1]
+
+    def ret(n: int):
+        c0 = closes[-n - 1] if len(closes) > n else closes[0]
+        return round((last / c0 - 1) * 100, 2) if c0 else None
+    return {"1m": ret(21), "3m": ret(63), "1y": ret(252)}
+
+
+@router.get("/benchmark")
+async def benchmark():
+    """Value-weighted portfolio returns (1M/3M/1Y) vs NIFTY 50, with alpha."""
+    from app.data.stocks_master import STOCKS_BY_SYMBOL
+    pf = (await get_portfolio()).get("data", {})
+    stocks = pf.get("stocks", [])
+    if not stocks:
+        return {"status": "success", "data": {"note": "No holdings to benchmark."}}
+
+    agg = {"1m": 0.0, "3m": 0.0, "1y": 0.0}
+    wcov = {"1m": 0.0, "3m": 0.0, "1y": 0.0}
+    async with httpx.AsyncClient(timeout=12.0) as client:
+        for s in stocks:
+            ex = _exchange_for(s["symbol"], STOCKS_BY_SYMBOL)
+            suffix = ".BO" if ex == "BSE" else ".NS"
+            rr = await _yahoo_returns(client, f"{s['symbol']}{suffix}")
+            if not rr:
+                continue
+            for k in agg:
+                if rr.get(k) is not None:
+                    agg[k] += rr[k] * s["value"]; wcov[k] += s["value"]
+        nifty = await _yahoo_returns(client, "^NSEI")
+
+    port = {k: (round(agg[k] / wcov[k], 2) if wcov[k] else None) for k in agg}
+    nifty = nifty or {"1m": None, "3m": None, "1y": None}
+    alpha = {k: (round(port[k] - nifty[k], 2) if (port[k] is not None and nifty.get(k) is not None) else None) for k in agg}
+    return {"status": "success", "data": {
+        "portfolio": port, "benchmark": nifty, "benchmark_name": "NIFTY 50", "alpha": alpha,
+        "periods": [{"key": k, "label": k.upper(), "portfolio": port[k], "benchmark": nifty.get(k), "alpha": alpha[k]}
+                    for k in ("1m", "3m", "1y")],
+        "updated_at": datetime.now().isoformat(),
+    }}
+
+
+# ── AI Advisor — plain-English insights synthesising everything ───────────────
+
+@router.get("/advisor")
+async def advisor():
+    """An AI advisor feed: synthesises health, sector exposure, benchmark and tax
+    into a few plain-English insights + actions (LLM, with a rule-based fallback)."""
+    try:
+        health = (await portfolio_health()).get("data", {})
+        sectors = (await sector_exposure()).get("data", {})
+        tax = (await tax_harvest()).get("data", {})
+        bench = (await benchmark()).get("data", {})
+    except Exception as exc:
+        logger.warning("advisor gather failed: %s", exc)
+        return {"status": "success", "data": {"insights": [], "note": "Could not analyse the portfolio."}}
+
+    m = health.get("metrics", {})
+    facts = (
+        f"Health score {health.get('score')}/100 (grade {health.get('grade')}). "
+        f"{m.get('holdings')} holdings, ~{m.get('effective_holdings')} effective. "
+        f"Top position {m.get('top_weight_pct')}%. Top sector {m.get('top_sector')} {m.get('top_sector_pct')}%. "
+        f"Avg AI quality {m.get('avg_quality')}/100. Total return {m.get('gain_pct')}%, {m.get('losers')} underwater. "
+        f"1Y: portfolio {((bench.get('portfolio') or {}).get('1y'))}% vs NIFTY {((bench.get('benchmark') or {}).get('1y'))}% "
+        f"(alpha {((bench.get('alpha') or {}).get('1y'))}). "
+        f"Harvestable losses ₹{tax.get('harvestable_losses')}, est tax saved ₹{tax.get('est_tax_saved')}. "
+        f"AI-favoured sectors: {', '.join(a['sector'] for a in (sectors.get('ai_favoured') or [])[:3])}."
+    )
+
+    insights, source = [], "rules"
+    try:
+        from app.utils.llm_client import llm_chat
+        out = await llm_chat(
+            f"You are a concise Indian portfolio advisor. From these facts, give 4-5 short, "
+            f"specific, actionable bullet insights (no preamble, one line each, start each with '- '):\n{facts}",
+            temperature=0.3, max_tokens=400)
+        if out:
+            insights = [ln.strip("-• ").strip() for ln in out.splitlines() if ln.strip().startswith(("-", "•"))][:5]
+            if insights:
+                source = "llm"
+    except Exception as exc:
+        logger.debug("advisor llm skipped: %s", exc)
+
+    if not insights:                                   # rule-based fallback
+        bp = (bench.get("portfolio") or {}).get("1y"); bn = (bench.get("benchmark") or {}).get("1y")
+        if health.get("score") is not None:
+            insights.append(f"Portfolio health is {health.get('score')}/100 (grade {health.get('grade')}) — "
+                            + (health.get("issues") or ["balanced."])[0])
+        if m.get("top_sector_pct", 0) > 40:
+            insights.append(f"{m.get('top_sector')} is {m.get('top_sector_pct')}% of the book — trim it and diversify (Sector Exposure).")
+        if bp is not None and bn is not None:
+            insights.append((f"You're beating NIFTY by {round(bp - bn, 1)}% over 1Y — keep the winners." if bp >= bn
+                             else f"You're trailing NIFTY by {round(bn - bp, 1)}% over 1Y — review the laggards (AI Optimize)."))
+        if (tax.get("harvestable_losses") or 0) > 1000:
+            insights.append(f"₹{tax.get('harvestable_losses'):,.0f} of losses are harvestable to cut tax (Tax Harvest).")
+        if m.get("avg_quality", 100) < 55:
+            insights.append("Average holding quality is low on the AI scan — swap weak names for A/B picks.")
+        insights = insights[:5] or ["No pressing issues — your portfolio looks balanced."]
+
+    return {"status": "success", "data": {
+        "insights": insights, "source": source, "facts": facts,
+        "score": health.get("score"), "grade": health.get("grade"),
+        "updated_at": datetime.now().isoformat(),
+    }}

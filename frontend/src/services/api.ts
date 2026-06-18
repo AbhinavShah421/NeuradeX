@@ -304,6 +304,14 @@ class ApiService {
     const response = await this.api.get('/api/portfolio/tax-harvest', { timeout: 30000 });
     return response.data;
   }
+  async portfolioBenchmark(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/portfolio/benchmark', { timeout: 60000 });
+    return response.data;
+  }
+  async portfolioAdvisor(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/portfolio/advisor', { timeout: 90000 });
+    return response.data;
+  }
 
   // ── Mutual Funds (real NAV/returns via AMFI/mfapi) ──
   async mfSearch(q: string): Promise<ApiResponse<any>> {
