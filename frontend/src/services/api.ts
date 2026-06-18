@@ -341,6 +341,10 @@ class ApiService {
     const response = await this.api.post('/api/delivery-paper/tick', {}, { timeout: 40000 });
     return response.data;
   }
+  async paperTestOptimized(capital = 200000): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/delivery-paper/from-optimize', { capital }, { timeout: 60000 });
+    return response.data;
+  }
 
   // ── Mutual Funds (real NAV/returns via AMFI/mfapi) ──
   async mfSearch(q: string): Promise<ApiResponse<any>> {

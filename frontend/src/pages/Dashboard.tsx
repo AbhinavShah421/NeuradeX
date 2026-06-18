@@ -692,6 +692,7 @@ const DeliveryAutopilotCard: React.FC = () => {
           <div key={p.id} style={{ border: '1px solid var(--nd-border)', borderRadius: 8, padding: '10px 12px', marginBottom: 8 }}>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
               <span style={{ fontWeight: 700, color: 'var(--nd-text-1)' }}>{p.name}</span>
+              <span style={{ fontSize: 9, fontWeight: 700, color: p.source === 'optimize' ? '#a855f7' : '#3b82f6', border: `1px solid ${p.source === 'optimize' ? '#a855f7' : '#3b82f6'}`, borderRadius: 4, padding: '0 5px' }}>{p.source === 'optimize' ? 'OPTIMIZE TEST' : 'AI-MANAGED'}</span>
               <span style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>₹{inr(p.value)} · {p.positions.length} pos · cash ₹{inr(p.cash)}</span>
               <span style={{ fontSize: 13, fontWeight: 700, color: ret >= 0 ? 'var(--nd-green)' : 'var(--nd-red)' }}>{ret >= 0 ? '+' : ''}{ret}%</span>
               <span style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>

@@ -55,10 +55,10 @@ async def _save_pfs(pfs: dict) -> None:
     await _rset(_PF_KEY, pfs)
 
 
-def _new_portfolio(name: str, capital: float, cfg: dict) -> dict:
+def _new_portfolio(name: str, capital: float, cfg: dict, source: str = "delivery", managed: bool = True) -> dict:
     return {"id": uuid.uuid4().hex[:8], "name": name, "capital": capital, "cash": capital,
             "config": {**DEFAULT_CONFIG, **(cfg or {})}, "positions": [], "closed": [],
-            "value": capital, "created_at": _today()}
+            "value": capital, "created_at": _today(), "source": source, "managed": managed}
 
 
 async def _delivery_picks() -> list[dict]:
@@ -81,9 +81,9 @@ async def _delivery_picks() -> list[dict]:
 async def _prices(symbols: list[str]) -> dict:
     if not symbols:
         return {}
-    from app.api.portfolio import _yahoo_quote_map
-    qm = await _yahoo_quote_map([f"{s}.NS" for s in symbols])
-    return {s: float(qm[f"{s}.NS"]["ltp"]) for s in symbols if qm.get(f"{s}.NS", {}).get("ltp")}
+    from app.api.portfolio import _yahoo_quote_map   # takes BARE symbols (adds .NS itself)
+    qm = await _yahoo_quote_map(list(symbols))
+    return {s: float(qm[s]["ltp"]) for s in symbols if qm.get(s, {}).get("ltp")}
 
 
 async def _record_delivery_outcome(date_str: str, symbol: str, pnl_pct: float) -> None:
@@ -151,6 +151,19 @@ async def tick(reason: str = "manual") -> dict:
 
     for pf in pfs.values():
         cfg = {**DEFAULT_CONFIG, **pf.get("config", {})}
+
+        # Tracked (e.g. optimized-portfolio) books: mark-to-market only — no AI
+        # entries/exits, so the user sees how the optimized book itself performs.
+        if not pf.get("managed", True):
+            for pos in pf["positions"]:
+                price = prices.get(pos["symbol"], pos.get("current", pos["entry_price"]))
+                pos["current"] = round(price, 2)
+                pos["pnl_pct"] = round((price - pos["entry_price"]) / pos["entry_price"] * 100, 2)
+            pf["value"] = round(pf["cash"] + sum(p["qty"] * p.get("current", p["entry_price"]) for p in pf["positions"]), 2)
+            inv = pf["capital"]
+            pf["return_pct"] = round((pf["value"] - inv) / inv * 100, 2) if inv else 0.0
+            continue
+
         # 1) exits
         survivors = []
         for pos in pf["positions"]:
@@ -243,6 +256,60 @@ async def create_portfolio(req: CreatePortfolio):
     pfs[p["id"]] = p
     await _save_pfs(pfs)
     return {"status": "success", "data": p}
+
+
+class FromOptimizeRequest(BaseModel):
+    capital: float = 200000.0
+    name: str = "Optimized (paper test)"
+
+
+@router.post("/from-optimize")
+async def from_optimize(req: FromOptimizeRequest):
+    """Seed a *tracked* paper portfolio from the current AI-optimized book, so you
+    can validate the optimizer's recommendation before trading it for real. Uses
+    each action's target weight (swaps → the alternative), priced live, held and
+    marked-to-market (no auto entry/exit)."""
+    from app.api.portfolio import optimize_portfolio
+    data = (await optimize_portfolio()).get("data", {})
+    actions = (data.get("plan") or {}).get("actions") or []
+    targets: dict[str, float] = {}
+    for a in actions:
+        if (a.get("action") or "").upper() == "EXIT":
+            continue
+        sym = (a.get("symbol") or "").upper()
+        alt = a.get("alternative") or {}
+        if alt.get("symbol"):                     # at-risk → swap into the AI alternative
+            sym = alt["symbol"].upper()
+        w = float(a.get("target_weight_pct") or 0)
+        if sym and w > 0:
+            targets[sym] = targets.get(sym, 0.0) + w
+    if not targets:
+        raise HTTPException(400, "No optimized target holdings available — run AI Optimize first.")
+
+    tot = sum(targets.values()) or 1.0
+    prices = await _prices(sorted(targets))
+    cap = max(10000.0, req.capital)
+    pf = _new_portfolio(req.name, cap, {}, source="optimize", managed=False)
+    pf["positions"] = []
+    for sym, w in sorted(targets.items(), key=lambda x: -x[1]):
+        price = prices.get(sym)
+        if not price:
+            continue
+        alloc = cap * (w / tot)
+        qty = int(alloc // price)
+        if qty < 1:
+            continue
+        pf["cash"] = round(pf["cash"] - qty * price, 2)
+        pf["positions"].append({"symbol": sym, "entry_date": _today(), "entry_price": round(price, 2),
+                                "qty": qty, "weight_pct": round(w / tot * 100, 1),
+                                "current": round(price, 2), "pnl_pct": 0.0,
+                                "status_reason": "From AI Optimize target book (tracked)."})
+    pf["value"] = round(pf["cash"] + sum(p["qty"] * p["current"] for p in pf["positions"]), 2)
+    pf["return_pct"] = 0.0
+    pfs = await _load_pfs()
+    pfs[pf["id"]] = pf
+    await _save_pfs(pfs)
+    return {"status": "success", "data": pf}
 
 
 @router.delete("/portfolios/{pid}")

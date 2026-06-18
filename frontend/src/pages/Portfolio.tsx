@@ -703,6 +703,19 @@ const PortfolioPage: React.FC = () => {
                   <span className={`material-icons${optimizing ? ' nd-spin' : ''}`} style={{ fontSize: 18 }}>{optimizing ? 'autorenew' : 'insights'}</span>
                   {optimizing ? 'Optimizing…' : optimization ? 'Re-run' : 'Run optimization'}
                 </button>
+                {optimization && (
+                  <button onClick={async () => {
+                    try {
+                      const r: any = await apiService.paperTestOptimized(200000);
+                      const n = (r?.data?.positions ?? []).length;
+                      setOrderMsg({ ok: true, text: `Paper-test portfolio created from your optimized book (${n} stocks, ₹2L). Track it on Dashboard → Delivery Autopilot.` });
+                    } catch { setOrderMsg({ ok: false, text: 'Could not create the paper-test portfolio.' }); }
+                  }} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px', borderRadius: 10,
+                    border: '1px solid var(--nd-blue)', background: 'transparent', color: 'var(--nd-blue)', fontWeight: 600, fontSize: 13, cursor: 'pointer' }}>
+                    <span className="material-icons" style={{ fontSize: 18 }}>science</span>
+                    Paper-test this portfolio
+                  </button>
+                )}
               </div>
 
               {/* Live Groww orders (today) with cancel */}
