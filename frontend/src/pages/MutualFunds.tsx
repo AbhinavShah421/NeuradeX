@@ -218,7 +218,7 @@ const MutualFunds: React.FC = () => {
                   </tr></thead>
                   <tbody>
                     {screen.funds.map((f: any) => (
-                      <tr key={f.schemeCode} style={{ borderTop: '1px solid var(--nd-border)', background: f.aiPick ? 'var(--nd-green-50)' : 'transparent' }}>
+                      <tr key={f.schemeCode} style={{ borderTop: '1px solid var(--nd-border)', background: f.aiPick ? 'rgba(34,197,94,0.12)' : 'transparent', boxShadow: f.aiPick ? 'inset 3px 0 0 #22c55e' : 'none' }}>
                         <td style={{ padding: '8px 10px', color: 'var(--nd-text-3)', whiteSpace: 'nowrap' }}>{f.rank}{f.aiPick ? ' ⭐' : ''}</td>
                         <td style={{ padding: '8px 10px', maxWidth: 260 }}>
                           <div style={{ fontWeight: 600, color: 'var(--nd-text-1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={f.name}>{f.name}</div>
