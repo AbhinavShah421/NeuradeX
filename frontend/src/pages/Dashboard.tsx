@@ -820,7 +820,10 @@ const ScanAccuracyCard: React.FC = () => {
   const yMin = Math.max(0, Math.min(...ys) - 8), yMax = Math.min(100, Math.max(...ys) + 8);
   const sy = (v: number) => PT + (1 - (v - yMin) / (yMax - yMin || 1)) * (H - PT - PB);
 
-  const latestAcc = (s: any) => s.pts.length ? s.pts[s.pts.length - 1].accuracy * 100 : null;
+  // Headline = the stable OVERALL accuracy (per-day is noisy at small committed
+  // sample sizes). Falls back to the latest point if there's no overall yet.
+  const latestAcc = (s: any) => s.overall?.accuracy != null ? s.overall.accuracy * 100
+    : (s.pts.length ? s.pts[s.pts.length - 1].accuracy * 100 : null);
   const commAcc = ovc?.accuracy != null ? ovc.accuracy * 100 : null;
   const commBelow = commAcc != null && commAcc < target;
 
