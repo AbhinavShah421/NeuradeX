@@ -289,6 +289,22 @@ class ApiService {
     return response.data;
   }
 
+  async portfolioHealth(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/portfolio/health', { timeout: 30000 });
+    return response.data;
+  }
+  async sipPlanner(p: { goalAmount?: number; years?: number; risk?: string; currentCorpus?: number; monthly?: number }): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/portfolio/sip-planner', { params: {
+      goal_amount: p.goalAmount ?? 0, years: p.years ?? 10, risk: p.risk ?? 'moderate',
+      current_corpus: p.currentCorpus ?? 0, monthly: p.monthly ?? 0,
+    } });
+    return response.data;
+  }
+  async taxHarvest(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/portfolio/tax-harvest', { timeout: 30000 });
+    return response.data;
+  }
+
   // ── Mutual Funds (real NAV/returns via AMFI/mfapi) ──
   async mfSearch(q: string): Promise<ApiResponse<any>> {
     const response = await this.api.get('/api/mutual-funds/search', { params: { q }, timeout: 25000 });

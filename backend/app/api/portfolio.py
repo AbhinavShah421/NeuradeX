@@ -1200,3 +1200,218 @@ async def fund_basket_invest(basket: str, amount: float):
         "deployed": round(deployed, 2), "leftover": round(amount - deployed, 2),
         "count": sum(1 for p in picks if p.get("qty")), "picks": picks,
     }}
+
+
+# ── AI Portfolio Health Score (X-ray) ─────────────────────────────────────────
+
+_GRADE_Q = {"A": 90, "B": 75, "C": 55, "D": 35}
+
+
+async def _ranked_by_symbol() -> dict:
+    items = await _ranked_items()
+    return {(it.get("symbol") or "").upper(): it for it in items}
+
+
+def _grade_from_score(s: float) -> str:
+    return ("A" if s >= 85 else "B" if s >= 70 else "C" if s >= 55 else "D" if s >= 40 else "F")
+
+
+@router.get("/health")
+async def portfolio_health():
+    """AI Portfolio Health Score (0-100) — a single glanceable measure built from a
+    multi-factor model: diversification, concentration, sector balance, holding
+    quality (AI grades), performance and drawdown — with the issues + top fixes."""
+    from app.utils.sector_map import ensure_loaded
+    await ensure_loaded()
+    pf = (await get_portfolio()).get("data", {})
+    stocks = pf.get("stocks", [])
+    tv = float(pf.get("total_value") or 0.0)
+    if not stocks or tv <= 0:
+        return {"status": "success", "data": {"score": None, "grade": "—",
+                "note": "No holdings to analyse yet."}}
+    ranked = await _ranked_by_symbol()
+
+    weights = [s["value"] / tv for s in stocks]
+    hhi = sum(w * w for w in weights) or 1e-9
+    eff_holdings = 1 / hhi
+    top_w = max(weights) * 100
+
+    sect_val: dict[str, float] = {}
+    for s in stocks:
+        sec = _sector_of(s["symbol"])
+        sect_val[sec] = sect_val.get(sec, 0.0) + s["value"]
+    top_sector, top_sec_val = max(sect_val.items(), key=lambda x: x[1])
+    top_sec_pct = top_sec_val / tv * 100
+    eff_sectors = 1 / (sum((v / tv) ** 2 for v in sect_val.values()) or 1e-9)
+
+    # Holding quality from AI grades (rated names); unrated = neutral 50.
+    q_sum = q_wt = 0.0
+    for s, w in zip(stocks, weights):
+        it = ranked.get(s["symbol"].upper())
+        q = _GRADE_Q.get((it or {}).get("grade"), 50)
+        q_sum += q * w; q_wt += w
+    quality = q_sum / q_wt if q_wt else 50
+
+    gain_pct = float(pf.get("gain_percent") or 0.0)
+    losers = sum(1 for s in stocks if s.get("gain_percent", 0) < 0)
+    loser_frac = losers / len(stocks)
+
+    # Sub-scores (0-100)
+    f_div = max(0, min(100, eff_holdings / 12 * 100))
+    f_conc = 100 if top_w <= 10 else max(0, 100 - (top_w - 10) * 2.5)
+    f_sect = 100 if top_sec_pct <= 25 else max(0, 100 - (top_sec_pct - 25) * 2.2)
+    f_qual = quality
+    f_perf = max(0, min(100, 55 + gain_pct * 2.2))
+    f_risk = max(0, 100 - loser_frac * 100)
+
+    W = {"diversification": 0.20, "concentration": 0.15, "sector": 0.15,
+         "quality": 0.25, "performance": 0.15, "drawdown": 0.10}
+    subs = {"diversification": f_div, "concentration": f_conc, "sector": f_sect,
+            "quality": f_qual, "performance": f_perf, "drawdown": f_risk}
+    score = round(sum(subs[k] * W[k] for k in W), 1)
+
+    issues, actions = [], []
+    if top_w > 20:
+        issues.append(f"{stocks[weights.index(max(weights))]['symbol']} is {top_w:.0f}% of the book (single-name risk).")
+        actions.append("Trim the largest position toward ≤15%.")
+    if top_sec_pct > 40:
+        issues.append(f"{top_sector} is {top_sec_pct:.0f}% of the book (sector concentration).")
+        actions.append(f"Diversify out of {top_sector} — see Sector Exposure.")
+    if eff_holdings < 6:
+        issues.append(f"Only ~{eff_holdings:.0f} effective holdings — thinly diversified.")
+        actions.append("Add a few uncorrelated names or a Balanced Multi-Sector basket.")
+    if quality < 55:
+        issues.append("Average holding quality is low on the AI scan (many C/D-grade names).")
+        actions.append("Replace weak names with A/B-grade picks (AI Optimize).")
+    if loser_frac >= 0.6:
+        issues.append(f"{losers}/{len(stocks)} holdings are underwater.")
+    if not issues:
+        issues.append("No major structural issues — well-balanced book.")
+
+    return {"status": "success", "data": {
+        "score": score, "grade": _grade_from_score(score),
+        "factors": [{"key": k, "label": k.title(), "score": round(subs[k], 1),
+                     "weight": int(W[k] * 100)} for k in W],
+        "metrics": {"effective_holdings": round(eff_holdings, 1), "top_weight_pct": round(top_w, 1),
+                    "top_sector": top_sector, "top_sector_pct": round(top_sec_pct, 1),
+                    "effective_sectors": round(eff_sectors, 1), "avg_quality": round(quality, 1),
+                    "gain_pct": gain_pct, "losers": losers, "holdings": len(stocks)},
+        "issues": issues, "actions": actions[:4],
+        "updated_at": datetime.now().isoformat(),
+    }}
+
+
+# ── Goal-based SIP Planner ─────────────────────────────────────────────────────
+
+_RISK = {
+    "conservative": {"return": 0.09, "band": 0.03, "equity": 30, "debt": 60, "gold": 10},
+    "moderate":     {"return": 0.12, "band": 0.035, "equity": 60, "debt": 30, "gold": 10},
+    "aggressive":   {"return": 0.145, "band": 0.04, "equity": 85, "debt": 10, "gold": 5},
+}
+
+
+def _fv_sip(monthly: float, annual: float, years: float) -> float:
+    r = annual / 12
+    n = int(years * 12)
+    if r == 0:
+        return monthly * n
+    return monthly * (((1 + r) ** n - 1) / r) * (1 + r)
+
+
+@router.get("/sip-planner")
+async def sip_planner(goal_amount: float = 0, years: float = 10, risk: str = "moderate",
+                      current_corpus: float = 0, monthly: float = 0):
+    """Goal-based plan: required SIP (or projected corpus from a given SIP), a
+    year-by-year projection with optimistic/pessimistic bands, a risk-based asset
+    allocation, and AI fund recommendations per sleeve."""
+    risk = risk if risk in _RISK else "moderate"
+    cfg = _RISK[risk]
+    ann = cfg["return"]
+    years = max(1.0, min(40.0, years))
+
+    fv_corpus = current_corpus * (1 + ann) ** years
+    required_sip = None
+    if not monthly and goal_amount > 0:
+        need = max(0.0, goal_amount - fv_corpus)
+        r = ann / 12; n = int(years * 12)
+        factor = (((1 + r) ** n - 1) / r) * (1 + r) if r else n
+        required_sip = round(need / factor, 0) if factor else None
+        monthly = required_sip or 0
+
+    def project(a: float):
+        return round(_fv_sip(monthly, a, years) + current_corpus * (1 + a) ** years, 0)
+
+    projected = project(ann)
+    series = []
+    for y in range(1, int(years) + 1):
+        series.append({"year": y,
+                       "expected": round(_fv_sip(monthly, ann, y) + current_corpus * (1 + ann) ** y, 0),
+                       "optimistic": round(_fv_sip(monthly, ann + cfg["band"], y) + current_corpus * (1 + ann + cfg["band"]) ** y, 0),
+                       "pessimistic": round(_fv_sip(monthly, max(0.02, ann - cfg["band"]), y) + current_corpus * (1 + max(0.02, ann - cfg["band"])) ** y, 0)})
+
+    invested = round(monthly * int(years * 12) + current_corpus, 0)
+    sleeves = [
+        {"sleeve": "Equity", "pct": cfg["equity"],
+         "how": "AI Fund Baskets (Portfolio → AI Funds) or top Flexi/Large-Cap funds (Funds → Screener)."},
+        {"sleeve": "Debt", "pct": cfg["debt"],
+         "how": "Corporate Bond / Short Duration funds (Funds → Screener)."},
+        {"sleeve": "Gold", "pct": cfg["gold"], "how": "A Gold ETF / fund of funds."},
+    ]
+    return {"status": "success", "data": {
+        "risk": risk, "assumed_return_pct": round(ann * 100, 1), "years": years,
+        "monthly_sip": round(monthly, 0), "required_sip": required_sip,
+        "current_corpus": current_corpus, "goal_amount": goal_amount or None,
+        "projected_corpus": projected, "invested": invested,
+        "wealth_gained": round(projected - invested, 0),
+        "optimistic": project(ann + cfg["band"]), "pessimistic": project(max(0.02, ann - cfg["band"])),
+        "on_track": bool(goal_amount and projected >= goal_amount),
+        "allocation": {"equity": cfg["equity"], "debt": cfg["debt"], "gold": cfg["gold"]},
+        "sleeves": sleeves, "projection": series,
+        "note": "Projections use assumed long-run returns by risk profile — not guaranteed.",
+    }}
+
+
+# ── Tax / Capital-Gains optimizer (tax-loss harvesting) ────────────────────────
+
+@router.get("/tax-harvest")
+async def tax_harvest():
+    """Unrealised gains/losses across holdings, tax-loss-harvest candidates and an
+    estimated tax saving. (Groww's API doesn't return buy dates, so LTCG/STCG split
+    is approximate — figures use the LTCG long-term rate as a guide.)"""
+    pf = (await get_portfolio()).get("data", {})
+    stocks = pf.get("stocks", [])
+    if not stocks:
+        return {"status": "success", "data": {"note": "No holdings to analyse."}}
+
+    LTCG_RATE, LTCG_EXEMPT = 0.125, 125000
+    gains, losses = [], []
+    total_unreal = 0.0
+    for s in stocks:
+        g = float(s.get("gain") or 0.0)
+        total_unreal += g
+        row = {"symbol": s["symbol"], "qty": s["quantity"], "gain": round(g, 2),
+               "gain_pct": s.get("gain_percent"), "value": s["value"]}
+        (gains if g >= 0 else losses).append(row)
+
+    losses.sort(key=lambda x: x["gain"])              # biggest losses first
+    gains.sort(key=lambda x: -x["gain"])
+    harvestable = round(sum(-l["gain"] for l in losses), 2)
+    realised_gain_pool = round(sum(g["gain"] for g in gains), 2)
+    offset = min(harvestable, realised_gain_pool)
+    taxable_after_exempt = max(0.0, realised_gain_pool - LTCG_EXEMPT)
+    est_tax_saved = round(min(offset, taxable_after_exempt) * LTCG_RATE, 0)
+
+    return {"status": "success", "data": {
+        "total_unrealised": round(total_unreal, 2),
+        "unrealised_gains": realised_gain_pool, "harvestable_losses": harvestable,
+        "harvest_candidates": losses[:10], "top_gainers": gains[:10],
+        "potential_offset": round(offset, 2), "est_tax_saved": est_tax_saved,
+        "ltcg_exemption": LTCG_EXEMPT, "ltcg_rate_pct": LTCG_RATE * 100,
+        "tips": [
+            f"Harvest up to ₹{harvestable:,.0f} of losses to offset realised gains and cut LTCG tax.",
+            f"₹{LTCG_EXEMPT:,.0f} of long-term equity gains are tax-free each year — book up to that first.",
+            "An ELSS fund (Funds → Screener → ELSS) gives 80C deduction with the shortest (3y) lock-in.",
+        ],
+        "caveat": "Buy dates aren't available from Groww's API, so LTCG vs STCG can't be split exactly — treat figures as guidance, not filing advice.",
+        "updated_at": datetime.now().isoformat(),
+    }}
