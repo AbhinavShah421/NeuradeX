@@ -820,7 +820,10 @@ const ScanAccuracyCard: React.FC = () => {
   const yMin = Math.max(0, Math.min(...ys) - 8), yMax = Math.min(100, Math.max(...ys) + 8);
   const sy = (v: number) => PT + (1 - (v - yMin) / (yMax - yMin || 1)) * (H - PT - PB);
 
-  const latestAcc = (s: any) => s.pts.length ? s.pts[s.pts.length - 1].accuracy * 100 : null;
+  // Headline = the stable OVERALL accuracy (per-day is noisy at small committed
+  // sample sizes). Falls back to the latest point if there's no overall yet.
+  const latestAcc = (s: any) => s.overall?.accuracy != null ? s.overall.accuracy * 100
+    : (s.pts.length ? s.pts[s.pts.length - 1].accuracy * 100 : null);
   const commAcc = ovc?.accuracy != null ? ovc.accuracy * 100 : null;
   const commBelow = commAcc != null && commAcc < target;
 
@@ -834,6 +837,7 @@ const ScanAccuracyCard: React.FC = () => {
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
           {series.map(s => {
             const la = latestAcc(s);
+            const er = s.overall?.avgReturn;        // expectancy: avg return per graded pick
             return (
               <button key={s.key} onClick={() => setShow(p => ({ ...p, [s.key]: !(p as any)[s.key] }))} style={{
                 padding: '4px 9px', borderRadius: 7, cursor: 'pointer', textAlign: 'right',
@@ -842,6 +846,7 @@ const ScanAccuracyCard: React.FC = () => {
               }}>
                 <div style={{ fontSize: 10, color: 'var(--nd-text-3)' }}>{s.label}</div>
                 <div style={{ fontSize: 15, fontWeight: 700, color: s.color }}>{la != null ? `${la.toFixed(0)}%` : '—'}</div>
+                {er != null && <div style={{ fontSize: 9.5, color: er >= 0 ? 'var(--nd-green)' : 'var(--nd-red)' }}>{er >= 0 ? '+' : ''}{er.toFixed(1)}%/pick</div>}
               </button>
             );
           })}

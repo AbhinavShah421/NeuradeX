@@ -67,6 +67,11 @@ HC_WP_FLOOR           = float(os.getenv("SCAN_HC_WP_FLOOR", "0.72")) # min win-p
 # Hard cap on how many picks the committed tier holds, no matter how many clear
 # the bar — keeps "high conviction" genuinely selective (paper trades only these).
 COMMITTED_MAX         = int(os.getenv("SCAN_COMMITTED_MAX", "3"))
+# Committed picks are graded on their N-trading-day forward return (their edge is
+# multi-day, not same-day intraday) — "correct" if they gain COMMITTED_TARGET_PCT.
+COMMITTED_HORIZON     = int(os.getenv("SCAN_COMMITTED_HORIZON", "3"))
+COMMITTED_TARGET_PCT  = float(os.getenv("SCAN_COMMITTED_TARGET_PCT", "1.0"))
+_COMMITTED_DONE_KEY   = "ai_engine:committed_eval_done:{}"
 
 
 async def _load_hc_params() -> dict:
@@ -220,9 +225,10 @@ def _is_committed(res: dict, p: dict) -> bool:
     # Independent signal 2 — block on a negative news catalyst.
     if float(res.get("catalyst_boost") or 0.0) < -0.05:
         return False
-    # Independent signal 3 — the learned pattern model must not be clearly bearish.
+    # Independent signal 3 — the learned pattern model must AGREE (not merely be
+    # non-bearish): committed picks need the pattern model leaning up.
     pp = res.get("pattern_p_up")
-    if pp is not None and pp < PATTERN_VETO:
+    if pp is not None and pp < PATTERN_MIN_P:
         return False
     return True
 
@@ -1033,25 +1039,9 @@ async def evaluate_day(date_str: str | None = None) -> dict:
     await _update_calibration(by_action, accuracy)
     await _push_feedback(eval_payload)
 
-    # ── High-conviction tier: grade only the committed picks against the 90%
-    # target, then adapt the selectivity bar toward it. ──
-    committed = [g for g in graded if g.get("committed")]
-    if committed:
-        c_hits = sum(1 for g in committed if g["correct"])
-        c_acc = round(c_hits / len(committed), 4)
-        c_avg = round(sum(g["realized_return_pct"] for g in committed) / len(committed), 2)
-        await _push_feedback({
-            "date": date_str, "evaluated_at": now.isoformat(), "trade_kind": "committed",
-            "picks": len(committed), "hits": c_hits, "accuracy": c_acc,
-            "avg_realized_return_pct": c_avg,
-            "target": SCAN_ACCURACY_TARGET, "meets_target": c_acc >= SCAN_ACCURACY_TARGET,
-            "results": committed,
-        })
-    new_params = await _tune_hc_params(
-        accuracy=(c_acc if committed else 0.0), n=len(committed), target=SCAN_ACCURACY_TARGET)
-    logger.info("committed tier %s: %d picks, accuracy %.0f%% → bar wp>=%.2f factors>=%d",
-                date_str, len(committed), (c_acc if committed else 0) * 100,
-                new_params["wp_floor"], new_params["min_factors"])
+    # High-conviction (committed) picks are NOT graded same-day — their edge is
+    # multi-day, so they're graded on a COMMITTED_HORIZON forward return by
+    # grade_due_committed() (called below from the post-close scheduler).
 
     _state.update({"last_eval_date": date_str, "last_eval": {
         "date": date_str, "accuracy": accuracy, "picks": len(graded),
@@ -1202,6 +1192,78 @@ async def grade_due_delivery() -> None:
             logger.debug("delivery grade %s skipped: %s", d, exc)
 
 
+async def evaluate_committed(entry_date: str) -> dict:
+    """Grade the committed (high-conviction) picks made on `entry_date` on their
+    COMMITTED_HORIZON forward return — correct if they gained COMMITTED_TARGET_PCT."""
+    r = await _get_redis()
+    if await r.get(_COMMITTED_DONE_KEY.format(entry_date)):
+        return {"status": "already_graded", "date": entry_date}
+    raw = await r.get(f"{_PREMARKET_KEY}:{entry_date}")
+    if not raw:
+        return {"status": "no_snapshot", "date": entry_date}
+    items = (json.loads(raw) or {}).get("committed", [])
+    if not items:
+        return {"status": "empty", "date": entry_date}
+
+    graded, not_ready = [], False
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        for w in items:
+            candles = await _fetch_daily(client, w["symbol"])
+            await asyncio.sleep(FETCH_DELAY)
+            if not candles:
+                continue
+            ei = None
+            for i, b in enumerate(candles):
+                bd = _bar_date(b)
+                if bd and bd <= entry_date:
+                    ei = i
+                elif bd and bd > entry_date:
+                    break
+            if ei is None:
+                continue
+            if ei + COMMITTED_HORIZON >= len(candles):
+                not_ready = True
+                continue
+            entry = candles[ei]["c"]
+            window = candles[ei + 1: ei + 1 + COMMITTED_HORIZON]
+            best = max((b["h"] for b in window), default=entry)
+            fwd = (best - entry) / entry * 100 if entry else 0.0
+            graded.append({"symbol": w["symbol"], "action": "BUY",
+                           "predicted_confidence": w.get("confidence"),
+                           "predicted_signal_score": w.get("signal_score"),
+                           "day_return_pct": round(fwd, 2), "realized_return_pct": round(fwd, 2),
+                           "correct": bool(fwd >= COMMITTED_TARGET_PCT), "trade_kind": "committed"})
+    if not graded:
+        return {"status": "not_ready" if not_ready else "no_data", "date": entry_date}
+
+    hits = sum(1 for g in graded if g["correct"])
+    acc = round(hits / len(graded), 4)
+    await _push_feedback({
+        "date": entry_date, "evaluated_at": _ist_now().isoformat(), "trade_kind": "committed",
+        "picks": len(graded), "hits": hits, "accuracy": acc,
+        "avg_realized_return_pct": round(sum(g["realized_return_pct"] for g in graded) / len(graded), 2),
+        "target": SCAN_ACCURACY_TARGET, "meets_target": acc >= SCAN_ACCURACY_TARGET, "results": graded,
+    })
+    await r.set(_COMMITTED_DONE_KEY.format(entry_date), "1", ex=86400 * 30)
+    await _tune_hc_params(accuracy=acc, n=len(graded), target=SCAN_ACCURACY_TARGET)
+    logger.info("committed grade %s: %d picks, accuracy %.0f%% over %dd", entry_date, len(graded), acc * 100, COMMITTED_HORIZON)
+    return {"status": "ok", "date": entry_date, "accuracy": acc, "picks": len(graded)}
+
+
+async def grade_due_committed() -> None:
+    """Grade committed snapshots whose COMMITTED_HORIZON has elapsed."""
+    r = await _get_redis()
+    today = _ist_now()
+    for back in range(COMMITTED_HORIZON, COMMITTED_HORIZON + 12):
+        d = (today - timedelta(days=back)).strftime("%Y-%m-%d")
+        if await r.get(_COMMITTED_DONE_KEY.format(d)) or not await r.get(f"{_PREMARKET_KEY}:{d}"):
+            continue
+        try:
+            await evaluate_committed(d)
+        except Exception as exc:
+            logger.debug("committed grade %s skipped: %s", d, exc)
+
+
 async def backfill_delivery(days: int = 14, limit: int = 250) -> dict:
     """Reconstruct delivery-pick accuracy for the last `days` trading days so the
     accuracy graph has delivery history immediately (no waiting for live snapshots
@@ -1271,11 +1333,11 @@ async def backfill_delivery(days: int = 14, limit: int = 250) -> dict:
     return {"status": "done", "graded_days": graded_days, "symbols": len(syms), "days": days}
 
 
-async def backfill_committed(days: int = 20, limit: int = 400) -> dict:
-    """Reconstruct the high-conviction (committed) tier's same-day accuracy for the
-    last `days` so its line shows immediately. For each symbol/day we re-run the
-    fitness logic as-of that day, keep only committed setups, and grade the actual
-    same-day move — identical to live committed grading."""
+async def backfill_committed(days: int = 30, limit: int = 400) -> dict:
+    """Reconstruct the high-conviction (committed) tier's accuracy for the last
+    `days`, graded on the COMMITTED_HORIZON forward return (their edge is multi-day,
+    not same-day) — 'correct' if the pick gained COMMITTED_TARGET_PCT within the
+    window. Mirrors live deferred grading."""
     hc = await _load_hc_params()
     calib = await _load_calibration()
     universe = await _load_universe()
@@ -1289,24 +1351,26 @@ async def backfill_committed(days: int = 20, limit: int = 400) -> dict:
             await asyncio.sleep(FETCH_DELAY)
             if len(candles) < 40:
                 continue
-            for i in range(35, len(candles)):
+            for i in range(35, len(candles) - COMMITTED_HORIZON):     # leave room for the forward window
                 bd = _bar_date(candles[i])
                 if not bd or bd < cutoff:
                     continue
                 res = _analyze(candles[: i + 1], regime=0, calib=calib)
                 if not res or not _is_committed(res, hc):
                     continue
-                o, c = candles[i]["o"], candles[i]["c"]
-                if o <= 0:
+                entry = candles[i]["c"]
+                if entry <= 0:
                     continue
-                day_move = (c - o) / o * 100
+                window = candles[i + 1: i + 1 + COMMITTED_HORIZON]
+                best = max((b["h"] for b in window), default=entry)            # best close-to-high in window
+                fwd = (best - entry) / entry * 100
                 by_date.setdefault(bd, []).append({
                     "symbol": sym, "action": "BUY",
                     "predicted_confidence": res.get("confidence"),
                     "predicted_signal_score": res.get("signal_score"),
-                    "day_return_pct": round(day_move, 2),
-                    "realized_return_pct": round(day_move, 2),
-                    "correct": bool(day_move >= 0.3),
+                    "day_return_pct": round(fwd, 2),
+                    "realized_return_pct": round(fwd, 2),
+                    "correct": bool(fwd >= COMMITTED_TARGET_PCT),
                     "committed": True, "trade_kind": "committed",
                 })
 
@@ -1361,8 +1425,9 @@ async def schedule_loop() -> None:
             if weekday and minutes >= POSTMARKET_MIN and _state["last_eval_date"] != today:
                 logger.info("post-close evaluation for %s", today)
                 await evaluate_day(today)
-                # Grade any older delivery picks whose holding horizon has elapsed.
+                # Grade older delivery + committed picks whose horizon has elapsed.
                 await grade_due_delivery()
+                await grade_due_committed()
         except asyncio.CancelledError:
             break
         except Exception as exc:

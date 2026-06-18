@@ -828,13 +828,15 @@ async def scan_evaluation():
                 })
             agg = (await conn.execute(text("""
                 SELECT COALESCE(trade_kind,'intraday') kind,
-                       AVG(CASE WHEN correct THEN 1.0 ELSE 0.0 END), COUNT(*)
+                       AVG(CASE WHEN correct THEN 1.0 ELSE 0.0 END), COUNT(*),
+                       AVG(realized_return_pct)
                 FROM scan_evaluations GROUP BY COALESCE(trade_kind,'intraday')
             """))).fetchall()
             for a in agg:
                 kind = a[0] if a[0] in trends else "intraday"
                 overalls[kind] = {"days": len(trends[kind]), "accuracy": round(float(a[1]), 4),
-                                  "picks": int(a[2]), "meets_target": float(a[1]) >= target}
+                                  "picks": int(a[2]), "meets_target": float(a[1]) >= target,
+                                  "avg_return": round(float(a[3] or 0.0), 2)}
     except Exception as exc:
         logger.debug("scan eval trend failed: %s", exc)
 
