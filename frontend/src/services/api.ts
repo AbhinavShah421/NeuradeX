@@ -272,6 +272,23 @@ class ApiService {
     return response.data;
   }
 
+  async sectorExposure(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/portfolio/sector-exposure', { timeout: 30000 });
+    return response.data;
+  }
+
+  async fundBaskets(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/portfolio/fund-baskets', { timeout: 30000 });
+    return response.data;
+  }
+
+  async investBasket(basket: string, amount: number): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/portfolio/fund-baskets/invest', {
+      params: { basket, amount }, timeout: 30000,
+    });
+    return response.data;
+  }
+
   async getAlerts(): Promise<ApiResponse<any>> {
     try {
       const response = await this.api.get('/api/portfolio/alerts');

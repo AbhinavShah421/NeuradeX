@@ -904,3 +904,299 @@ async def create_alert(alert: Alert):
             "created_at": datetime.now().isoformat(),
         },
     }
+
+
+# ── AI Sector Exposure Scanner + Optimizer ────────────────────────────────────
+# Maps holdings to sectors, scores each sector with the live AI scan, and
+# compares the book's sector weights against an AI-favoured target.
+
+def _sector_of(symbol: str) -> str:
+    try:
+        from app.data.stocks_master import STOCKS_BY_SYMBOL
+        s = STOCKS_BY_SYMBOL.get((symbol or "").upper())
+        if s and s.get("sector"):
+            return s["sector"]
+    except Exception:
+        pass
+    return "Other"
+
+
+async def _ranked_items() -> list[dict]:
+    """The live AI ranked board (full universe scan), each item sector-tagged."""
+    try:
+        from app.utils.redis_client import cache_get
+        raw = await cache_get("ai_engine:ranked")
+        data = json.loads(raw) if raw else {}
+        items = data.get("items") or []
+    except Exception:
+        items = []
+    for it in items:
+        it["sector"] = _sector_of(it.get("symbol", ""))
+    return items
+
+
+async def _sector_ai_scores() -> dict:
+    """Aggregate the AI scan by sector → a 0..1 AI score per sector plus its best names."""
+    items = await _ranked_items()
+    agg: dict[str, dict] = {}
+    for it in items:
+        sec = it.get("sector", "Other")
+        wp = float(it.get("win_probability") or 0.0)
+        mom = float((it.get("metrics") or {}).get("momentum_pct") or 0.0)
+        a = agg.setdefault(sec, {"n": 0, "buys": 0, "wp_sum": 0.0, "mom_sum": 0.0, "names": []})
+        a["n"] += 1
+        if it.get("action") == "BUY":
+            a["buys"] += 1
+        a["wp_sum"] += wp
+        a["mom_sum"] += mom
+        a["names"].append({
+            "symbol": it.get("symbol"), "name": it.get("name"), "grade": it.get("grade"),
+            "action": it.get("action"), "win_probability": wp, "price": it.get("price"),
+            "momentum_pct": round(mom, 2),
+        })
+    out: dict[str, dict] = {}
+    for sec, a in agg.items():
+        n = max(1, a["n"])
+        buy_ratio = a["buys"] / n
+        avg_wp = a["wp_sum"] / n
+        score = round(avg_wp * (0.5 + 0.5 * buy_ratio), 4)
+        top = sorted([x for x in a["names"] if x["action"] == "BUY"],
+                     key=lambda x: -x["win_probability"])[:5]
+        out[sec] = {"score": score, "count": a["n"], "buys": a["buys"],
+                    "avg_win_probability": round(avg_wp, 4),
+                    "avg_momentum_pct": round(a["mom_sum"] / n, 2), "top": top}
+    return out
+
+
+@router.get("/sector-exposure")
+async def sector_exposure():
+    """AI sector-exposure scanner + optimizer: the book's current sector weights
+    vs an AI-favoured target, with over/under-exposure and rebalance moves."""
+    pf = (await get_portfolio()).get("data", {})
+    stocks = pf.get("stocks", [])
+    tv = float(pf.get("total_value") or 0.0) or 1.0
+    for s in stocks:
+        s["sector"] = _sector_of(s.get("symbol", ""))
+
+    cur_val: dict[str, float] = {}
+    holders: dict[str, list] = {}
+    for s in stocks:
+        sec = s["sector"]
+        cur_val[sec] = cur_val.get(sec, 0.0) + float(s.get("value") or 0.0)
+        holders.setdefault(sec, []).append(s)
+    current_pct = {sec: v / tv * 100 for sec, v in cur_val.items()}
+
+    ai = await _sector_ai_scores()
+    scored = {sec: a["score"] for sec, a in ai.items() if a["buys"] > 0 and sec != "Other"}
+    top_secs = sorted(scored, key=lambda s: -scored[s])[:8]
+    tot = sum(scored[s] for s in top_secs) or 1.0
+    target_pct = {sec: round(scored[sec] / tot * 100, 1) for sec in top_secs}
+
+    rows = []
+    for sec in sorted(set(current_pct) | set(target_pct),
+                      key=lambda s: -(current_pct.get(s, 0) + target_pct.get(s, 0))):
+        cur = round(current_pct.get(sec, 0.0), 1)
+        tgt = round(target_pct.get(sec, 0.0), 1)
+        delta = round(cur - tgt, 1)
+        status = "overweight" if delta >= 8 else "underweight" if delta <= -8 else "balanced"
+        a = ai.get(sec, {})
+        rows.append({
+            "sector": sec, "current_pct": cur, "target_pct": tgt, "delta": delta, "status": status,
+            "ai_score": a.get("score"), "ai_avg_win_probability": a.get("avg_win_probability"),
+            "holdings": [s["symbol"] for s in holders.get(sec, [])],
+            "holding_count": len(holders.get(sec, [])),
+            "ai_top": (a.get("top") or [])[:3],
+        })
+
+    hhi = sum((p / 100) ** 2 for p in current_pct.values()) or 0.0
+    top_sector, top_pct = max(current_pct.items(), key=lambda x: x[1]) if current_pct else ("—", 0.0)
+
+    suggestions = []
+    for r in rows:
+        if r["status"] == "overweight" and r["holding_count"] > 0:
+            weakest = min(holders[r["sector"]], key=lambda s: s.get("gain_percent", 0))
+            suggestions.append({
+                "action": "TRIM", "sector": r["sector"], "from_pct": r["current_pct"], "to_pct": r["target_pct"],
+                "reason": f"{r['sector']} is {r['delta']:+.0f}% vs the AI target — reduce concentration.",
+                "stock": weakest["symbol"],
+            })
+        elif r["status"] == "underweight" and r["ai_top"]:
+            t = r["ai_top"][0]
+            suggestions.append({
+                "action": "ADD", "sector": r["sector"], "from_pct": r["current_pct"], "to_pct": r["target_pct"],
+                "reason": f"AI favours {r['sector']} (score {r['ai_score']}) but the book is {abs(r['delta']):.0f}% light.",
+                "stock": t.get("symbol"), "stock_name": t.get("name"),
+                "win_probability": t.get("win_probability"), "price": t.get("price"),
+            })
+    suggestions.sort(key=lambda x: 0 if x["action"] == "ADD" else 1)
+
+    warnings = []
+    if top_pct > 40:
+        warnings.append(f"{top_sector} is {top_pct:.0f}% of the book — heavy single-sector concentration.")
+    if len(current_pct) <= 2 and stocks:
+        warnings.append("Spread across very few sectors — diversification is low.")
+
+    return {"status": "success", "data": {
+        "total_value": round(tv, 2),
+        "sectors": rows,
+        "current": {k: round(v, 1) for k, v in sorted(current_pct.items(), key=lambda x: -x[1])},
+        "target": target_pct,
+        "effective_sectors": round(1 / hhi, 1) if hhi else 0,
+        "top_sector": top_sector, "top_sector_pct": round(top_pct, 1),
+        "ai_favoured": [{"sector": s, "score": ai[s]["score"]} for s in top_secs],
+        "suggestions": suggestions[:8],
+        "warnings": warnings,
+        "updated_at": datetime.now().isoformat(),
+    }}
+
+
+# ── AI Mutual-Fund-style Baskets (built by scanning the AI ranked board) ───────
+
+def _weight(holdings: list[dict], key="win_probability", cap=0.25) -> list[dict]:
+    raw = {h["symbol"]: max(0.05, float(h.get(key) or 0.5)) for h in holdings}
+    tot = sum(raw.values()) or 1.0
+    w = {k: min(cap, v / tot) for k, v in raw.items()}
+    s = sum(w.values()) or 1.0
+    for h in holdings:
+        h["weight_pct"] = round(w[h["symbol"]] / s * 100, 1)
+    return holdings
+
+
+def _basket_stats(holdings: list[dict]) -> dict:
+    secs = sorted({h["sector"] for h in holdings})
+    avg_wp = round(sum(h["win_probability"] for h in holdings) / max(1, len(holdings)), 3)
+    return {"size": len(holdings), "sectors": len(secs), "sector_list": secs, "avg_win_probability": avg_wp}
+
+
+async def _basket_pool() -> list[dict]:
+    items = await _ranked_items()
+    pool, seen = [], set()
+    for it in items:
+        sym = (it.get("symbol") or "").upper()
+        if (sym and sym not in seen and it.get("grade") in ("A", "B")
+                and it.get("action") == "BUY" and float(it.get("price") or 0) > 0):
+            seen.add(sym)
+            pool.append({
+                "symbol": sym, "name": it.get("name"), "sector": it.get("sector", "Other"),
+                "grade": it.get("grade"), "win_probability": float(it.get("win_probability") or 0.5),
+                "price": float(it.get("price")),
+                "momentum_pct": float((it.get("metrics") or {}).get("momentum_pct") or 0.0),
+            })
+    return pool
+
+
+async def _build_baskets() -> list[dict]:
+    pool = await _basket_pool()
+    if not pool:
+        return []
+    gr = {"A": 0, "B": 1}
+    baskets: list[dict] = []
+
+    top = sorted(pool, key=lambda x: (gr.get(x["grade"], 2), -x["win_probability"]))[:8]
+    baskets.append({"id": "top", "name": "AI Top Picks", "risk": "Moderate",
+                    "theme": "Highest-conviction A/B BUYs across the market",
+                    "description": "The strongest names the AI scan rates right now, conviction-weighted.",
+                    "holdings": _weight([dict(x) for x in top]), "stats": _basket_stats(top)})
+
+    by_sec: dict[str, dict] = {}
+    for x in sorted(pool, key=lambda x: -x["win_probability"]):
+        if x["sector"] != "Other" and x["sector"] not in by_sec:
+            by_sec[x["sector"]] = x
+    leaders = sorted(by_sec.values(), key=lambda x: -x["win_probability"])[:8]
+    if leaders:
+        baskets.append({"id": "sector_leaders", "name": "Sector Leaders", "risk": "Low–Moderate",
+                        "theme": "One leader from each strong sector",
+                        "description": "Maximum sector diversification — the top AI pick in each leading sector.",
+                        "holdings": _weight([dict(x) for x in leaders], cap=0.20), "stats": _basket_stats(leaders)})
+
+    mom = sorted([x for x in pool if x["momentum_pct"] > 0], key=lambda x: -x["momentum_pct"])[:8]
+    if mom:
+        baskets.append({"id": "momentum", "name": "Momentum Movers", "risk": "High",
+                        "theme": "Strongest price momentum among AI BUYs",
+                        "description": "Higher-octane: the fastest-rising AI BUY names, momentum-weighted.",
+                        "holdings": _weight([dict(x) for x in mom], key="momentum_pct", cap=0.25),
+                        "stats": _basket_stats(mom)})
+
+    bal: list[dict] = []
+    per_sec: dict[str, int] = {}
+    for x in sorted(pool, key=lambda x: (gr.get(x["grade"], 2), -x["win_probability"])):
+        if x["sector"] == "Other":
+            continue
+        if per_sec.get(x["sector"], 0) < 2 and len(bal) < 10:
+            bal.append(x); per_sec[x["sector"]] = per_sec.get(x["sector"], 0) + 1
+    if bal:
+        baskets.append({"id": "balanced", "name": "Balanced Multi-Sector", "risk": "Low",
+                        "theme": "Diversified across many sectors (≤2 per sector)",
+                        "description": "A fund-like core: spread across sectors to smooth single-name and sector risk.",
+                        "holdings": _weight([dict(x) for x in bal], cap=0.15), "stats": _basket_stats(bal)})
+
+    try:
+        from app.utils.redis_client import cache_get
+        wl = json.loads(await cache_get("ai_engine:watchlist") or "{}")
+        comm = wl.get("committed") or []
+    except Exception:
+        comm = []
+    hc = []
+    for it in comm:
+        if float(it.get("price") or 0) > 0:
+            hc.append({"symbol": it.get("symbol"), "name": it.get("name"),
+                       "sector": _sector_of(it.get("symbol", "")), "grade": it.get("grade"),
+                       "win_probability": float(it.get("win_probability") or 0.5), "price": float(it.get("price")),
+                       "momentum_pct": float((it.get("metrics") or {}).get("momentum_pct") or 0.0)})
+    if hc:
+        baskets.append({"id": "high_conviction", "name": "High-Conviction", "risk": "Concentrated",
+                        "theme": "Only the committed, multi-signal-confirmed picks",
+                        "description": "The few names that clear every gate (the tier the autopilot paper-trades).",
+                        "holdings": _weight([dict(x) for x in hc], cap=0.40), "stats": _basket_stats(hc)})
+    return baskets
+
+
+@router.get("/fund-baskets")
+async def fund_baskets():
+    """AI-scanned mutual-fund-style baskets — themed, weighted stock baskets built
+    from the live AI ranked board."""
+    baskets = await _build_baskets()
+    return {"status": "success", "data": {"baskets": baskets, "count": len(baskets),
+            "updated_at": datetime.now().isoformat(),
+            "note": "Baskets are AI-generated from the live scan and refresh each scan."}}
+
+
+@router.get("/fund-baskets/invest")
+async def fund_basket_invest(basket: str, amount: float):
+    """Allocate `amount` across a chosen basket's holdings by weight, as protective
+    LIMIT buy orders sized to real prices."""
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="amount must be positive")
+    baskets = await _build_baskets()
+    b = next((x for x in baskets if x["id"] == basket), None)
+    if not b:
+        raise HTTPException(status_code=404, detail=f"basket '{basket}' not found")
+    try:
+        from app.data.stocks_master import STOCKS_BY_SYMBOL
+    except Exception:
+        STOCKS_BY_SYMBOL = {}
+
+    picks, deployed = [], 0.0
+    for h in b["holdings"]:
+        alloc = amount * (h["weight_pct"] / 100)
+        price = float(h["price"])
+        qty = int(alloc // price)
+        ex = _exchange_for(h["symbol"], STOCKS_BY_SYMBOL)
+        if qty < 1:
+            picks.append({"symbol": h["symbol"], "name": h.get("name"), "sector": h["sector"],
+                          "weight_pct": h["weight_pct"], "qty": 0, "skipped": "allocation below 1 share"})
+            continue
+        limit = _limit_price("BUY", price)
+        trade = _build_trade("BUY", qty, limit, ex)
+        if not trade:
+            continue
+        spend = round(qty * limit, 2)
+        deployed += spend
+        picks.append({"symbol": h["symbol"], "name": h.get("name"), "sector": h["sector"],
+                      "weight_pct": h["weight_pct"], "qty": qty, "limit_price": limit,
+                      "est_cost": spend, "win_probability": h["win_probability"], "trade": trade})
+    return {"status": "success", "data": {
+        "basket": b["id"], "basket_name": b["name"], "amount": amount,
+        "deployed": round(deployed, 2), "leftover": round(amount - deployed, 2),
+        "count": sum(1 for p in picks if p.get("qty")), "picks": picks,
+    }}

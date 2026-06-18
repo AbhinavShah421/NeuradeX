@@ -5,7 +5,7 @@ import { Portfolio, Performance, PortfolioStock } from '../types';
 
 type SortKey = keyof Pick<PortfolioStock, 'symbol' | 'quantity' | 'purchasePrice' | 'currentPrice' | 'value' | 'gain' | 'gainPercent'>;
 type SortDir = 'asc' | 'desc';
-type Tab = 'holdings' | 'performance' | 'risk' | 'optimize' | 'invest';
+type Tab = 'holdings' | 'performance' | 'risk' | 'optimize' | 'invest' | 'sectors' | 'funds';
 
 const inr = (v: number) =>
   v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -205,6 +205,36 @@ const PortfolioPage: React.FC = () => {
   const [investData, setInvestData] = useState<any>(null);
   const [investLoading, setInvestLoading] = useState(false);
 
+  // Sector exposure + AI fund baskets
+  const [sectorData, setSectorData] = useState<any>(null);
+  const [baskets, setBaskets] = useState<any[]>([]);
+  const [basketAmt, setBasketAmt] = useState('25000');
+  const [openBasket, setOpenBasket] = useState<string | null>(null);
+  useEffect(() => {
+    if (activeTab === 'sectors') apiService.sectorExposure().then(r => setSectorData((r as any).data)).catch(() => {});
+    if (activeTab === 'funds') apiService.fundBaskets().then(r => setBaskets((r as any).data?.baskets ?? [])).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+
+  const askInvestBasket = async (b: any) => {
+    const amt = parseFloat(basketAmt);
+    if (!amt || amt <= 0) { setOrderMsg({ ok: false, text: 'Enter an amount to invest.' }); return; }
+    try {
+      const res = await apiService.investBasket(b.id, amt);
+      const picks = (res as any).data?.picks ?? [];
+      const legs = picks.filter((p: any) => p.trade && p.trade.quantity > 0).map((p: any) => ({
+        symbol: p.symbol, transactionType: 'BUY', quantity: p.trade.quantity,
+        orderType: p.trade.orderType, price: p.trade.limitPrice, exchange: p.trade.exchange,
+        product: p.trade.product, estValue: p.trade.estValue,
+      }));
+      if (!legs.length) { setOrderMsg({ ok: false, text: 'Amount too small to buy any whole shares in this basket.' }); return; }
+      setOrderMsg(null);
+      setPendingOrder({ kind: 'basket', legs, label: `Invest ₹${amt.toLocaleString('en-IN')} in ${b.name}` });
+    } catch (e) {
+      setOrderMsg({ ok: false, text: 'Could not build the basket order.' });
+    }
+  };
+
   const generateInvestPlan = async () => {
     const amt = parseFloat(investAmount);
     if (!amt || amt <= 0) return;
@@ -337,6 +367,8 @@ const PortfolioPage: React.FC = () => {
     { id: 'risk',        label: 'Risk',        icon: 'security' },
     { id: 'optimize',    label: 'AI Optimize', icon: 'auto_awesome' },
     { id: 'invest',      label: 'AI Invest',   icon: 'savings' },
+    { id: 'sectors',     label: 'Sector Exposure', icon: 'donut_large' },
+    { id: 'funds',       label: 'AI Funds',    icon: 'inventory_2' },
   ];
 
   const ACTION_STYLE: Record<string, { bg: string; color: string }> = {
@@ -931,6 +963,117 @@ const PortfolioPage: React.FC = () => {
               {!investData && !investLoading && (
                 <div className="nd-card" style={{ textAlign: 'center', padding: 40, color: 'var(--nd-text-3)', fontSize: 13 }}>
                   Enter the amount from your Groww wallet and click <strong>Build plan</strong> — the AI will split it across its best current picks.
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── Sector Exposure ── */}
+          {activeTab === 'sectors' && (
+            <div style={{ padding: '18px 20px' }}>
+              {!sectorData ? (
+                <div className="nd-card" style={{ textAlign: 'center', padding: 40, color: 'var(--nd-text-3)', fontSize: 13 }}>Scanning sector exposure…</div>
+              ) : (
+                <>
+                  <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 14 }}>
+                    {[
+                      { label: 'Top sector', value: `${sectorData.topSector} · ${sectorData.topSectorPct}%`, color: sectorData.topSectorPct > 40 ? 'var(--nd-red)' : 'var(--nd-text-1)' },
+                      { label: 'Effective sectors', value: sectorData.effectiveSectors, color: 'var(--nd-text-1)' },
+                      { label: 'AI-favoured', value: (sectorData.aiFavoured ?? []).slice(0, 3).map((a: any) => a.sector).join(', ') || '—', color: 'var(--nd-green)' },
+                    ].map((c, i) => (
+                      <div key={i} className="nd-card" style={{ flex: '1 1 200px', padding: '12px 16px' }}>
+                        <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>{c.label}</div>
+                        <div style={{ fontSize: 15, fontWeight: 700, color: c.color }}>{c.value}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {(sectorData.warnings ?? []).map((w: string, i: number) => (
+                    <div key={i} style={{ fontSize: 12, color: '#fca5a5', background: '#ef444415', border: '1px solid #ef444433', borderRadius: 8, padding: '8px 11px', marginBottom: 10 }}>⚠ {w}</div>
+                  ))}
+
+                  <div className="nd-card" style={{ padding: '14px 18px', marginBottom: 14 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--nd-text-1)', marginBottom: 10 }}>Your sectors vs the AI-favoured target</div>
+                    {(sectorData.sectors ?? []).map((r: any) => {
+                      const col = r.status === 'overweight' ? '#ef4444' : r.status === 'underweight' ? '#f59e0b' : '#22c55e';
+                      return (
+                        <div key={r.sector} style={{ marginBottom: 11 }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, marginBottom: 3 }}>
+                            <span style={{ fontWeight: 600, color: 'var(--nd-text-1)' }}>{r.sector} <span style={{ color: 'var(--nd-text-3)', fontWeight: 400 }}>({r.holdingCount})</span></span>
+                            <span style={{ color: 'var(--nd-text-2)' }}>now {r.currentPct}% · target {r.targetPct}% <span style={{ color: col, fontWeight: 700 }}>{r.status}</span></span>
+                          </div>
+                          <div style={{ position: 'relative', height: 8, background: 'var(--nd-border)', borderRadius: 4 }}>
+                            <div style={{ position: 'absolute', height: 8, borderRadius: 4, width: `${Math.min(100, r.currentPct)}%`, background: col, opacity: 0.85 }} />
+                            <div style={{ position: 'absolute', height: 8, width: 2, background: 'var(--nd-text-1)', left: `${Math.min(100, r.targetPct)}%` }} title={`AI target ${r.targetPct}%`} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {(sectorData.suggestions ?? []).length > 0 && (
+                    <div className="nd-card" style={{ padding: '14px 18px' }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--nd-text-1)', marginBottom: 10 }}>AI rebalance moves</div>
+                      {sectorData.suggestions.map((s: any, i: number) => (
+                        <div key={i} style={{ display: 'flex', alignItems: 'baseline', gap: 8, padding: '7px 0', borderBottom: '1px solid var(--nd-border)', fontSize: 12.5 }}>
+                          <span style={{ fontSize: 10, fontWeight: 700, color: s.action === 'ADD' ? '#22c55e' : '#ef4444', minWidth: 38 }}>{s.action}</span>
+                          <span style={{ fontWeight: 700, color: 'var(--nd-text-1)', minWidth: 120 }}>{s.sector}</span>
+                          <span style={{ color: 'var(--nd-text-2)' }}>{s.reason}{s.stock ? ` → ${s.action === 'ADD' ? 'buy' : 'trim'} ${s.stock}` : ''}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
+          {/* ── AI Fund Baskets ── */}
+          {activeTab === 'funds' && (
+            <div style={{ padding: '18px 20px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 14 }}>
+                <span style={{ fontSize: 12.5, color: 'var(--nd-text-2)' }}>Invest amount ₹</span>
+                <input value={basketAmt} onChange={e => setBasketAmt(e.target.value.replace(/[^0-9]/g, ''))}
+                  className="nd-input" style={{ width: 140 }} placeholder="25000" />
+                <span style={{ fontSize: 11.5, color: 'var(--nd-text-3)' }}>AI-built, mutual-fund-style stock baskets from the live scan — pick one and invest across it in one click.</span>
+              </div>
+              {baskets.length === 0 ? (
+                <div className="nd-card" style={{ textAlign: 'center', padding: 40, color: 'var(--nd-text-3)', fontSize: 13 }}>Building baskets from the latest AI scan…</div>
+              ) : (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 340px), 1fr))', gap: 14 }}>
+                  {baskets.map((b: any) => {
+                    const open = openBasket === b.id;
+                    return (
+                      <div key={b.id} className="nd-card" style={{ padding: '14px 16px', minWidth: 0 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
+                          <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>{b.name}</div>
+                          <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--nd-purple)', border: '1px solid var(--nd-purple)', borderRadius: 5, padding: '1px 6px' }}>{b.risk}</span>
+                        </div>
+                        <div style={{ fontSize: 11.5, color: 'var(--nd-text-3)', margin: '4px 0 8px' }}>{b.description}</div>
+                        <div style={{ fontSize: 11, color: 'var(--nd-text-2)', marginBottom: 8 }}>
+                          {b.stats.size} stocks · {b.stats.sectors} sectors · avg win-prob {(b.stats.avgWinProbability * 100).toFixed(0)}%
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 3, marginBottom: 8 }}>
+                          {(open ? b.holdings : b.holdings.slice(0, 4)).map((h: any) => (
+                            <div key={h.symbol} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+                              <span style={{ fontFamily: 'monospace', fontWeight: 600, color: 'var(--nd-text-1)', minWidth: 96 }}>{h.symbol}</span>
+                              <span style={{ color: 'var(--nd-text-3)', fontSize: 10.5, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{h.sector}</span>
+                              <span style={{ color: 'var(--nd-green)', fontWeight: 700 }}>{h.weightPct}%</span>
+                            </div>
+                          ))}
+                          {b.holdings.length > 4 && (
+                            <button onClick={() => setOpenBasket(open ? null : b.id)} style={{ alignSelf: 'flex-start', background: 'none', border: 'none', color: 'var(--nd-blue)', cursor: 'pointer', fontSize: 11, padding: 0 }}>
+                              {open ? 'show less' : `+${b.holdings.length - 4} more`}
+                            </button>
+                          )}
+                        </div>
+                        <button onClick={() => askInvestBasket(b)} className="nd-btn"
+                          style={{ width: '100%', background: 'var(--nd-green)', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 0', fontSize: 12.5, fontWeight: 700, cursor: 'pointer' }}>
+                          Invest ₹{Number(basketAmt || 0).toLocaleString('en-IN')}
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
