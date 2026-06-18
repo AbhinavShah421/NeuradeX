@@ -1231,7 +1231,7 @@ async def evaluate_committed(entry_date: str) -> dict:
     if not items:
         return {"status": "empty", "date": entry_date}
 
-    graded, not_ready = [], False
+    graded, not_ready, any_partial = [], False, False
     async with httpx.AsyncClient(follow_redirects=True) as client:
         for w in items:
             candles = await _fetch_daily(client, w["symbol"])
@@ -1247,18 +1247,21 @@ async def evaluate_committed(entry_date: str) -> dict:
                     break
             if ei is None:
                 continue
-            if ei + COMMITTED_HORIZON >= len(candles):
-                not_ready = True
+            window = candles[ei + 1: ei + 1 + COMMITTED_HORIZON]   # 1..HORIZON bars available
+            if not window:
+                not_ready = True            # entry day itself — no forward bar yet
                 continue
             entry = candles[ei]["c"]
-            window = candles[ei + 1: ei + 1 + COMMITTED_HORIZON]
-            best = max((b["h"] for b in window), default=entry)
+            best = max(b["h"] for b in window)
             fwd = (best - entry) / entry * 100 if entry else 0.0
+            if len(window) < COMMITTED_HORIZON:
+                any_partial = True          # still maturing — will re-grade later
             graded.append({"symbol": w["symbol"], "action": "BUY",
                            "predicted_confidence": w.get("confidence"),
                            "predicted_signal_score": w.get("signal_score"),
                            "day_return_pct": round(fwd, 2), "realized_return_pct": round(fwd, 2),
-                           "correct": bool(fwd >= COMMITTED_TARGET_PCT), "trade_kind": "committed"})
+                           "correct": bool(fwd >= COMMITTED_TARGET_PCT), "trade_kind": "committed",
+                           "partial": len(window) < COMMITTED_HORIZON})
     if not graded:
         return {"status": "not_ready" if not_ready else "no_data", "date": entry_date}
 
@@ -1270,17 +1273,20 @@ async def evaluate_committed(entry_date: str) -> dict:
         "avg_realized_return_pct": round(sum(g["realized_return_pct"] for g in graded) / len(graded), 2),
         "target": SCAN_ACCURACY_TARGET, "meets_target": acc >= SCAN_ACCURACY_TARGET, "results": graded,
     })
-    await r.set(_COMMITTED_DONE_KEY.format(entry_date), "1", ex=86400 * 30)
-    await _tune_hc_params(accuracy=acc, n=len(graded), target=SCAN_ACCURACY_TARGET)
-    logger.info("committed grade %s: %d picks, accuracy %.0f%% over %dd", entry_date, len(graded), acc * 100, COMMITTED_HORIZON)
-    return {"status": "ok", "date": entry_date, "accuracy": acc, "picks": len(graded)}
+    if not any_partial:                     # only finalise once the full window matured
+        await r.set(_COMMITTED_DONE_KEY.format(entry_date), "1", ex=86400 * 30)
+        await _tune_hc_params(accuracy=acc, n=len(graded), target=SCAN_ACCURACY_TARGET)
+    logger.info("committed grade %s: %d picks, accuracy %.0f%% (%s)", entry_date, len(graded), acc * 100,
+                "partial" if any_partial else f"{COMMITTED_HORIZON}d")
+    return {"status": "ok", "date": entry_date, "accuracy": acc, "picks": len(graded), "partial": any_partial}
 
 
 async def grade_due_committed() -> None:
-    """Grade committed snapshots whose COMMITTED_HORIZON has elapsed."""
+    """Grade committed snapshots — recent days on a partial forward window (so the
+    line reaches today), older ones finalised once the full horizon has elapsed."""
     r = await _get_redis()
     today = _ist_now()
-    for back in range(COMMITTED_HORIZON, COMMITTED_HORIZON + 12):
+    for back in range(1, COMMITTED_HORIZON + 12):     # from yesterday onward (partial→full)
         d = (today - timedelta(days=back)).strftime("%Y-%m-%d")
         if await r.get(_COMMITTED_DONE_KEY.format(d)) or not await r.get(f"{_PREMARKET_KEY}:{d}"):
             continue
@@ -1377,7 +1383,7 @@ async def backfill_committed(days: int = 30, limit: int = 400) -> dict:
             await asyncio.sleep(FETCH_DELAY)
             if len(candles) < 40:
                 continue
-            for i in range(35, len(candles) - COMMITTED_HORIZON):     # leave room for the forward window
+            for i in range(35, len(candles) - 1):     # need ≥1 forward bar (partial window OK near today)
                 bd = _bar_date(candles[i])
                 if not bd or bd < cutoff:
                     continue
@@ -1387,9 +1393,12 @@ async def backfill_committed(days: int = 30, limit: int = 400) -> dict:
                 entry = candles[i]["c"]
                 if entry <= 0:
                     continue
-                window = candles[i + 1: i + 1 + COMMITTED_HORIZON]
-                best = max((b["h"] for b in window), default=entry)            # best close-to-high in window
+                window = candles[i + 1: i + 1 + COMMITTED_HORIZON]     # 1..HORIZON bars (fewer near today)
+                if not window:
+                    continue
+                best = max(b["h"] for b in window)
                 fwd = (best - entry) / entry * 100
+                full = len(window) >= COMMITTED_HORIZON
                 by_date.setdefault(bd, []).append({
                     "symbol": sym, "action": "BUY",
                     "predicted_confidence": res.get("confidence"),
@@ -1397,7 +1406,7 @@ async def backfill_committed(days: int = 30, limit: int = 400) -> dict:
                     "day_return_pct": round(fwd, 2),
                     "realized_return_pct": round(fwd, 2),
                     "correct": bool(fwd >= COMMITTED_TARGET_PCT),
-                    "committed": True, "trade_kind": "committed",
+                    "committed": True, "trade_kind": "committed", "partial": not full,
                 })
 
     graded_days = 0
