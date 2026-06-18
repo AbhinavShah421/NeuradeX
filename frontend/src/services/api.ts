@@ -317,6 +317,31 @@ class ApiService {
     return response.data;
   }
 
+  // ── Delivery (multi-day) paper-trading autopilot ──
+  async deliveryPortfolios(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/delivery-paper/portfolios', { timeout: 20000 });
+    return response.data;
+  }
+  async createDeliveryPortfolio(body: { name?: string; capital?: number; maxPositions?: number; targetPct?: number; stopPct?: number }): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/delivery-paper/portfolios', {
+      name: body.name, capital: body.capital, max_positions: body.maxPositions,
+      target_pct: body.targetPct, stop_pct: body.stopPct,
+    });
+    return response.data;
+  }
+  async deleteDeliveryPortfolio(id: string): Promise<ApiResponse<any>> {
+    const response = await this.api.delete(`/api/delivery-paper/portfolios/${id}`);
+    return response.data;
+  }
+  async enableDeliveryPaper(enabled: boolean): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/delivery-paper/enable', { enabled }, { timeout: 40000 });
+    return response.data;
+  }
+  async deliveryPaperTick(): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/delivery-paper/tick', {}, { timeout: 40000 });
+    return response.data;
+  }
+
   // ── Mutual Funds (real NAV/returns via AMFI/mfapi) ──
   async mfSearch(q: string): Promise<ApiResponse<any>> {
     const response = await this.api.get('/api/mutual-funds/search', { params: { q }, timeout: 25000 });
