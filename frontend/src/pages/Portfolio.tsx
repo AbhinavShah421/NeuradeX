@@ -5,7 +5,7 @@ import { Portfolio, Performance, PortfolioStock } from '../types';
 
 type SortKey = keyof Pick<PortfolioStock, 'symbol' | 'quantity' | 'purchasePrice' | 'currentPrice' | 'value' | 'gain' | 'gainPercent'>;
 type SortDir = 'asc' | 'desc';
-type Tab = 'holdings' | 'performance' | 'risk' | 'optimize' | 'invest' | 'sectors' | 'funds' | 'health' | 'planner' | 'tax' | 'advisor';
+type Tab = 'holdings' | 'performance' | 'risk' | 'optimize' | 'invest' | 'sectors' | 'funds' | 'health' | 'planner' | 'tax' | 'advisor' | 'risklab';
 
 const inr = (v: number) =>
   v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -243,8 +243,10 @@ const PortfolioPage: React.FC = () => {
       apiService.portfolioBenchmark().then(r => setBench((r as any).data)).catch(() => {});
       apiService.portfolioAdvisor().then(r => setAdvisor((r as any).data)).catch(() => {});
     }
+    if (activeTab === 'risklab') apiService.riskLab().then(r => setRiskLab((r as any).data)).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
+  const [riskLab, setRiskLab] = useState<any>(null);
 
   const runPlan = async () => {
     setPlanning(true);
@@ -409,6 +411,7 @@ const PortfolioPage: React.FC = () => {
     { id: 'optimize',    label: 'AI Optimize', icon: 'auto_awesome' },
     { id: 'invest',      label: 'AI Invest',   icon: 'savings' },
     { id: 'advisor',     label: 'AI Advisor',  icon: 'support_agent' },
+    { id: 'risklab',     label: 'AI Risk Lab', icon: 'science' },
     { id: 'health',      label: 'Health Score', icon: 'health_and_safety' },
     { id: 'sectors',     label: 'Sector Exposure', icon: 'donut_large' },
     { id: 'funds',       label: 'AI Funds',    icon: 'inventory_2' },
@@ -1198,6 +1201,83 @@ const PortfolioPage: React.FC = () => {
                     </div>
                   ))}
               </div>
+            </div>
+          )}
+
+          {/* ── AI Risk Lab ── */}
+          {activeTab === 'risklab' && (
+            <div style={{ padding: '18px 20px' }}>
+              {!riskLab ? <div style={{ textAlign: 'center', padding: 40, color: 'var(--nd-text-3)', fontSize: 13 }}>Running risk analytics on your holdings…</div>
+                : riskLab.note ? <div style={{ textAlign: 'center', padding: 40, color: 'var(--nd-text-3)', fontSize: 13 }}>{riskLab.note}</div>
+                : (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 420px), 1fr))', gap: 16 }}>
+                    {/* Diversification */}
+                    <div className="nd-card" style={{ padding: '14px 18px', minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6 }}>True diversification (correlation)</div>
+                      {riskLab.diversification?.score == null ? <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>{riskLab.diversification?.note}</div> : (
+                        <>
+                          <div style={{ fontSize: 28, fontWeight: 700, color: riskLab.diversification.score >= 60 ? 'var(--nd-green)' : riskLab.diversification.score >= 40 ? '#f59e0b' : 'var(--nd-red)' }}>{riskLab.diversification.score}<span style={{ fontSize: 13, color: 'var(--nd-text-3)' }}>/100</span></div>
+                          <div style={{ fontSize: 11.5, color: 'var(--nd-text-3)', marginBottom: 8 }}>avg correlation {riskLab.diversification.avgCorrelation} · {riskLab.diversification.note}</div>
+                          {(riskLab.diversification.correlatedPairs ?? []).length > 0 && <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginBottom: 3 }}>Move together (hidden concentration):</div>}
+                          {(riskLab.diversification.correlatedPairs ?? []).map((p: any, i: number) => (
+                            <div key={i} style={{ fontSize: 12, padding: '2px 0' }}><strong>{p.a}</strong> ↔ <strong>{p.b}</strong> <span style={{ color: '#f59e0b', fontWeight: 700 }}>{p.corr}</span></div>
+                          ))}
+                        </>
+                      )}
+                    </div>
+                    {/* Stress test */}
+                    <div className="nd-card" style={{ padding: '14px 18px', minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>Scenario stress-test</div>
+                      {(riskLab.stress?.scenarios ?? []).map((s: any, i: number) => (
+                        <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, padding: '4px 0', borderBottom: '1px solid var(--nd-border)' }}>
+                          <span style={{ color: 'var(--nd-text-2)' }}>{s.name}</span>
+                          <span style={{ color: 'var(--nd-red)', fontWeight: 700 }}>{s.impactPct}% · ₹{inr(Math.abs(s.impactValue))}</span>
+                        </div>
+                      ))}
+                      {(riskLab.stress?.fragile ?? []).length > 0 && (
+                        <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginTop: 8 }}>Most fragile: {riskLab.stress.fragile.slice(0, 3).map((f: any) => `${f.symbol} (β${f.beta})`).join(', ')}</div>
+                      )}
+                    </div>
+                    {/* Smart exits */}
+                    <div className="nd-card" style={{ padding: '14px 18px', minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>AI smart exits (ATR-based)</div>
+                      <div style={{ overflowX: 'auto' }}>
+                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                          <thead><tr style={{ color: 'var(--nd-text-3)', fontSize: 10.5, textAlign: 'right' }}>
+                            <th style={{ textAlign: 'left', padding: '4px 6px' }}>Stock</th><th>Now</th><th>Stop</th><th>Target</th><th>Trail</th>
+                          </tr></thead>
+                          <tbody>
+                            {(riskLab.smartExits ?? []).map((e: any) => (
+                              <tr key={e.symbol} style={{ borderTop: '1px solid var(--nd-border)', background: e.exitFlag ? 'rgba(239,68,68,0.10)' : 'transparent' }}>
+                                <td style={{ padding: '4px 6px', fontWeight: 600 }}>{e.symbol}{e.exitFlag ? ' ⚠' : ''}</td>
+                                <td style={{ textAlign: 'right' }}>₹{e.current}</td>
+                                <td style={{ textAlign: 'right', color: 'var(--nd-red)' }}>₹{e.stop}</td>
+                                <td style={{ textAlign: 'right', color: 'var(--nd-green)' }}>₹{e.target}</td>
+                                <td style={{ textAlign: 'right', color: 'var(--nd-text-3)' }}>{e.trailPct}%</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      <div style={{ fontSize: 10.5, color: 'var(--nd-text-3)', marginTop: 6 }}>⚠ = AI scan flags a SELL/downgrade. Stops are 2×ATR below price.</div>
+                    </div>
+                    {/* Dividends */}
+                    <div className="nd-card" style={{ padding: '14px 18px', minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6 }}>Dividend income forecast</div>
+                      <div style={{ display: 'flex', gap: 18, marginBottom: 8 }}>
+                        <div><div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>Annual income</div><div style={{ fontSize: 18, fontWeight: 700, color: 'var(--nd-green)' }}>₹{inr(riskLab.dividends?.annualIncome ?? 0)}</div></div>
+                        <div><div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>Portfolio yield</div><div style={{ fontSize: 18, fontWeight: 700 }}>{riskLab.dividends?.portfolioYieldPct ?? 0}%</div></div>
+                      </div>
+                      {(riskLab.dividends?.payers ?? []).slice(0, 6).map((p: any) => (
+                        <div key={p.symbol} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, padding: '3px 0', borderBottom: '1px solid var(--nd-border)' }}>
+                          <span style={{ fontWeight: 600 }}>{p.symbol}</span>
+                          <span style={{ color: 'var(--nd-text-2)' }}>₹{inr(p.annualIncome)} · {p.yieldPct}% yld</span>
+                        </div>
+                      ))}
+                      {!(riskLab.dividends?.payers ?? []).length && <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>No dividend payers in the book.</div>}
+                    </div>
+                  </div>
+                )}
             </div>
           )}
 

@@ -312,6 +312,10 @@ class ApiService {
     const response = await this.api.get('/api/portfolio/advisor', { timeout: 90000 });
     return response.data;
   }
+  async riskLab(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/portfolio/risk-lab', { timeout: 90000 });
+    return response.data;
+  }
 
   // ── Mutual Funds (real NAV/returns via AMFI/mfapi) ──
   async mfSearch(q: string): Promise<ApiResponse<any>> {
