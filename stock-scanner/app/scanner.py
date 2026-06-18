@@ -276,17 +276,30 @@ TOP_N          = int(os.getenv("SCAN_TOP_N", "15"))
 # The intraday "Best Intraday" watchlist (and its post-close signal score) is the
 # top few MOST-CONVICTED picks only — grade-A/B BUYs, capped small. Grading fewer,
 # higher-conviction names lifts the signal score (precision over coverage).
-WATCHLIST_MAX  = int(os.getenv("SCAN_WATCHLIST_MAX", "6"))
+WATCHLIST_MAX  = int(os.getenv("SCAN_WATCHLIST_MAX", "6"))     # default; runtime-overridable
+_WATCHLIST_MAX_KEY = "ai_engine:watchlist_max"                # set from the UI
 
 
-def _top_watchlist(cands: list[dict], grade_rank: dict) -> list[dict]:
-    """Most-convicted intraday picks: grade-A/B BUYs, ranked, capped at WATCHLIST_MAX
+async def _watchlist_max() -> int:
+    """Runtime intraday watchlist size (UI-configurable via Redis), else the env
+    default. Bounded to a sensible 3–25."""
+    try:
+        raw = await (await _get_redis()).get(_WATCHLIST_MAX_KEY)
+        if raw:
+            return max(3, min(25, int(raw)))
+    except Exception:
+        pass
+    return WATCHLIST_MAX
+
+
+def _top_watchlist(cands: list[dict], grade_rank: dict, wl_max: int = WATCHLIST_MAX) -> list[dict]:
+    """Most-convicted intraday picks: grade-A/B BUYs, ranked, capped at `wl_max`
     (falls back to the best available if too few high-grade BUYs exist)."""
     ranked = sorted(cands, key=lambda r: (r.get("action") != "BUY",
                     grade_rank.get(r.get("grade", "D"), 3),
                     -r.get("rank_score", r.get("signal_score", 0.0))))
     hi = [c for c in ranked if c.get("action") == "BUY" and c.get("grade") in ("A", "B")]
-    return (hi or ranked)[:WATCHLIST_MAX]
+    return (hi or ranked)[:max(1, wl_max)]
 
 # Delivery-fitness gates — a stock must clear these to be a multi-week swing hold.
 # Unlike intraday (which fishes for high volatility), delivery wants an *orderly*
@@ -782,6 +795,7 @@ async def scan_once(phase: str = "intraday") -> dict:
 
     calib = await _load_calibration()
     await _load_pattern_weights()        # pull the pattern model's weights for local scoring
+    wl_max = await _watchlist_max()      # runtime-configurable intraday watchlist size
     universe = await _load_universe()
     total = len(universe)
     _state["universe"] = total
@@ -792,7 +806,7 @@ async def scan_once(phase: str = "intraday") -> dict:
 
     def _progress_payload(scanning: bool) -> dict:
         """Rank what we have so far so the UI updates live during a long sweep."""
-        wl = _top_watchlist(candidates, _grade_rank)
+        wl = _top_watchlist(candidates, _grade_rank, wl_max)
         dl = sorted(delivery_candidates, key=lambda r: (_grade_rank.get(r.get("grade", "D"), 3),
                     -r.get("delivery_score", 0.0)))[:DELIVERY_TOP_N]
         for d in dl:
@@ -876,7 +890,7 @@ async def scan_once(phase: str = "intraday") -> dict:
     # Rank: BUY calls first, then by grade (A→D), then by composite rank score.
     _grade_rank = {"A": 0, "B": 1, "C": 2, "D": 3}
     candidates.sort(key=lambda r: (r["action"] != "BUY", _grade_rank.get(r.get("grade", "D"), 3), -r["rank_score"]))
-    watchlist = _top_watchlist(candidates, _grade_rank)   # most-convicted few, graded post-close
+    watchlist = _top_watchlist(candidates, _grade_rank, wl_max)   # most-convicted few, graded post-close
 
     # High-conviction tier: tag every candidate the system would *commit* to, given
     # the current adaptive bar. These are the only picks measured against the 90%

@@ -805,6 +805,14 @@ class ApiService {
     const response = await this.api.get('/api/ai-engine/ranked', { params: { limit }, timeout: 20000 });
     return response.data;
   }
+  async getWatchlistConfig(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/ai-engine/watchlist-config');
+    return response.data;
+  }
+  async setWatchlistConfig(max: number): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/ai-engine/watchlist-config', { max });
+    return response.data;
+  }
   async scanDiff(limit = 60): Promise<ApiResponse<any>> {
     const response = await this.api.get('/api/ai-engine/scan-diff', { params: { limit }, timeout: 20000 });
     return response.data;
