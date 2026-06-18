@@ -25,14 +25,30 @@ loop**, the **AI watchlist + autopilot**, and **Pattern Memory**.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/ai-engine/watchlist` | Live ranked AI watchlist (read from Redis, produced by the [stock-scanner](../microservices/stock-scanner.md)) |
-| `POST` | `/api/ai-engine/watchlist/scan` | Proxy a manual full sweep to the scanner service |
+| `GET` | `/api/ai-engine/watchlist` | Live ranked AI watchlist (`items` = intraday, `delivery` = multi-week swing picks), read from Redis, produced by the [stock-scanner](../microservices/stock-scanner.md) |
+| `POST` | `/api/ai-engine/watchlist/scan` | Proxy a manual full-market sweep to the scanner service |
+| `GET` | `/api/ai-engine/scan-status` | **Centralized scan status** — `{scanning, scanned, universe, candidates, last_scan}`. Single source of truth so a rescan started on one page disables rescan on all pages |
+| `GET` | `/api/ai-engine/ranked?limit=N` | Full **ranked board** of AI-scanned stocks (top N, default 100) with per-stock evidence + news sentiment — backs the Predictions rankings page |
 | `GET` | `/api/ai-engine/autopilot` | Combined autopilot status — `paper` + `backtest` (proxied from autopilot-service) |
 | `POST` | `/api/ai-engine/autopilot` | Enable / disable a mode (`{ "mode": "paper"\|"backtest", "enabled": true }`) |
 | `POST` | `/api/ai-engine/autopilot/reset-cursor` | Reset the backtest next trade date to the last trading day before today (stops the in-flight queue, keeps training history) |
 | `GET` | `/api/ai-engine/llm-status` | Active LLM provider (Anthropic vs Ollama), model, and a live probe |
 | `GET` | `/api/ai-engine/scan-evaluation` | Latest post-market signal-score grade + per-day accuracy trend |
 | `POST` | `/api/ai-engine/scan-feedback` | (Internal) the scanner pushes its post-market grade here → persisted to `scan_evaluations` |
+
+### AI loss-learning (why trades lose + lessons)
+
+The system already learns *quantitatively* (per-agent weight updates, scanner
+calibration, and the ensemble's pattern-memory veto). These endpoints add the
+*explanatory* layer: an LLM post-mortem on each losing trade, aggregated into
+reusable **lessons** that are injected into the AI's decision prompts. See
+[Learning & Pattern Memory](../ai-engine/learning-loop.md#ai-loss-learning).
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/ai-engine/loss-learning/run` | Analyse recent losing trades (from feedback-service) that lack a post-mortem; the LLM explains each (`root_cause`, `failure_mode`, `factors`, `lesson`, `avoid_when`), stores it in `trade_postmortems`, and refreshes the aggregated lessons (rule-based fallback if the LLM is unavailable) |
+| `GET` | `/api/ai-engine/loss-learning/postmortems?limit=N` | Recent per-trade loss post-mortems |
+| `GET` | `/api/ai-engine/loss-learning/lessons` | Aggregated lessons — recurring failure modes ranked by occurrences + avg loss; cached to `ai_engine:active_lessons` and prepended to the AI analysis prompt |
 
 ### Pattern Memory
 

@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone, timedelta
 
 import httpx
@@ -33,6 +34,7 @@ WATCHLIST_KEY = "ai_engine:watchlist"
 
 # Redis flags / state (shared with the backend so the UI toggle takes effect)
 PAPER_FLAG     = "ai_engine:autopilot_enabled"
+PAPER_TIMING   = "ai_engine:autopilot_paper_timing"   # "normal" | "aggressive"
 BACKTEST_FLAG  = "ai_engine:autopilot_backtest_enabled"
 BACKTEST_STATE = "ai_engine:autopilot_backtest_state"
 
@@ -128,6 +130,23 @@ async def set_mode(mode: str, enabled: bool) -> None:
         logger.warning("set_mode failed: %s", exc)
 
 
+async def _paper_timing() -> str:
+    """Entry-timing mode for autopilot paper sessions: 'normal' | 'aggressive'."""
+    try:
+        r = await _get_redis()
+        return "aggressive" if (await r.get(PAPER_TIMING)) == "aggressive" else "normal"
+    except Exception:
+        return "normal"
+
+
+async def set_paper_timing(mode: str) -> None:
+    try:
+        r = await _get_redis()
+        await r.set(PAPER_TIMING, "aggressive" if mode == "aggressive" else "normal", ex=86400 * 30)
+    except Exception as exc:
+        logger.warning("set_paper_timing failed: %s", exc)
+
+
 # ── Backend HTTP ──────────────────────────────────────────────────────────────
 
 async def _watchlist_symbols() -> list[str]:
@@ -136,6 +155,21 @@ async def _watchlist_symbols() -> list[str]:
         raw = await r.get(WATCHLIST_KEY)
         if raw:
             return [it["symbol"] for it in json.loads(raw).get("items", []) if it.get("symbol")]
+    except Exception:
+        pass
+    return []
+
+
+async def _committed_symbols() -> list[str]:
+    """High-conviction (committed) picks only — the selective tier the system
+    actually trades. Empty means the system abstains for now (no committed setup)."""
+    try:
+        r = await _get_redis()
+        raw = await r.get(WATCHLIST_KEY)
+        if raw:
+            data = json.loads(raw)
+            comm = data.get("committed") or [it for it in data.get("items", []) if it.get("committed")]
+            return [it["symbol"] for it in comm if it.get("symbol")]
     except Exception:
         pass
     return []
@@ -214,9 +248,10 @@ async def reset_cursor() -> dict:
 async def _do_paper_tick() -> None:
     if not _market_open():
         return
-    syms = await _watchlist_symbols()
+    # Paper trading acts ONLY on committed high-conviction picks (precision tier).
+    syms = await _committed_symbols()
     if not syms:
-        return
+        return                              # abstain — no high-conviction setup
     sessions = await _list_sessions()
     running = {s["symbol"] for s in sessions if s.get("status") == "running" and s.get("mode") == "paper"}
     today = _today()
@@ -224,6 +259,7 @@ async def _do_paper_tick() -> None:
     raw = await r.get(_paper_started_key(today))
     started = set(json.loads(raw)) if raw else set()
     slots = PAPER_MAX - len([1 for s in sessions if s.get("status") == "running" and s.get("mode") == "paper"])
+    timing = await _paper_timing()
 
     for sym in syms:
         if slots <= 0:
@@ -231,7 +267,7 @@ async def _do_paper_tick() -> None:
         if sym in running or sym in started:
             continue
         sid = await _start_session({"mode": "paper", "symbol": sym, "capital": CAPITAL, "speed": 1,
-                                    "max_hold_minutes": MAX_HOLD_MIN})
+                                    "max_hold_minutes": MAX_HOLD_MIN, "timing_mode": timing})
         if sid:
             started.add(sym)
             slots -= 1
@@ -332,6 +368,27 @@ async def _do_backtest_step() -> None:
                "last_completed": done_date, "days_back": days_back})
     await _save_bt_state(st)
     logger.info("backtest autopilot finished %s → next %s (day %d)", done_date, next_cursor, st["completed_days"])
+    # Backtesting also drives the dedicated pattern-recognition model: each
+    # completed day, retrain it on patterns only so the recogniser keeps learning.
+    await _train_pattern_model()
+
+
+_last_pattern_train = 0.0
+
+
+async def _train_pattern_model() -> None:
+    """Trigger a pattern-only training run on the backend (debounced ~30 min)."""
+    global _last_pattern_train
+    if time.time() - _last_pattern_train < 1800:
+        return
+    _last_pattern_train = time.time()
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as c:
+            await c.post(f"{BACKEND_URL}/api/ai-engine/pattern-model/train",
+                         json={"lookback_days": 365, "horizon": 3, "stride": 1})
+        logger.info("backtest autopilot kicked pattern-model training")
+    except Exception as exc:
+        logger.debug("pattern-model train kick failed: %s", exc)
 
 
 # ── Loops ─────────────────────────────────────────────────────────────────────
@@ -398,13 +455,17 @@ async def status() -> dict:
     bt_running    = [s for s in sessions if s.get("status") == "running" and s.get("mode") == "replay"]
     st  = await _load_bt_state()
     syms = await _watchlist_symbols()
+    committed = await _committed_symbols()
     return {
         "paper": {
             "enabled": await _flag(PAPER_FLAG),
             "market_open": _market_open(),
+            "timing_mode": await _paper_timing(),
             "running": len(paper_running),
             "max_concurrent": PAPER_MAX,
             "watchlist_size": len(syms),
+            "committed_size": len(committed),
+            "source": "committed",
             "sessions": [{"id": s["id"], "symbol": s["symbol"],
                           "pnl": s.get("pnl", 0.0)} for s in paper_running],
         },

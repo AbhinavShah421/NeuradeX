@@ -904,3 +904,636 @@ async def create_alert(alert: Alert):
             "created_at": datetime.now().isoformat(),
         },
     }
+
+
+# ── AI Sector Exposure Scanner + Optimizer ────────────────────────────────────
+# Maps holdings to sectors, scores each sector with the live AI scan, and
+# compares the book's sector weights against an AI-favoured target.
+
+def _sector_of(symbol: str) -> str:
+    from app.utils.sector_map import sector_of
+    return sector_of(symbol)
+
+
+async def _ranked_items() -> list[dict]:
+    """The live AI ranked board (full universe scan), each item sector-tagged."""
+    try:
+        from app.utils.redis_client import cache_get
+        raw = await cache_get("ai_engine:ranked")
+        data = json.loads(raw) if raw else {}
+        items = data.get("items") or []
+    except Exception:
+        items = []
+    for it in items:
+        it["sector"] = _sector_of(it.get("symbol", ""))
+    return items
+
+
+async def _sector_ai_scores() -> dict:
+    """Aggregate the AI scan by sector → a 0..1 AI score per sector plus its best names."""
+    items = await _ranked_items()
+    agg: dict[str, dict] = {}
+    for it in items:
+        sec = it.get("sector", "Other")
+        wp = float(it.get("win_probability") or 0.0)
+        mom = float((it.get("metrics") or {}).get("momentum_pct") or 0.0)
+        a = agg.setdefault(sec, {"n": 0, "buys": 0, "wp_sum": 0.0, "mom_sum": 0.0, "names": []})
+        a["n"] += 1
+        if it.get("action") == "BUY":
+            a["buys"] += 1
+        a["wp_sum"] += wp
+        a["mom_sum"] += mom
+        a["names"].append({
+            "symbol": it.get("symbol"), "name": it.get("name"), "grade": it.get("grade"),
+            "action": it.get("action"), "win_probability": wp, "price": it.get("price"),
+            "momentum_pct": round(mom, 2),
+        })
+    out: dict[str, dict] = {}
+    for sec, a in agg.items():
+        n = max(1, a["n"])
+        buy_ratio = a["buys"] / n
+        avg_wp = a["wp_sum"] / n
+        score = round(avg_wp * (0.5 + 0.5 * buy_ratio), 4)
+        top = sorted([x for x in a["names"] if x["action"] == "BUY"],
+                     key=lambda x: -x["win_probability"])[:5]
+        out[sec] = {"score": score, "count": a["n"], "buys": a["buys"],
+                    "avg_win_probability": round(avg_wp, 4),
+                    "avg_momentum_pct": round(a["mom_sum"] / n, 2), "top": top}
+    return out
+
+
+@router.get("/sector-exposure")
+async def sector_exposure():
+    """AI sector-exposure scanner + optimizer: the book's current sector weights
+    vs an AI-favoured target, with over/under-exposure and rebalance moves."""
+    from app.utils.sector_map import ensure_loaded
+    await ensure_loaded()
+    pf = (await get_portfolio()).get("data", {})
+    stocks = pf.get("stocks", [])
+    tv = float(pf.get("total_value") or 0.0) or 1.0
+    for s in stocks:
+        s["sector"] = _sector_of(s.get("symbol", ""))
+
+    cur_val: dict[str, float] = {}
+    holders: dict[str, list] = {}
+    for s in stocks:
+        sec = s["sector"]
+        cur_val[sec] = cur_val.get(sec, 0.0) + float(s.get("value") or 0.0)
+        holders.setdefault(sec, []).append(s)
+    current_pct = {sec: v / tv * 100 for sec, v in cur_val.items()}
+
+    ai = await _sector_ai_scores()
+    scored = {sec: a["score"] for sec, a in ai.items() if a["buys"] > 0 and sec != "Other"}
+    top_secs = sorted(scored, key=lambda s: -scored[s])[:8]
+    tot = sum(scored[s] for s in top_secs) or 1.0
+    target_pct = {sec: round(scored[sec] / tot * 100, 1) for sec in top_secs}
+
+    rows = []
+    for sec in sorted(set(current_pct) | set(target_pct),
+                      key=lambda s: -(current_pct.get(s, 0) + target_pct.get(s, 0))):
+        cur = round(current_pct.get(sec, 0.0), 1)
+        tgt = round(target_pct.get(sec, 0.0), 1)
+        delta = round(cur - tgt, 1)
+        status = "overweight" if delta >= 8 else "underweight" if delta <= -8 else "balanced"
+        a = ai.get(sec, {})
+        rows.append({
+            "sector": sec, "current_pct": cur, "target_pct": tgt, "delta": delta, "status": status,
+            "ai_score": a.get("score"), "ai_avg_win_probability": a.get("avg_win_probability"),
+            "holdings": [s["symbol"] for s in holders.get(sec, [])],
+            "holding_count": len(holders.get(sec, [])),
+            "ai_top": (a.get("top") or [])[:3],
+        })
+
+    hhi = sum((p / 100) ** 2 for p in current_pct.values()) or 0.0
+    top_sector, top_pct = max(current_pct.items(), key=lambda x: x[1]) if current_pct else ("—", 0.0)
+
+    suggestions = []
+    for r in rows:
+        if r["status"] == "overweight" and r["holding_count"] > 0:
+            weakest = min(holders[r["sector"]], key=lambda s: s.get("gain_percent", 0))
+            suggestions.append({
+                "action": "TRIM", "sector": r["sector"], "from_pct": r["current_pct"], "to_pct": r["target_pct"],
+                "reason": f"{r['sector']} is {r['delta']:+.0f}% vs the AI target — reduce concentration.",
+                "stock": weakest["symbol"],
+            })
+        elif r["status"] == "underweight" and r["ai_top"]:
+            t = r["ai_top"][0]
+            suggestions.append({
+                "action": "ADD", "sector": r["sector"], "from_pct": r["current_pct"], "to_pct": r["target_pct"],
+                "reason": f"AI favours {r['sector']} (score {r['ai_score']}) but the book is {abs(r['delta']):.0f}% light.",
+                "stock": t.get("symbol"), "stock_name": t.get("name"),
+                "win_probability": t.get("win_probability"), "price": t.get("price"),
+            })
+    suggestions.sort(key=lambda x: 0 if x["action"] == "ADD" else 1)
+
+    warnings = []
+    if top_pct > 40:
+        warnings.append(f"{top_sector} is {top_pct:.0f}% of the book — heavy single-sector concentration.")
+    if len(current_pct) <= 2 and stocks:
+        warnings.append("Spread across very few sectors — diversification is low.")
+
+    return {"status": "success", "data": {
+        "total_value": round(tv, 2),
+        "sectors": rows,
+        "current": {k: round(v, 1) for k, v in sorted(current_pct.items(), key=lambda x: -x[1])},
+        "target": target_pct,
+        "effective_sectors": round(1 / hhi, 1) if hhi else 0,
+        "top_sector": top_sector, "top_sector_pct": round(top_pct, 1),
+        "ai_favoured": [{"sector": s, "score": ai[s]["score"]} for s in top_secs],
+        "suggestions": suggestions[:8],
+        "warnings": warnings,
+        "updated_at": datetime.now().isoformat(),
+    }}
+
+
+# ── AI Mutual-Fund-style Baskets (built by scanning the AI ranked board) ───────
+
+def _weight(holdings: list[dict], key="win_probability", cap=0.25) -> list[dict]:
+    raw = {h["symbol"]: max(0.05, float(h.get(key) or 0.5)) for h in holdings}
+    tot = sum(raw.values()) or 1.0
+    w = {k: min(cap, v / tot) for k, v in raw.items()}
+    s = sum(w.values()) or 1.0
+    for h in holdings:
+        h["weight_pct"] = round(w[h["symbol"]] / s * 100, 1)
+    return holdings
+
+
+def _basket_stats(holdings: list[dict]) -> dict:
+    secs = sorted({h["sector"] for h in holdings})
+    avg_wp = round(sum(h["win_probability"] for h in holdings) / max(1, len(holdings)), 3)
+    return {"size": len(holdings), "sectors": len(secs), "sector_list": secs, "avg_win_probability": avg_wp}
+
+
+async def _basket_pool() -> list[dict]:
+    items = await _ranked_items()
+    pool, seen = [], set()
+    for it in items:
+        sym = (it.get("symbol") or "").upper()
+        if (sym and sym not in seen and it.get("grade") in ("A", "B")
+                and it.get("action") == "BUY" and float(it.get("price") or 0) > 0):
+            seen.add(sym)
+            pool.append({
+                "symbol": sym, "name": it.get("name"), "sector": it.get("sector", "Other"),
+                "grade": it.get("grade"), "win_probability": float(it.get("win_probability") or 0.5),
+                "price": float(it.get("price")),
+                "momentum_pct": float((it.get("metrics") or {}).get("momentum_pct") or 0.0),
+            })
+    return pool
+
+
+async def _build_baskets() -> list[dict]:
+    pool = await _basket_pool()
+    if not pool:
+        return []
+    gr = {"A": 0, "B": 1}
+    baskets: list[dict] = []
+
+    top = sorted(pool, key=lambda x: (gr.get(x["grade"], 2), -x["win_probability"]))[:8]
+    baskets.append({"id": "top", "name": "AI Top Picks", "risk": "Moderate",
+                    "theme": "Highest-conviction A/B BUYs across the market",
+                    "description": "The strongest names the AI scan rates right now, conviction-weighted.",
+                    "holdings": _weight([dict(x) for x in top]), "stats": _basket_stats(top)})
+
+    by_sec: dict[str, dict] = {}
+    for x in sorted(pool, key=lambda x: -x["win_probability"]):
+        if x["sector"] != "Other" and x["sector"] not in by_sec:
+            by_sec[x["sector"]] = x
+    leaders = sorted(by_sec.values(), key=lambda x: -x["win_probability"])[:8]
+    if leaders:
+        baskets.append({"id": "sector_leaders", "name": "Sector Leaders", "risk": "Low–Moderate",
+                        "theme": "One leader from each strong sector",
+                        "description": "Maximum sector diversification — the top AI pick in each leading sector.",
+                        "holdings": _weight([dict(x) for x in leaders], cap=0.20), "stats": _basket_stats(leaders)})
+
+    mom = sorted([x for x in pool if x["momentum_pct"] > 0], key=lambda x: -x["momentum_pct"])[:8]
+    if mom:
+        baskets.append({"id": "momentum", "name": "Momentum Movers", "risk": "High",
+                        "theme": "Strongest price momentum among AI BUYs",
+                        "description": "Higher-octane: the fastest-rising AI BUY names, momentum-weighted.",
+                        "holdings": _weight([dict(x) for x in mom], key="momentum_pct", cap=0.25),
+                        "stats": _basket_stats(mom)})
+
+    bal: list[dict] = []
+    per_sec: dict[str, int] = {}
+    for x in sorted(pool, key=lambda x: (gr.get(x["grade"], 2), -x["win_probability"])):
+        if x["sector"] == "Other":
+            continue
+        if per_sec.get(x["sector"], 0) < 2 and len(bal) < 10:
+            bal.append(x); per_sec[x["sector"]] = per_sec.get(x["sector"], 0) + 1
+    if bal:
+        baskets.append({"id": "balanced", "name": "Balanced Multi-Sector", "risk": "Low",
+                        "theme": "Diversified across many sectors (≤2 per sector)",
+                        "description": "A fund-like core: spread across sectors to smooth single-name and sector risk.",
+                        "holdings": _weight([dict(x) for x in bal], cap=0.15), "stats": _basket_stats(bal)})
+
+    try:
+        from app.utils.redis_client import cache_get
+        wl = json.loads(await cache_get("ai_engine:watchlist") or "{}")
+        comm = wl.get("committed") or []
+    except Exception:
+        comm = []
+    hc = []
+    for it in comm:
+        if float(it.get("price") or 0) > 0:
+            hc.append({"symbol": it.get("symbol"), "name": it.get("name"),
+                       "sector": _sector_of(it.get("symbol", "")), "grade": it.get("grade"),
+                       "win_probability": float(it.get("win_probability") or 0.5), "price": float(it.get("price")),
+                       "momentum_pct": float((it.get("metrics") or {}).get("momentum_pct") or 0.0)})
+    if hc:
+        baskets.append({"id": "high_conviction", "name": "High-Conviction", "risk": "Concentrated",
+                        "theme": "Only the committed, multi-signal-confirmed picks",
+                        "description": "The few names that clear every gate (the tier the autopilot paper-trades).",
+                        "holdings": _weight([dict(x) for x in hc], cap=0.40), "stats": _basket_stats(hc)})
+    return baskets
+
+
+@router.get("/fund-baskets")
+async def fund_baskets():
+    """AI-scanned mutual-fund-style baskets — themed, weighted stock baskets built
+    from the live AI ranked board."""
+    from app.utils.sector_map import ensure_loaded
+    await ensure_loaded()
+    baskets = await _build_baskets()
+    return {"status": "success", "data": {"baskets": baskets, "count": len(baskets),
+            "updated_at": datetime.now().isoformat(),
+            "note": "Baskets are AI-generated from the live scan and refresh each scan."}}
+
+
+@router.get("/fund-baskets/invest")
+async def fund_basket_invest(basket: str, amount: float):
+    """Allocate `amount` across a chosen basket's holdings by weight, as protective
+    LIMIT buy orders sized to real prices."""
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="amount must be positive")
+    from app.utils.sector_map import ensure_loaded
+    await ensure_loaded()
+    baskets = await _build_baskets()
+    b = next((x for x in baskets if x["id"] == basket), None)
+    if not b:
+        raise HTTPException(status_code=404, detail=f"basket '{basket}' not found")
+    try:
+        from app.data.stocks_master import STOCKS_BY_SYMBOL
+    except Exception:
+        STOCKS_BY_SYMBOL = {}
+
+    picks, deployed = [], 0.0
+    for h in b["holdings"]:
+        alloc = amount * (h["weight_pct"] / 100)
+        price = float(h["price"])
+        qty = int(alloc // price)
+        ex = _exchange_for(h["symbol"], STOCKS_BY_SYMBOL)
+        if qty < 1:
+            picks.append({"symbol": h["symbol"], "name": h.get("name"), "sector": h["sector"],
+                          "weight_pct": h["weight_pct"], "qty": 0, "skipped": "allocation below 1 share"})
+            continue
+        limit = _limit_price("BUY", price)
+        trade = _build_trade("BUY", qty, limit, ex)
+        if not trade:
+            continue
+        spend = round(qty * limit, 2)
+        deployed += spend
+        picks.append({"symbol": h["symbol"], "name": h.get("name"), "sector": h["sector"],
+                      "weight_pct": h["weight_pct"], "qty": qty, "limit_price": limit,
+                      "est_cost": spend, "win_probability": h["win_probability"], "trade": trade})
+    return {"status": "success", "data": {
+        "basket": b["id"], "basket_name": b["name"], "amount": amount,
+        "deployed": round(deployed, 2), "leftover": round(amount - deployed, 2),
+        "count": sum(1 for p in picks if p.get("qty")), "picks": picks,
+    }}
+
+
+# ── AI Portfolio Health Score (X-ray) ─────────────────────────────────────────
+
+_GRADE_Q = {"A": 90, "B": 75, "C": 55, "D": 35}
+
+
+async def _ranked_by_symbol() -> dict:
+    items = await _ranked_items()
+    return {(it.get("symbol") or "").upper(): it for it in items}
+
+
+def _grade_from_score(s: float) -> str:
+    return ("A" if s >= 85 else "B" if s >= 70 else "C" if s >= 55 else "D" if s >= 40 else "F")
+
+
+@router.get("/health")
+async def portfolio_health():
+    """AI Portfolio Health Score (0-100) — a single glanceable measure built from a
+    multi-factor model: diversification, concentration, sector balance, holding
+    quality (AI grades), performance and drawdown — with the issues + top fixes."""
+    from app.utils.sector_map import ensure_loaded
+    await ensure_loaded()
+    pf = (await get_portfolio()).get("data", {})
+    stocks = pf.get("stocks", [])
+    tv = float(pf.get("total_value") or 0.0)
+    if not stocks or tv <= 0:
+        return {"status": "success", "data": {"score": None, "grade": "—",
+                "note": "No holdings to analyse yet."}}
+    ranked = await _ranked_by_symbol()
+
+    weights = [s["value"] / tv for s in stocks]
+    hhi = sum(w * w for w in weights) or 1e-9
+    eff_holdings = 1 / hhi
+    top_w = max(weights) * 100
+
+    sect_val: dict[str, float] = {}
+    for s in stocks:
+        sec = _sector_of(s["symbol"])
+        sect_val[sec] = sect_val.get(sec, 0.0) + s["value"]
+    top_sector, top_sec_val = max(sect_val.items(), key=lambda x: x[1])
+    top_sec_pct = top_sec_val / tv * 100
+    eff_sectors = 1 / (sum((v / tv) ** 2 for v in sect_val.values()) or 1e-9)
+
+    # Holding quality from AI grades (rated names); unrated = neutral 50.
+    q_sum = q_wt = 0.0
+    for s, w in zip(stocks, weights):
+        it = ranked.get(s["symbol"].upper())
+        q = _GRADE_Q.get((it or {}).get("grade"), 50)
+        q_sum += q * w; q_wt += w
+    quality = q_sum / q_wt if q_wt else 50
+
+    gain_pct = float(pf.get("gain_percent") or 0.0)
+    losers = sum(1 for s in stocks if s.get("gain_percent", 0) < 0)
+    loser_frac = losers / len(stocks)
+
+    # Sub-scores (0-100)
+    f_div = max(0, min(100, eff_holdings / 12 * 100))
+    f_conc = 100 if top_w <= 10 else max(0, 100 - (top_w - 10) * 2.5)
+    f_sect = 100 if top_sec_pct <= 25 else max(0, 100 - (top_sec_pct - 25) * 2.2)
+    f_qual = quality
+    f_perf = max(0, min(100, 55 + gain_pct * 2.2))
+    f_risk = max(0, 100 - loser_frac * 100)
+
+    W = {"diversification": 0.20, "concentration": 0.15, "sector": 0.15,
+         "quality": 0.25, "performance": 0.15, "drawdown": 0.10}
+    subs = {"diversification": f_div, "concentration": f_conc, "sector": f_sect,
+            "quality": f_qual, "performance": f_perf, "drawdown": f_risk}
+    score = round(sum(subs[k] * W[k] for k in W), 1)
+
+    issues, actions = [], []
+    if top_w > 20:
+        issues.append(f"{stocks[weights.index(max(weights))]['symbol']} is {top_w:.0f}% of the book (single-name risk).")
+        actions.append("Trim the largest position toward ≤15%.")
+    if top_sec_pct > 40:
+        issues.append(f"{top_sector} is {top_sec_pct:.0f}% of the book (sector concentration).")
+        actions.append(f"Diversify out of {top_sector} — see Sector Exposure.")
+    if eff_holdings < 6:
+        issues.append(f"Only ~{eff_holdings:.0f} effective holdings — thinly diversified.")
+        actions.append("Add a few uncorrelated names or a Balanced Multi-Sector basket.")
+    if quality < 55:
+        issues.append("Average holding quality is low on the AI scan (many C/D-grade names).")
+        actions.append("Replace weak names with A/B-grade picks (AI Optimize).")
+    if loser_frac >= 0.6:
+        issues.append(f"{losers}/{len(stocks)} holdings are underwater.")
+    if not issues:
+        issues.append("No major structural issues — well-balanced book.")
+
+    return {"status": "success", "data": {
+        "score": score, "grade": _grade_from_score(score),
+        "factors": [{"key": k, "label": k.title(), "score": round(subs[k], 1),
+                     "weight": int(W[k] * 100)} for k in W],
+        "metrics": {"effective_holdings": round(eff_holdings, 1), "top_weight_pct": round(top_w, 1),
+                    "top_sector": top_sector, "top_sector_pct": round(top_sec_pct, 1),
+                    "effective_sectors": round(eff_sectors, 1), "avg_quality": round(quality, 1),
+                    "gain_pct": gain_pct, "losers": losers, "holdings": len(stocks)},
+        "issues": issues, "actions": actions[:4],
+        "updated_at": datetime.now().isoformat(),
+    }}
+
+
+# ── Goal-based SIP Planner ─────────────────────────────────────────────────────
+
+_RISK = {
+    "conservative": {"return": 0.09, "band": 0.03, "equity": 30, "debt": 60, "gold": 10},
+    "moderate":     {"return": 0.12, "band": 0.035, "equity": 60, "debt": 30, "gold": 10},
+    "aggressive":   {"return": 0.145, "band": 0.04, "equity": 85, "debt": 10, "gold": 5},
+}
+
+
+def _fv_sip(monthly: float, annual: float, years: float) -> float:
+    r = annual / 12
+    n = int(years * 12)
+    if r == 0:
+        return monthly * n
+    return monthly * (((1 + r) ** n - 1) / r) * (1 + r)
+
+
+@router.get("/sip-planner")
+async def sip_planner(goal_amount: float = 0, years: float = 10, risk: str = "moderate",
+                      current_corpus: float = 0, monthly: float = 0):
+    """Goal-based plan: required SIP (or projected corpus from a given SIP), a
+    year-by-year projection with optimistic/pessimistic bands, a risk-based asset
+    allocation, and AI fund recommendations per sleeve."""
+    risk = risk if risk in _RISK else "moderate"
+    cfg = _RISK[risk]
+    ann = cfg["return"]
+    years = max(1.0, min(40.0, years))
+
+    fv_corpus = current_corpus * (1 + ann) ** years
+    required_sip = None
+    if not monthly and goal_amount > 0:
+        need = max(0.0, goal_amount - fv_corpus)
+        r = ann / 12; n = int(years * 12)
+        factor = (((1 + r) ** n - 1) / r) * (1 + r) if r else n
+        required_sip = round(need / factor, 0) if factor else None
+        monthly = required_sip or 0
+
+    def project(a: float):
+        return round(_fv_sip(monthly, a, years) + current_corpus * (1 + a) ** years, 0)
+
+    projected = project(ann)
+    series = []
+    for y in range(1, int(years) + 1):
+        series.append({"year": y,
+                       "expected": round(_fv_sip(monthly, ann, y) + current_corpus * (1 + ann) ** y, 0),
+                       "optimistic": round(_fv_sip(monthly, ann + cfg["band"], y) + current_corpus * (1 + ann + cfg["band"]) ** y, 0),
+                       "pessimistic": round(_fv_sip(monthly, max(0.02, ann - cfg["band"]), y) + current_corpus * (1 + max(0.02, ann - cfg["band"])) ** y, 0)})
+
+    invested = round(monthly * int(years * 12) + current_corpus, 0)
+    sleeves = [
+        {"sleeve": "Equity", "pct": cfg["equity"],
+         "how": "AI Fund Baskets (Portfolio → AI Funds) or top Flexi/Large-Cap funds (Funds → Screener)."},
+        {"sleeve": "Debt", "pct": cfg["debt"],
+         "how": "Corporate Bond / Short Duration funds (Funds → Screener)."},
+        {"sleeve": "Gold", "pct": cfg["gold"], "how": "A Gold ETF / fund of funds."},
+    ]
+    return {"status": "success", "data": {
+        "risk": risk, "assumed_return_pct": round(ann * 100, 1), "years": years,
+        "monthly_sip": round(monthly, 0), "required_sip": required_sip,
+        "current_corpus": current_corpus, "goal_amount": goal_amount or None,
+        "projected_corpus": projected, "invested": invested,
+        "wealth_gained": round(projected - invested, 0),
+        "optimistic": project(ann + cfg["band"]), "pessimistic": project(max(0.02, ann - cfg["band"])),
+        "on_track": bool(goal_amount and projected >= goal_amount),
+        "allocation": {"equity": cfg["equity"], "debt": cfg["debt"], "gold": cfg["gold"]},
+        "sleeves": sleeves, "projection": series,
+        "note": "Projections use assumed long-run returns by risk profile — not guaranteed.",
+    }}
+
+
+# ── Tax / Capital-Gains optimizer (tax-loss harvesting) ────────────────────────
+
+@router.get("/tax-harvest")
+async def tax_harvest():
+    """Unrealised gains/losses across holdings, tax-loss-harvest candidates and an
+    estimated tax saving. (Groww's API doesn't return buy dates, so LTCG/STCG split
+    is approximate — figures use the LTCG long-term rate as a guide.)"""
+    pf = (await get_portfolio()).get("data", {})
+    stocks = pf.get("stocks", [])
+    if not stocks:
+        return {"status": "success", "data": {"note": "No holdings to analyse."}}
+
+    LTCG_RATE, LTCG_EXEMPT = 0.125, 125000
+    gains, losses = [], []
+    total_unreal = 0.0
+    for s in stocks:
+        g = float(s.get("gain") or 0.0)
+        total_unreal += g
+        row = {"symbol": s["symbol"], "qty": s["quantity"], "gain": round(g, 2),
+               "gain_pct": s.get("gain_percent"), "value": s["value"]}
+        (gains if g >= 0 else losses).append(row)
+
+    losses.sort(key=lambda x: x["gain"])              # biggest losses first
+    gains.sort(key=lambda x: -x["gain"])
+    harvestable = round(sum(-l["gain"] for l in losses), 2)
+    realised_gain_pool = round(sum(g["gain"] for g in gains), 2)
+    offset = min(harvestable, realised_gain_pool)
+    taxable_after_exempt = max(0.0, realised_gain_pool - LTCG_EXEMPT)
+    est_tax_saved = round(min(offset, taxable_after_exempt) * LTCG_RATE, 0)
+
+    return {"status": "success", "data": {
+        "total_unrealised": round(total_unreal, 2),
+        "unrealised_gains": realised_gain_pool, "harvestable_losses": harvestable,
+        "harvest_candidates": losses[:10], "top_gainers": gains[:10],
+        "potential_offset": round(offset, 2), "est_tax_saved": est_tax_saved,
+        "ltcg_exemption": LTCG_EXEMPT, "ltcg_rate_pct": LTCG_RATE * 100,
+        "tips": [
+            f"Harvest up to ₹{harvestable:,.0f} of losses to offset realised gains and cut LTCG tax.",
+            f"₹{LTCG_EXEMPT:,.0f} of long-term equity gains are tax-free each year — book up to that first.",
+            "An ELSS fund (Funds → Screener → ELSS) gives 80C deduction with the shortest (3y) lock-in.",
+        ],
+        "caveat": "Buy dates aren't available from Groww's API, so LTCG vs STCG can't be split exactly — treat figures as guidance, not filing advice.",
+        "updated_at": datetime.now().isoformat(),
+    }}
+
+
+# ── Benchmark / alpha (portfolio vs NIFTY 50) ─────────────────────────────────
+
+_YH_UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+          "Accept": "application/json"}
+
+
+async def _yahoo_returns(client: httpx.AsyncClient, ysym: str) -> dict | None:
+    """1M/3M/1Y returns from a Yahoo 1-year daily chart."""
+    try:
+        r = await client.get(_YH_BASE + ysym, params={"range": "1y", "interval": "1d"}, headers=_YH_UA)
+        res = (r.json().get("chart", {}).get("result") or [None])[0]
+        closes = [c for c in (res["indicators"]["quote"][0]["close"] or []) if c]
+    except Exception:
+        return None
+    if len(closes) < 30:
+        return None
+    last = closes[-1]
+
+    def ret(n: int):
+        c0 = closes[-n - 1] if len(closes) > n else closes[0]
+        return round((last / c0 - 1) * 100, 2) if c0 else None
+    return {"1m": ret(21), "3m": ret(63), "1y": ret(252)}
+
+
+@router.get("/benchmark")
+async def benchmark():
+    """Value-weighted portfolio returns (1M/3M/1Y) vs NIFTY 50, with alpha."""
+    from app.data.stocks_master import STOCKS_BY_SYMBOL
+    pf = (await get_portfolio()).get("data", {})
+    stocks = pf.get("stocks", [])
+    if not stocks:
+        return {"status": "success", "data": {"note": "No holdings to benchmark."}}
+
+    agg = {"1m": 0.0, "3m": 0.0, "1y": 0.0}
+    wcov = {"1m": 0.0, "3m": 0.0, "1y": 0.0}
+    async with httpx.AsyncClient(timeout=12.0) as client:
+        for s in stocks:
+            ex = _exchange_for(s["symbol"], STOCKS_BY_SYMBOL)
+            suffix = ".BO" if ex == "BSE" else ".NS"
+            rr = await _yahoo_returns(client, f"{s['symbol']}{suffix}")
+            if not rr:
+                continue
+            for k in agg:
+                if rr.get(k) is not None:
+                    agg[k] += rr[k] * s["value"]; wcov[k] += s["value"]
+        nifty = await _yahoo_returns(client, "^NSEI")
+
+    port = {k: (round(agg[k] / wcov[k], 2) if wcov[k] else None) for k in agg}
+    nifty = nifty or {"1m": None, "3m": None, "1y": None}
+    alpha = {k: (round(port[k] - nifty[k], 2) if (port[k] is not None and nifty.get(k) is not None) else None) for k in agg}
+    return {"status": "success", "data": {
+        "portfolio": port, "benchmark": nifty, "benchmark_name": "NIFTY 50", "alpha": alpha,
+        "periods": [{"key": k, "label": k.upper(), "portfolio": port[k], "benchmark": nifty.get(k), "alpha": alpha[k]}
+                    for k in ("1m", "3m", "1y")],
+        "updated_at": datetime.now().isoformat(),
+    }}
+
+
+# ── AI Advisor — plain-English insights synthesising everything ───────────────
+
+@router.get("/advisor")
+async def advisor():
+    """An AI advisor feed: synthesises health, sector exposure, benchmark and tax
+    into a few plain-English insights + actions (LLM, with a rule-based fallback)."""
+    try:
+        health = (await portfolio_health()).get("data", {})
+        sectors = (await sector_exposure()).get("data", {})
+        tax = (await tax_harvest()).get("data", {})
+        bench = (await benchmark()).get("data", {})
+    except Exception as exc:
+        logger.warning("advisor gather failed: %s", exc)
+        return {"status": "success", "data": {"insights": [], "note": "Could not analyse the portfolio."}}
+
+    m = health.get("metrics", {})
+    facts = (
+        f"Health score {health.get('score')}/100 (grade {health.get('grade')}). "
+        f"{m.get('holdings')} holdings, ~{m.get('effective_holdings')} effective. "
+        f"Top position {m.get('top_weight_pct')}%. Top sector {m.get('top_sector')} {m.get('top_sector_pct')}%. "
+        f"Avg AI quality {m.get('avg_quality')}/100. Total return {m.get('gain_pct')}%, {m.get('losers')} underwater. "
+        f"1Y: portfolio {((bench.get('portfolio') or {}).get('1y'))}% vs NIFTY {((bench.get('benchmark') or {}).get('1y'))}% "
+        f"(alpha {((bench.get('alpha') or {}).get('1y'))}). "
+        f"Harvestable losses ₹{tax.get('harvestable_losses')}, est tax saved ₹{tax.get('est_tax_saved')}. "
+        f"AI-favoured sectors: {', '.join(a['sector'] for a in (sectors.get('ai_favoured') or [])[:3])}."
+    )
+
+    insights, source = [], "rules"
+    try:
+        from app.utils.llm_client import llm_chat
+        out = await llm_chat(
+            f"You are a concise Indian portfolio advisor. From these facts, give 4-5 short, "
+            f"specific, actionable bullet insights (no preamble, one line each, start each with '- '):\n{facts}",
+            temperature=0.3, max_tokens=400)
+        if out:
+            insights = [ln.strip("-• ").strip() for ln in out.splitlines() if ln.strip().startswith(("-", "•"))][:5]
+            if insights:
+                source = "llm"
+    except Exception as exc:
+        logger.debug("advisor llm skipped: %s", exc)
+
+    if not insights:                                   # rule-based fallback
+        bp = (bench.get("portfolio") or {}).get("1y"); bn = (bench.get("benchmark") or {}).get("1y")
+        if health.get("score") is not None:
+            insights.append(f"Portfolio health is {health.get('score')}/100 (grade {health.get('grade')}) — "
+                            + (health.get("issues") or ["balanced."])[0])
+        if m.get("top_sector_pct", 0) > 40:
+            insights.append(f"{m.get('top_sector')} is {m.get('top_sector_pct')}% of the book — trim it and diversify (Sector Exposure).")
+        if bp is not None and bn is not None:
+            insights.append((f"You're beating NIFTY by {round(bp - bn, 1)}% over 1Y — keep the winners." if bp >= bn
+                             else f"You're trailing NIFTY by {round(bn - bp, 1)}% over 1Y — review the laggards (AI Optimize)."))
+        if (tax.get("harvestable_losses") or 0) > 1000:
+            insights.append(f"₹{tax.get('harvestable_losses'):,.0f} of losses are harvestable to cut tax (Tax Harvest).")
+        if m.get("avg_quality", 100) < 55:
+            insights.append("Average holding quality is low on the AI scan — swap weak names for A/B picks.")
+        insights = insights[:5] or ["No pressing issues — your portfolio looks balanced."]
+
+    return {"status": "success", "data": {
+        "insights": insights, "source": source, "facts": facts,
+        "score": health.get("score"), "grade": health.get("grade"),
+        "updated_at": datetime.now().isoformat(),
+    }}

@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import random
 import time
@@ -38,11 +39,228 @@ _YAHOO = "https://query1.finance.yahoo.com/v8/finance/chart/"
 _UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Accept": "application/json"}
 _WATCHLIST_KEY   = "ai_engine:watchlist"
 _RANKED_KEY      = "ai_engine:ranked"                    # full ranked board for the Predictions page
+_RANKED_PREV_KEY = "ai_engine:ranked:prev"               # last completed board — for scan-to-scan diff
 _CANDIDATES_KEY  = "ai_engine:scan_candidates"           # candidate pool for the sentiment-service
 _SENTIMENT_KEY   = "ai_engine:sentiment:{}"              # per-symbol news signal (sentiment-service)
 _PREMARKET_KEY   = "ai_engine:watchlist:premarket"   # snapshot graded after close
 _CALIBRATION_KEY = "ai_engine:scan_calibration"       # learned confidence multipliers
 _EVAL_KEY        = "ai_engine:scan_eval:latest"       # last post-market grade
+_DELIVERY_DONE_KEY = "ai_engine:delivery_eval_done:{}"  # per-entry-date delivery-grade marker
+
+# Delivery grading — picks are graded on their N-trading-day forward return.
+DELIVERY_HORIZON_DAYS = int(os.getenv("SCAN_DELIVERY_HORIZON", "5"))
+DELIVERY_TARGET_PCT   = float(os.getenv("SCAN_DELIVERY_TARGET_PCT", "1.5"))
+# Accuracy the scans should clear; the high-conviction tier is tuned toward this.
+SCAN_ACCURACY_TARGET  = float(os.getenv("SCAN_ACCURACY_TARGET", "0.90"))
+
+# High-conviction ("committed") tier — the only picks the system commits to. A
+# pick is committed only when many INDEPENDENT signals agree; otherwise the
+# system abstains. Precision over coverage: few picks, high hit-rate. The bar is
+# adaptive (stored in Redis) and auto-tightens toward SCAN_ACCURACY_TARGET.
+_HC_PARAMS_KEY        = "ai_engine:hc_params"
+# Defaults are deliberately strict: a genuine high-conviction pick needs ALL six
+# independent confirmations and a high win-probability. This keeps the committed
+# tier to a handful of names a day (≈70%+ hit-rate in backtest) rather than many
+# (≈46%). The adaptive controller tightens further toward the target.
+HC_MIN_FACTORS        = int(os.getenv("SCAN_HC_MIN_FACTORS", "5"))   # of 6 confirmations
+HC_WP_FLOOR           = float(os.getenv("SCAN_HC_WP_FLOOR", "0.72")) # min win-probability
+# Hard cap on how many picks the committed tier holds, no matter how many clear
+# the bar — keeps "high conviction" genuinely selective (paper trades only these).
+COMMITTED_MAX         = int(os.getenv("SCAN_COMMITTED_MAX", "3"))
+
+
+async def _load_hc_params() -> dict:
+    try:
+        r = await _get_redis()
+        raw = await r.get(_HC_PARAMS_KEY)
+        if raw:
+            p = json.loads(raw)
+            return {"min_factors": int(p.get("min_factors", HC_MIN_FACTORS)),
+                    "wp_floor": float(p.get("wp_floor", HC_WP_FLOOR))}
+    except Exception:
+        pass
+    return {"min_factors": HC_MIN_FACTORS, "wp_floor": HC_WP_FLOOR}
+
+
+# Pattern-recognition model gate — the scanner pulls the backend model's learned
+# weights once per sweep and scores each pattern locally (no per-stock HTTP). A
+# committed pick must have the *learned pattern model* agree it's an up-pattern.
+# The pattern model is used as a VETO (block clearly-bearish patterns) rather than
+# a hard high-bar gate — the model's P(up) clusters low (base rate of "up" < 50%),
+# so a 0.55 floor vetoed everything and starved paper trading. A pick is blocked
+# only if the model is clearly bearish (P < PATTERN_VETO); P ≥ PATTERN_MIN_P counts
+# as a positive independent confirmation.
+PATTERN_VETO   = float(os.getenv("SCAN_PATTERN_VETO", "0.30"))    # block only clearly-bearish patterns
+PATTERN_MIN_P  = float(os.getenv("SCAN_PATTERN_MIN_P", "0.45"))   # ≥ this = bullish-pattern confirmation
+_FP_SHAPE_LEN  = 10
+_FP_DIM        = 19
+_pattern_wb_cache: dict = {"w": None, "b": 0.0, "ts": 0.0, "trained": False}
+
+
+def _fp_clip(v: float, lo: float = -1.0, hi: float = 1.0) -> float:
+    return max(lo, min(hi, v))
+
+
+def _fp_div(a: float, b: float, default: float = 0.0) -> float:
+    return a / b if b else default
+
+
+def _fp_rsi(closes: list[float], period: int = 14) -> float:
+    if len(closes) < period + 1:
+        return 50.0
+    g = l = 0.0
+    for i in range(len(closes) - period, len(closes)):
+        d = closes[i] - closes[i - 1]
+        if d >= 0: g += d
+        else:      l -= d
+    ag, al = g / period, l / period
+    if al == 0:
+        return 100.0
+    return 100.0 - (100.0 / (1.0 + ag / al))
+
+
+def _fp_ema(values: list[float], period: int) -> float:
+    if not values:
+        return 0.0
+    k = 2 / (period + 1)
+    e = values[0]
+    for v in values[1:]:
+        e = v * k + e * (1 - k)
+    return e
+
+
+def _pattern_fingerprint(candles: list[dict]) -> list[float] | None:
+    """Scale-free pattern fingerprint — MUST match backend app/agents/fingerprint.py
+    (build_fingerprint) feature-for-feature so the backend-trained weights apply.
+    Scanner candles use o/h/l/c/v keys."""
+    if not candles or len(candles) < 15:
+        return None
+    closes = [float(c["c"]) for c in candles]
+    highs  = [float(c.get("h", c["c"])) for c in candles]
+    lows   = [float(c.get("l", c["c"])) for c in candles]
+    vols   = [float(c.get("v", 0) or 0) for c in candles]
+    last = closes[-1]
+
+    rets: list[float] = []
+    for i in range(len(closes) - _FP_SHAPE_LEN, len(closes)):
+        prev = closes[i - 1] if i > 0 else closes[i]
+        rets.append(_fp_div(closes[i] - prev, prev))
+    sigma = (sum(r * r for r in rets) / len(rets)) ** 0.5 or 1e-6
+    shape = [_fp_clip(r / (sigma * 3)) for r in rets]
+
+    f_rsi = _fp_clip((_fp_rsi(closes) - 50) / 50)
+    e12, e26 = _fp_ema(closes[-26:], 12), _fp_ema(closes[-26:], 26)
+    f_macd = _fp_clip(_fp_div(e12 - e26, last) * 100)
+    vwap = sum((highs[i] + lows[i] + closes[i]) / 3 for i in range(len(closes))) / len(closes)
+    f_vwap = _fp_clip(_fp_div(last - vwap, vwap) * 50)
+    atr = sum(highs[i] - lows[i] for i in range(len(closes) - 10, len(closes))) / 10
+    f_atr = _fp_clip(_fp_div(atr, last) * 50)
+    win = closes[-20:]
+    mean = sum(win) / len(win)
+    std = (sum((c - mean) ** 2 for c in win) / len(win)) ** 0.5 or 1e-6
+    f_bbpos = _fp_clip((last - mean) / (2 * std))
+    avg_vol = (sum(vols) / len(vols)) or 1.0
+    f_vol = _fp_clip(math.tanh(_fp_div(vols[-1], avg_vol) - 1.0))
+    f_mom5  = _fp_clip(_fp_div(last - closes[-5],  closes[-5])  * 20) if len(closes) >= 5  else 0.0
+    f_mom10 = _fp_clip(_fp_div(last - closes[-10], closes[-10]) * 20) if len(closes) >= 10 else 0.0
+    n = min(10, len(closes)); xs = list(range(n)); ys = closes[-n:]
+    mx = sum(xs) / n; my = sum(ys) / n
+    denom = sum((x - mx) ** 2 for x in xs) or 1e-6
+    slope = sum((xs[i] - mx) * (ys[i] - my) for i in range(n)) / denom
+    f_slope = _fp_clip(_fp_div(slope, last) * 200)
+    return shape + [f_rsi, f_macd, f_vwap, f_atr, f_bbpos, f_vol, f_mom5, f_mom10, f_slope]
+
+
+def _pattern_p_up(candles: list[dict]) -> float | None:
+    """Learned pattern model's P(up) for the latest pattern, or None if the model
+    isn't trained / weights unavailable."""
+    wb = _pattern_wb_cache
+    if not wb.get("trained") or wb.get("w") is None:
+        return None
+    fp = _pattern_fingerprint(candles)
+    if fp is None or len(fp) != _FP_DIM:
+        return None
+    z = sum(wi * xi for wi, xi in zip(wb["w"], fp)) + wb["b"]
+    return 1.0 / (1.0 + math.exp(-z)) if z >= 0 else math.exp(z) / (1.0 + math.exp(z))
+
+
+async def _load_pattern_weights() -> None:
+    """Pull the backend pattern model's weights once per sweep (cached ~10 min)."""
+    if time.time() - _pattern_wb_cache.get("ts", 0) < 600 and _pattern_wb_cache.get("w") is not None:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as c:
+            r = await c.get(f"{BACKEND_URL}/api/ai-engine/pattern-model/weights")
+            d = (r.json() or {}).get("data") or {}
+        w = d.get("weights")
+        if w and len(w) == _FP_DIM and d.get("trained"):
+            _pattern_wb_cache.update({"w": [float(x) for x in w], "b": float(d.get("bias", 0.0)),
+                                      "trained": True, "ts": time.time()})
+        else:
+            _pattern_wb_cache.update({"trained": bool(d.get("trained")), "ts": time.time()})
+    except Exception as exc:
+        logger.debug("pattern weights fetch skipped: %s", exc)
+        _pattern_wb_cache["ts"] = time.time()
+
+
+def _is_committed(res: dict, p: dict) -> bool:
+    """A high-conviction long: top grade BUY, enough short-term confirmations, a
+    win-probability above the (adaptive) floor, PLUS independent confirmation —
+    a confirmed higher-timeframe uptrend, no negative news catalyst, AND the
+    learned pattern model agreeing it's an up-pattern. Requiring signals that
+    aren't all correlated technicals is what lifts precision."""
+    if not (res.get("action") == "BUY"
+            and res.get("grade") == "A"
+            and int(res.get("confirmed_factors", 0)) >= p["min_factors"]
+            and float(res.get("win_probability") or 0.0) >= p["wp_floor"]):
+        return False
+    # Independent signal 1 — long-term trend must agree (when computable).
+    if res.get("long_trend") is False:
+        return False
+    # Independent signal 2 — block on a negative news catalyst.
+    if float(res.get("catalyst_boost") or 0.0) < -0.05:
+        return False
+    # Independent signal 3 — the learned pattern model must not be clearly bearish.
+    pp = res.get("pattern_p_up")
+    if pp is not None and pp < PATTERN_VETO:
+        return False
+    return True
+
+
+def _independent_signals(res: dict) -> int:
+    """Count of confirming signals independent of the short-term technical score:
+    long-term trend agreement, a positive fresh news catalyst, and the learned
+    pattern model's confident agreement."""
+    n = 0
+    if res.get("long_trend") is True:
+        n += 1
+    if float(res.get("catalyst_boost") or 0.0) > 0.10:
+        n += 1
+    pp = res.get("pattern_p_up")
+    if pp is not None and pp >= PATTERN_MIN_P:
+        n += 1
+    return n
+
+
+async def _tune_hc_params(accuracy: float, n: int, target: float) -> dict:
+    """Adaptive selectivity controller: when the committed tier misses target,
+    tighten the bar (higher win-prob floor / more confirmations) so we commit to
+    fewer, higher-quality setups. If it gets so strict that no picks qualify, ease
+    off slightly. We never loosen on success — precision is held."""
+    p = await _load_hc_params()
+    if n >= 3 and accuracy < target:
+        p["wp_floor"] = round(min(0.92, p["wp_floor"] + 0.02), 3)
+        if accuracy < target - 0.15:
+            p["min_factors"] = min(6, p["min_factors"] + 1)
+    elif n == 0:
+        p["wp_floor"] = round(max(0.60, p["wp_floor"] - 0.02), 3)
+        p["min_factors"] = max(4, p["min_factors"] - (1 if p["min_factors"] > 4 else 0))
+    try:
+        r = await _get_redis()
+        await r.set(_HC_PARAMS_KEY, json.dumps(p), ex=86400 * 120)
+    except Exception:
+        pass
+    return p
 
 # Intraday-fitness gates — a stock must clear these to be tradable intraday
 MIN_AVG_VOLUME = float(os.getenv("SCAN_MIN_VOLUME", "300000"))   # liquidity
@@ -173,7 +391,11 @@ def _analyze(candles: list[dict], regime: int = 0, calib: dict | None = None) ->
     mom   = (closes[-1] - closes[-10]) / closes[-10] * 100 if len(closes) >= 10 else 0.0
     sma20 = _sma(closes, 20)
     sma50 = _sma(closes, 50)
+    sma100 = _sma(closes, 100) if len(closes) >= 100 else None
     sma_trend = 1 if sma20 > sma50 else -1
+    # Higher-timeframe (long-term) trend — a confirmation that's largely
+    # independent of the short-term daily signal; required for high-conviction.
+    long_trend = (price > sma100 and sma50 >= sma100) if sma100 is not None else None
     _, _, macd_hist = _macd(closes)
     gap_pct = (opens[-1] - closes[-2]) / closes[-2] * 100 if len(closes) >= 2 and closes[-2] else 0.0
     hi20 = max(highs[-20:]); lo20 = min(lows[-20:])
@@ -315,6 +537,8 @@ def _analyze(candles: list[dict], regime: int = 0, calib: dict | None = None) ->
         "grade": grade,
         "confirmed_factors": confirmed_factors,
         "confirmations": confirmations,
+        "long_trend": long_trend,
+        "pattern_p_up": _pattern_p_up(candles),   # learned pattern model's verdict
         "intraday_fit": fit,
         "delivery_fit": delivery_fit,
         "delivery_weeks": delivery_weeks,
@@ -362,6 +586,7 @@ async def _fetch_chart(client: httpx.AsyncClient, ysym: str) -> list[dict]:
             if not res:
                 return []
             q = (res.get("indicators", {}).get("quote") or [{}])[0]
+            ts = res.get("timestamp", []) or []
             o, h, l, c, v = q.get("open", []), q.get("high", []), q.get("low", []), q.get("close", []), q.get("volume", [])
             out = []
             for i in range(len(c)):
@@ -369,8 +594,11 @@ async def _fetch_chart(client: httpx.AsyncClient, ysym: str) -> list[dict]:
                     cl = c[i]
                     if cl is None or float(cl) <= 0:
                         continue
-                    out.append({"o": float(o[i] or cl), "h": float(h[i] or cl),
-                                "l": float(l[i] or cl), "c": float(cl), "v": int(v[i] or 0)})
+                    bar = {"o": float(o[i] or cl), "h": float(h[i] or cl),
+                           "l": float(l[i] or cl), "c": float(cl), "v": int(v[i] or 0)}
+                    if i < len(ts) and ts[i]:
+                        bar["t"] = int(ts[i])      # epoch seconds — used for date alignment
+                    out.append(bar)
                 except (TypeError, ValueError, IndexError):
                     continue
             return out
@@ -522,7 +750,18 @@ async def scan_once(phase: str = "intraday") -> dict:
         return {}
     _state.update({"running": True, "run_started": time.time(), "scanning": True})
 
+    # Preserve the last *completed* ranked board as the diff baseline before the
+    # progressive checkpoints below start overwriting the live board.
+    try:
+        rc0 = await _get_redis()
+        prev_board = await rc0.get(_RANKED_KEY)
+        if prev_board:
+            await rc0.set(_RANKED_PREV_KEY, prev_board, ex=86400 * 2)
+    except Exception as exc:
+        logger.debug("ranked prev snapshot skipped: %s", exc)
+
     calib = await _load_calibration()
+    await _load_pattern_weights()        # pull the pattern model's weights for local scoring
     universe = await _load_universe()
     total = len(universe)
     _state["universe"] = total
@@ -621,6 +860,27 @@ async def scan_once(phase: str = "intraday") -> dict:
     candidates.sort(key=lambda r: (r["action"] != "BUY", _grade_rank.get(r.get("grade", "D"), 3), -r["rank_score"]))
     watchlist = candidates[:TOP_N]
 
+    # High-conviction tier: tag every candidate the system would *commit* to, given
+    # the current adaptive bar. These are the only picks measured against the 90%
+    # target — everything else is "watch, don't trade".
+    hc = await _load_hc_params()
+    for c in candidates:
+        c["independent_signals"] = _independent_signals(c)
+        c["committed"] = False
+    # Of everything that clears the bar, commit only the TOP few by conviction —
+    # paper trading trades the *cream*, not every grade-A name that passes (that
+    # would dilute the whole point of a high-conviction tier).
+    qualified = sorted(
+        (c for c in candidates if _is_committed(c, hc)),
+        key=lambda c: (c.get("win_probability") or 0.0,
+                       c.get("independent_signals") or 0,
+                       c.get("pattern_p_up") or 0.0),
+        reverse=True)
+    for c in qualified[:COMMITTED_MAX]:
+        c["committed"] = True
+    committed_list = [c for c in candidates if c["committed"]]
+    logger.info("committed tier: %d qualified, top %d committed", len(qualified), len(committed_list))
+
     # Full ranked board (top RANKED_MAX) for the Predictions page — each entry
     # numbered with its rank and carrying the full evidence used to score it.
     try:
@@ -666,12 +926,16 @@ async def scan_once(phase: str = "intraday") -> dict:
         "scanning": False,
         "items": watchlist,
         "delivery": delivery_list,
+        "committed": committed_list,
+        "hc_params": hc,
     }
     try:
         r = await _get_redis()
         await r.set(_WATCHLIST_KEY, json.dumps(payload), ex=86400)
         if phase == "premarket":
-            await r.set(f"{_PREMARKET_KEY}:{now.strftime('%Y-%m-%d')}", json.dumps(payload), ex=86400 * 3)
+            # 14-day retention so delivery picks survive long enough to be graded
+            # on their multi-day forward return.
+            await r.set(f"{_PREMARKET_KEY}:{now.strftime('%Y-%m-%d')}", json.dumps(payload), ex=86400 * 14)
     except Exception as exc:
         logger.warning("watchlist write failed: %s", exc)
 
@@ -731,6 +995,7 @@ async def evaluate_day(date_str: str | None = None) -> dict:
                 "day_return_pct": round(day_ret, 2),
                 "realized_return_pct": round(realized, 2),
                 "correct": bool(correct),
+                "committed": bool(w.get("committed")),
             })
 
     if not graded:
@@ -744,10 +1009,18 @@ async def evaluate_day(date_str: str | None = None) -> dict:
         a = by_action.setdefault(g["action"], {"n": 0, "hits": 0})
         a["n"] += 1; a["hits"] += 1 if g["correct"] else 0
 
+    meets_target = accuracy >= SCAN_ACCURACY_TARGET
     eval_payload = {
-        "date": date_str, "evaluated_at": now.isoformat(),
+        "date": date_str, "evaluated_at": now.isoformat(), "trade_kind": "intraday",
         "picks": len(graded), "hits": hits,
         "accuracy": accuracy, "avg_realized_return_pct": avg_realized,
+        "target": SCAN_ACCURACY_TARGET, "meets_target": meets_target,
+        "learning_note": (
+            f"Intraday scan accuracy {accuracy:.0%} is BELOW the {SCAN_ACCURACY_TARGET:.0%} target — "
+            "conviction multipliers dampened; the next scans promote fewer high-grade picks until accuracy recovers."
+            if not meets_target else
+            f"Intraday scan accuracy {accuracy:.0%} meets the {SCAN_ACCURACY_TARGET:.0%} target."
+        ),
         "by_action": {k: {"n": v["n"], "accuracy": round(v["hits"] / v["n"], 4)} for k, v in by_action.items()},
         "results": sorted(graded, key=lambda g: -g["realized_return_pct"]),
     }
@@ -759,6 +1032,26 @@ async def evaluate_day(date_str: str | None = None) -> dict:
 
     await _update_calibration(by_action, accuracy)
     await _push_feedback(eval_payload)
+
+    # ── High-conviction tier: grade only the committed picks against the 90%
+    # target, then adapt the selectivity bar toward it. ──
+    committed = [g for g in graded if g.get("committed")]
+    if committed:
+        c_hits = sum(1 for g in committed if g["correct"])
+        c_acc = round(c_hits / len(committed), 4)
+        c_avg = round(sum(g["realized_return_pct"] for g in committed) / len(committed), 2)
+        await _push_feedback({
+            "date": date_str, "evaluated_at": now.isoformat(), "trade_kind": "committed",
+            "picks": len(committed), "hits": c_hits, "accuracy": c_acc,
+            "avg_realized_return_pct": c_avg,
+            "target": SCAN_ACCURACY_TARGET, "meets_target": c_acc >= SCAN_ACCURACY_TARGET,
+            "results": committed,
+        })
+    new_params = await _tune_hc_params(
+        accuracy=(c_acc if committed else 0.0), n=len(committed), target=SCAN_ACCURACY_TARGET)
+    logger.info("committed tier %s: %d picks, accuracy %.0f%% → bar wp>=%.2f factors>=%d",
+                date_str, len(committed), (c_acc if committed else 0) * 100,
+                new_params["wp_floor"], new_params["min_factors"])
 
     _state.update({"last_eval_date": date_str, "last_eval": {
         "date": date_str, "accuracy": accuracy, "picks": len(graded),
@@ -803,6 +1096,239 @@ async def _push_feedback(eval_payload: dict) -> None:
         logger.debug("scan feedback push skipped: %s", exc)
 
 
+# ── Delivery (multi-day) evaluation ───────────────────────────────────────────
+
+def _bar_date(bar: dict) -> str | None:
+    t = bar.get("t")
+    if not t:
+        return None
+    return datetime.fromtimestamp(t, IST).strftime("%Y-%m-%d")
+
+
+async def evaluate_delivery(entry_date: str) -> dict:
+    """Grade the delivery picks made on `entry_date` against their forward return
+    over DELIVERY_HORIZON_DAYS trading days. Delivery setups are BUY/holds, so a
+    pick is 'correct' if it gained at least DELIVERY_TARGET_PCT within the horizon.
+
+    Returns {status:'not_ready'} until enough forward sessions exist, so the
+    post-close scheduler can keep retrying until the horizon has elapsed.
+    """
+    r = await _get_redis()
+    if await r.get(_DELIVERY_DONE_KEY.format(entry_date)):
+        return {"status": "already_graded", "date": entry_date}
+    raw = await r.get(f"{_PREMARKET_KEY}:{entry_date}")
+    if not raw:
+        return {"status": "no_snapshot", "date": entry_date}
+    items = (json.loads(raw) or {}).get("delivery", [])
+    if not items:
+        return {"status": "empty", "date": entry_date}
+
+    graded: list[dict] = []
+    not_ready = False
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        for w in items:
+            candles = await _fetch_daily(client, w["symbol"])
+            await asyncio.sleep(FETCH_DELAY)
+            if not candles:
+                continue
+            # locate the entry bar (last bar on/before entry_date)
+            ei = None
+            for i, b in enumerate(candles):
+                bd = _bar_date(b)
+                if bd and bd <= entry_date:
+                    ei = i
+                elif bd and bd > entry_date:
+                    break
+            if ei is None:
+                continue
+            if ei + DELIVERY_HORIZON_DAYS >= len(candles):
+                not_ready = True            # horizon hasn't elapsed yet — retry later
+                continue
+            entry_c = candles[ei]["c"]
+            fwd_c = candles[ei + DELIVERY_HORIZON_DAYS]["c"]
+            fwd_ret = (fwd_c - entry_c) / entry_c * 100 if entry_c else 0.0
+            graded.append({
+                "symbol": w["symbol"], "action": w.get("action", "BUY"),
+                "predicted_confidence": w.get("confidence"),
+                "predicted_signal_score": w.get("delivery_score") or w.get("signal_score"),
+                "day_return_pct": round(fwd_ret, 2),
+                "realized_return_pct": round(fwd_ret, 2),
+                "correct": bool(fwd_ret >= DELIVERY_TARGET_PCT),
+                "trade_kind": "delivery",
+            })
+
+    if not graded:
+        return {"status": "not_ready" if not_ready else "no_data", "date": entry_date}
+    if not_ready and len(graded) < max(1, len(items) // 2):
+        return {"status": "not_ready", "date": entry_date}   # too few have matured
+
+    hits = sum(1 for g in graded if g["correct"])
+    accuracy = round(hits / len(graded), 4)
+    avg_realized = round(sum(g["realized_return_pct"] for g in graded) / len(graded), 2)
+    meets_target = accuracy >= SCAN_ACCURACY_TARGET
+    eval_payload = {
+        "date": entry_date, "evaluated_at": _ist_now().isoformat(), "trade_kind": "delivery",
+        "picks": len(graded), "hits": hits, "accuracy": accuracy,
+        "avg_realized_return_pct": avg_realized,
+        "target": SCAN_ACCURACY_TARGET, "meets_target": meets_target,
+        "horizon_days": DELIVERY_HORIZON_DAYS,
+        "results": sorted(graded, key=lambda g: -g["realized_return_pct"]),
+    }
+    try:
+        await r.set(f"ai_engine:scan_eval:delivery:{entry_date}", json.dumps(eval_payload), ex=86400 * 90)
+        await r.set(_DELIVERY_DONE_KEY.format(entry_date), "1", ex=86400 * 30)
+    except Exception as exc:
+        logger.warning("delivery eval write failed: %s", exc)
+    await _push_feedback(eval_payload)
+    logger.info("delivery grade %s: %d picks, accuracy %.0f%%, avg %+.2f%% over %dd",
+                entry_date, len(graded), accuracy * 100, avg_realized, DELIVERY_HORIZON_DAYS)
+    return eval_payload
+
+
+async def grade_due_delivery() -> None:
+    """Grade any delivery snapshot whose horizon has now elapsed (scan back over
+    recent dated snapshots; each date is graded at most once)."""
+    r = await _get_redis()
+    today = _ist_now()
+    for back in range(DELIVERY_HORIZON_DAYS, DELIVERY_HORIZON_DAYS + 12):
+        d = (today - timedelta(days=back)).strftime("%Y-%m-%d")
+        if await r.get(_DELIVERY_DONE_KEY.format(d)):
+            continue
+        if not await r.get(f"{_PREMARKET_KEY}:{d}"):
+            continue
+        try:
+            await evaluate_delivery(d)
+        except Exception as exc:
+            logger.debug("delivery grade %s skipped: %s", d, exc)
+
+
+async def backfill_delivery(days: int = 14, limit: int = 250) -> dict:
+    """Reconstruct delivery-pick accuracy for the last `days` trading days so the
+    accuracy graph has delivery history immediately (no waiting for live snapshots
+    to mature). For each symbol in a liquid sample we fetch daily candles once,
+    then for each past day decide whether it was a delivery pick *as of that day*
+    (re-running the same fitness logic on the candle window) and grade it on the
+    DELIVERY_HORIZON_DAYS forward return — exactly how live grading works."""
+    calib = await _load_calibration()
+    universe = await _load_universe()
+    syms = list(universe.items())[:max(1, limit)]
+    cutoff = _ist_now() - timedelta(days=days)
+    by_date: dict[str, list[dict]] = {}
+
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        for sym, name in syms:
+            candles = await _fetch_daily(client, sym)
+            await asyncio.sleep(FETCH_DELAY)
+            if len(candles) < 40:
+                continue
+            # evaluate each historical bar that has a full forward horizon and a date in range
+            for i in range(35, len(candles) - DELIVERY_HORIZON_DAYS):
+                bd = _bar_date(candles[i])
+                if not bd or bd < cutoff.strftime("%Y-%m-%d"):
+                    continue
+                res = _analyze(candles[: i + 1], regime=0, calib=calib)
+                if not res or not res.get("delivery_fit") or res.get("action") != "BUY":
+                    continue
+                entry_c = candles[i]["c"]
+                fwd_c = candles[i + DELIVERY_HORIZON_DAYS]["c"]
+                if entry_c <= 0:
+                    continue
+                fwd_ret = (fwd_c - entry_c) / entry_c * 100
+                by_date.setdefault(bd, []).append({
+                    "symbol": sym, "action": "BUY",
+                    "predicted_confidence": res.get("confidence"),
+                    "predicted_signal_score": res.get("delivery_score") or res.get("signal_score"),
+                    "day_return_pct": round(fwd_ret, 2),
+                    "realized_return_pct": round(fwd_ret, 2),
+                    "correct": bool(fwd_ret >= DELIVERY_TARGET_PCT),
+                    "trade_kind": "delivery",
+                })
+
+    r = await _get_redis()
+    graded_days = 0
+    for d, picks in sorted(by_date.items()):
+        if not picks:
+            continue
+        hits = sum(1 for g in picks if g["correct"])
+        accuracy = round(hits / len(picks), 4)
+        avg_realized = round(sum(g["realized_return_pct"] for g in picks) / len(picks), 2)
+        payload = {
+            "date": d, "evaluated_at": _ist_now().isoformat(), "trade_kind": "delivery",
+            "picks": len(picks), "hits": hits, "accuracy": accuracy,
+            "avg_realized_return_pct": avg_realized,
+            "target": SCAN_ACCURACY_TARGET, "meets_target": accuracy >= SCAN_ACCURACY_TARGET,
+            "horizon_days": DELIVERY_HORIZON_DAYS, "backfilled": True,
+            "results": sorted(picks, key=lambda g: -g["realized_return_pct"]),
+        }
+        try:
+            await r.set(f"ai_engine:scan_eval:delivery:{d}", json.dumps(payload), ex=86400 * 90)
+            await r.set(_DELIVERY_DONE_KEY.format(d), "1", ex=86400 * 30)
+        except Exception:
+            pass
+        await _push_feedback(payload)
+        graded_days += 1
+    logger.info("delivery backfill: graded %d days from %d symbols", graded_days, len(syms))
+    return {"status": "done", "graded_days": graded_days, "symbols": len(syms), "days": days}
+
+
+async def backfill_committed(days: int = 20, limit: int = 400) -> dict:
+    """Reconstruct the high-conviction (committed) tier's same-day accuracy for the
+    last `days` so its line shows immediately. For each symbol/day we re-run the
+    fitness logic as-of that day, keep only committed setups, and grade the actual
+    same-day move — identical to live committed grading."""
+    hc = await _load_hc_params()
+    calib = await _load_calibration()
+    universe = await _load_universe()
+    syms = list(universe.items())[:max(1, limit)]
+    cutoff = (_ist_now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    by_date: dict[str, list[dict]] = {}
+
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        for sym, name in syms:
+            candles = await _fetch_daily(client, sym)
+            await asyncio.sleep(FETCH_DELAY)
+            if len(candles) < 40:
+                continue
+            for i in range(35, len(candles)):
+                bd = _bar_date(candles[i])
+                if not bd or bd < cutoff:
+                    continue
+                res = _analyze(candles[: i + 1], regime=0, calib=calib)
+                if not res or not _is_committed(res, hc):
+                    continue
+                o, c = candles[i]["o"], candles[i]["c"]
+                if o <= 0:
+                    continue
+                day_move = (c - o) / o * 100
+                by_date.setdefault(bd, []).append({
+                    "symbol": sym, "action": "BUY",
+                    "predicted_confidence": res.get("confidence"),
+                    "predicted_signal_score": res.get("signal_score"),
+                    "day_return_pct": round(day_move, 2),
+                    "realized_return_pct": round(day_move, 2),
+                    "correct": bool(day_move >= 0.3),
+                    "committed": True, "trade_kind": "committed",
+                })
+
+    graded_days = 0
+    for d, picks in sorted(by_date.items()):
+        if not picks:
+            continue
+        hits = sum(1 for g in picks if g["correct"])
+        acc = round(hits / len(picks), 4)
+        await _push_feedback({
+            "date": d, "evaluated_at": _ist_now().isoformat(), "trade_kind": "committed",
+            "picks": len(picks), "hits": hits, "accuracy": acc,
+            "avg_realized_return_pct": round(sum(g["realized_return_pct"] for g in picks) / len(picks), 2),
+            "target": SCAN_ACCURACY_TARGET, "meets_target": acc >= SCAN_ACCURACY_TARGET,
+            "backfilled": True, "results": sorted(picks, key=lambda g: -g["realized_return_pct"]),
+        })
+        graded_days += 1
+    logger.info("committed backfill: graded %d days from %d symbols (bar wp>=%.2f factors>=%d)",
+                graded_days, len(syms), hc["wp_floor"], hc["min_factors"])
+    return {"status": "done", "graded_days": graded_days, "symbols": len(syms), "days": days, "hc_params": hc}
+
+
 # ── Schedulers ────────────────────────────────────────────────────────────────
 
 async def scanner_loop() -> None:
@@ -835,6 +1361,8 @@ async def schedule_loop() -> None:
             if weekday and minutes >= POSTMARKET_MIN and _state["last_eval_date"] != today:
                 logger.info("post-close evaluation for %s", today)
                 await evaluate_day(today)
+                # Grade any older delivery picks whose holding horizon has elapsed.
+                await grade_due_delivery()
         except asyncio.CancelledError:
             break
         except Exception as exc:

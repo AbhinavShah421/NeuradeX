@@ -79,6 +79,7 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
   const [startTime, setStartTime] = useState('09:15');
   const [capital, setCapital] = useState('50000');
   const [speed, setSpeed] = useState(5);
+  const [timingMode, setTimingMode] = useState<'normal' | 'aggressive'>('normal');
 
   const effectiveMode = fixedMode ?? mode;
 
@@ -119,6 +120,7 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
         mode: effectiveMode, symbol: symbol.toUpperCase().trim(),
         date: effectiveMode === 'replay' ? (autoDate ? lastWeekday(1) : date) : undefined,
         start_time: startTime, capital: parseFloat(capital) || 50000, speed,
+        timing_mode: timingMode,
       });
       const d = (r as any).data;
       await loadList();
@@ -140,6 +142,9 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
   const markers: TradeMarker[] = (detail?.tradesList ?? []).map((t: any) => ({ timestamp: t.timestamp, action: t.action, price: t.price }));
   const pos = detail?.positionDetail ?? {};
   const dec = detail?.agentDecision ?? {};
+  const ld  = detail?.lastDecision ?? null;
+  const decLog: any[] = detail?.decisionLog ?? [];
+  const actColor = (a?: string) => a === 'BUY' ? 'var(--nd-green)' : a === 'SELL' ? 'var(--nd-red)' : 'var(--nd-text-2)';
 
   return (
     <div>
@@ -184,6 +189,13 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
           <Field label="Speed">
             <select className="nd-select" value={speed} onChange={e => setSpeed(parseInt(e.target.value))} style={fieldStyle}>
               {[1, 2, 5, 10].map(s => <option key={s} value={s}>{s}×</option>)}
+            </select>
+          </Field>
+          <Field label="Entry timing">
+            <select className="nd-select" value={timingMode} onChange={e => setTimingMode(e.target.value as any)} style={fieldStyle}
+              title="Aggressive loosens the entry triggers (wider RSI/momentum bands) so the session takes more trades">
+              <option value="normal">Normal</option>
+              <option value="aggressive">Aggressive (more trades)</option>
             </select>
           </Field>
         </div>
@@ -263,12 +275,64 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
             <TradingChart candles={detail.candles ?? []} prevDayCandles={detail.prevDayCandles ?? []} markers={markers} height={400} isDark={isDark} />
           </div>
 
-          {dec.action && (
-            <div style={{ fontSize: 12, color: 'var(--nd-text-2)', background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 8, padding: '8px 12px', marginBottom: 12 }}>
-              <strong style={{ color: dec.action === 'BUY' ? 'var(--nd-green)' : dec.action === 'SELL' ? 'var(--nd-red)' : 'var(--nd-text-1)' }}>{dec.action}</strong>
-              {dec.confidence != null && <span> · {(dec.confidence * 100).toFixed(0)}%</span>}
-              {dec.reason && <span style={{ color: 'var(--nd-text-3)' }}> — {dec.reason}</span>}
-            </div>
+          {/* ── Live AI decision — why it is / isn't trading right now ── */}
+          {(ld || dec.action) && (() => {
+            const d = ld || dec;
+            const ind = d.indicators || {};
+            const tcolor = d.timingSignal === 1 ? 'var(--nd-green)' : d.timingSignal === -1 ? 'var(--nd-red)' : 'var(--nd-text-3)';
+            return (
+              <div style={{ background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 10, padding: '10px 12px', marginBottom: 12 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 6 }}>
+                  <span className="material-icons" style={{ fontSize: 16, color: 'var(--nd-accent)' }}>psychology</span>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--nd-text-1)' }}>Live AI Decision</span>
+                  {(detail.timingMode === 'aggressive' || d.timingMode === 'aggressive') && (
+                    <span style={{ fontSize: 9.5, fontWeight: 700, padding: '1px 6px', borderRadius: 4, background: '#f59e0b22', color: '#f59e0b', border: '1px solid #f59e0b55' }}>AGGRESSIVE</span>
+                  )}
+                  <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 9px', borderRadius: 5, background: `${actColor(d.action)}1a`, color: actColor(d.action) }}>{d.action}</span>
+                  {d.confidence != null && <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>{(d.confidence * 100).toFixed(0)}%</span>}
+                  {d.executed
+                    ? <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--nd-green)', border: '1px solid var(--nd-green)', borderRadius: 4, padding: '0 5px' }}>TRADE PLACED</span>
+                    : <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--nd-text-3)', border: '1px solid var(--nd-border)', borderRadius: 4, padding: '0 5px' }}>NO TRADE</span>}
+                  {d.time && <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--nd-text-3)' }}>{d.time}</span>}
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--nd-text-2)', lineHeight: 1.5, marginBottom: ld ? 8 : 0 }}>{d.reason}</div>
+                {ld && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, fontSize: 11, color: 'var(--nd-text-3)' }}>
+                    <span>Timing: <strong style={{ color: tcolor }}>{d.timingLabel}</strong></span>
+                    <span>Ensemble: <strong style={{ color: actColor(d.ensembleAction) }}>{d.ensembleAction}</strong></span>
+                    {ind.rsi != null && <span>RSI <strong style={{ color: 'var(--nd-text-1)' }}>{ind.rsi}</strong></span>}
+                    {ind.momentumPct != null && <span>Mom <strong style={{ color: ind.momentumPct >= 0 ? 'var(--nd-green)' : 'var(--nd-red)' }}>{ind.momentumPct >= 0 ? '+' : ''}{ind.momentumPct}%</strong></span>}
+                    {ind.vwap != null && <span>VWAP <strong style={{ color: 'var(--nd-text-1)' }}>{inr(ind.vwap)}</strong></span>}
+                    {Array.isArray(d.agents) && d.agents.length > 0 && (
+                      <span style={{ flexBasis: '100%', marginTop: 2 }}>
+                        Agents: {d.agents.map((a: any, i: number) => (
+                          <span key={i} style={{ marginRight: 8 }}>{a.agent} <strong style={{ color: actColor(a.action) }}>{a.action}</strong></span>
+                        ))}
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* ── Decision log — the running "why" each candle ── */}
+          {decLog.length > 0 && (
+            <details style={{ marginBottom: 12 }}>
+              <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600, color: 'var(--nd-text-2)', padding: '6px 0' }}>
+                Decision log ({decLog.length} candles)
+              </summary>
+              <div style={{ maxHeight: 240, overflow: 'auto', border: '1px solid var(--nd-border)', borderRadius: 8, marginTop: 6 }}>
+                {[...decLog].reverse().map((d: any, i: number) => (
+                  <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'baseline', padding: '5px 10px', borderBottom: '1px solid var(--nd-border)', fontSize: 11 }}>
+                    <span style={{ color: 'var(--nd-text-3)', width: 42, flexShrink: 0 }}>{d.time}</span>
+                    <span style={{ fontWeight: 700, color: actColor(d.action), width: 38, flexShrink: 0 }}>{d.action}</span>
+                    {d.executed && <span className="material-icons" style={{ fontSize: 13, color: 'var(--nd-green)' }}>check_circle</span>}
+                    <span style={{ color: 'var(--nd-text-3)', flex: 1 }}>{d.reason}</span>
+                  </div>
+                ))}
+              </div>
+            </details>
           )}
 
           {(detail.tradesList ?? []).length > 0 && (

@@ -1,5 +1,6 @@
 """AI Engine REST API — analyze, record outcomes, performance, history."""
 from __future__ import annotations
+import os
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
@@ -281,6 +282,97 @@ async def get_ranked(limit: int = 100):
     return {"status": "success", "data": {"updated_at": None, "scanned": 0, "universe": 0, "items": [], "returned": 0}}
 
 
+def _rank_change_reason(cur: dict, prev: dict) -> str:
+    """Explain *why* a stock's rank moved between two scans, from the components
+    the scanner actually ranks on (action, grade, win-prob, signal/rank score, news)."""
+    bits: list[str] = []
+    ca, pa = cur.get("action"), prev.get("action")
+    if ca != pa:
+        bits.append(f"call {pa}→{ca}")
+    cg, pg = cur.get("grade"), prev.get("grade")
+    if cg != pg:
+        bits.append(f"grade {pg}→{cg}")
+    cw, pw = cur.get("win_probability"), prev.get("win_probability")
+    if cw is not None and pw is not None and abs(cw - pw) >= 0.02:
+        bits.append(f"win-prob {pw*100:.0f}%→{cw*100:.0f}%")
+    cs, ps = cur.get("rank_score", cur.get("signal_score")), prev.get("rank_score", prev.get("signal_score"))
+    if cs is not None and ps is not None and abs(cs - ps) >= 0.5:
+        bits.append(f"score {ps:.0f}→{cs:.0f}")
+    cn = (cur.get("news") or {}).get("catalyst")
+    if cn and not (prev.get("news") or {}).get("catalyst"):
+        bits.append("fresh news catalyst")
+    return ", ".join(bits) if bits else "minor re-ordering vs other names"
+
+
+@router.get("/scan-diff")
+async def scan_diff(limit: int = 60):
+    """How this scan's ranking differs from the previous completed scan: per-stock
+    rank moves (with the reason), names that entered the board, and names that
+    dropped out. Powers the AI Watchlist 'what changed' view."""
+    import json
+    from app.utils.redis_client import cache_get
+    cur_items: list[dict] = []
+    prev_items: list[dict] = []
+    cur_meta: dict = {}
+    prev_meta: dict = {}
+    try:
+        raw = await cache_get("ai_engine:ranked")
+        if raw:
+            d = json.loads(raw); cur_items = d.get("items") or []
+            cur_meta = {"updated_at": d.get("updated_at"), "candidates": d.get("candidates")}
+        rawp = await cache_get("ai_engine:ranked:prev")
+        if rawp:
+            d = json.loads(rawp); prev_items = d.get("items") or []
+            prev_meta = {"updated_at": d.get("updated_at"), "candidates": d.get("candidates")}
+    except Exception as exc:
+        logger.debug("scan-diff read failed: %s", exc)
+
+    if not prev_items:
+        return {"status": "success", "data": {
+            "available": False, "current": cur_meta, "previous": prev_meta,
+            "moved": [], "entered": [], "dropped": [],
+            "message": "No previous scan to compare yet — diff appears after the next rescan.",
+        }}
+
+    cur_by = {(i.get("symbol") or "").upper(): i for i in cur_items}
+    prev_rank = {(i.get("symbol") or "").upper(): i.get("rank") for i in prev_items}
+    prev_by = {(i.get("symbol") or "").upper(): i for i in prev_items}
+
+    moved: list[dict] = []
+    entered: list[dict] = []
+    for sym, c in cur_by.items():
+        cr = c.get("rank")
+        if sym in prev_rank:
+            pr = prev_rank[sym]
+            if cr != pr:
+                moved.append({
+                    "symbol": sym, "name": c.get("name"), "rank": cr, "prev_rank": pr,
+                    "delta": pr - cr,                      # +ve = climbed (lower rank number)
+                    "direction": "up" if cr < pr else "down",
+                    "grade": c.get("grade"), "action": c.get("action"),
+                    "reason": _rank_change_reason(c, prev_by[sym]),
+                })
+        else:
+            entered.append({
+                "symbol": sym, "name": c.get("name"), "rank": cr,
+                "grade": c.get("grade"), "action": c.get("action"),
+                "reason": _rank_change_reason(c, {}),
+            })
+    dropped = [{
+        "symbol": sym, "name": p.get("name"), "prev_rank": p.get("rank"),
+        "grade": p.get("grade"), "action": p.get("action"),
+    } for sym, p in prev_by.items() if sym not in cur_by]
+
+    moved.sort(key=lambda m: -abs(m["delta"]))
+    entered.sort(key=lambda e: e["rank"] or 999)
+    dropped.sort(key=lambda d: d["prev_rank"] or 999)
+    return {"status": "success", "data": {
+        "available": True, "current": cur_meta, "previous": prev_meta,
+        "moved": moved[:limit], "entered": entered[:limit], "dropped": dropped[:limit],
+        "counts": {"moved": len(moved), "entered": len(entered), "dropped": len(dropped)},
+    }}
+
+
 @router.post("/watchlist/scan")
 async def scan_watchlist():
     """Ask the stock-scanner microservice to run an immediate full market sweep."""
@@ -292,6 +384,37 @@ async def scan_watchlist():
         return {"status": "started"}
     except Exception as exc:
         logger.warning("could not trigger scanner: %s", exc)
+        return {"status": "error", "detail": str(exc)}
+
+
+@router.post("/backfill-delivery")
+async def backfill_delivery(days: int = 14, limit: int = 250):
+    """Ask the scanner to reconstruct delivery-pick accuracy history so the AI Scan
+    Accuracy graph shows a delivery line immediately (live grading continues daily)."""
+    import httpx
+    from app.config import settings
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            await client.post(f"{settings.SCANNER_SERVICE_URL}/backfill-delivery",
+                              params={"days": days, "limit": limit})
+        return {"status": "started", "days": days, "limit": limit}
+    except Exception as exc:
+        logger.warning("could not trigger delivery backfill: %s", exc)
+        return {"status": "error", "detail": str(exc)}
+
+
+@router.post("/backfill-committed")
+async def backfill_committed(days: int = 20, limit: int = 400):
+    """Ask the scanner to reconstruct the high-conviction tier's accuracy history."""
+    import httpx
+    from app.config import settings
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            await client.post(f"{settings.SCANNER_SERVICE_URL}/backfill-committed",
+                              params={"days": days, "limit": limit})
+        return {"status": "started", "days": days, "limit": limit}
+    except Exception as exc:
+        logger.warning("could not trigger committed backfill: %s", exc)
         return {"status": "error", "detail": str(exc)}
 
 
@@ -569,7 +692,13 @@ class ScanFeedback(BaseModel):
     avg_realized_return_pct: float = 0.0
     by_action:               dict = {}
     results:                 list[dict] = []
+    trade_kind:              str = "intraday"   # "intraday" | "delivery"
 
+
+# Accuracy goal. The broad scan realistically sits ~50% (markets are near-random
+# at the single-pick level); the high-conviction "committed" tier is what we tune
+# toward this target via selectivity + abstention.
+SCAN_ACCURACY_TARGET = float(os.getenv("SCAN_ACCURACY_TARGET", "0.90"))
 
 _SCAN_EVAL_DDL = """
 CREATE TABLE IF NOT EXISTS scan_evaluations (
@@ -582,10 +711,36 @@ CREATE TABLE IF NOT EXISTS scan_evaluations (
     day_return_pct         DOUBLE PRECISION,
     realized_return_pct    DOUBLE PRECISION,
     correct                BOOLEAN,
-    created_at             TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE (eval_date, symbol)
+    trade_kind             TEXT DEFAULT 'intraday',
+    created_at             TIMESTAMPTZ DEFAULT NOW()
 );
 """
+# Idempotent migrations (old installs had UNIQUE(eval_date,symbol) and no trade_kind).
+_SCAN_EVAL_MIGRATE = [
+    "ALTER TABLE scan_evaluations ADD COLUMN IF NOT EXISTS trade_kind TEXT DEFAULT 'intraday'",
+    "ALTER TABLE scan_evaluations DROP CONSTRAINT IF EXISTS scan_evaluations_eval_date_symbol_key",
+    "CREATE UNIQUE INDEX IF NOT EXISTS scan_evaluations_uniq ON scan_evaluations (eval_date, symbol, trade_kind)",
+]
+_scan_eval_ready = False
+
+
+async def _ensure_scan_eval() -> None:
+    """Create + migrate the scan_evaluations table once (each migration in its own
+    transaction so one no-op failure can't abort the rest)."""
+    global _scan_eval_ready
+    if _scan_eval_ready:
+        return
+    from sqlalchemy import text
+    from app.database.postgres import engine
+    async with engine.begin() as conn:
+        await conn.execute(text(_SCAN_EVAL_DDL))
+    for stmt in _SCAN_EVAL_MIGRATE:
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text(stmt))
+        except Exception as exc:
+            logger.debug("scan_eval migrate skipped (%s): %s", stmt[:40], exc)
+    _scan_eval_ready = True
 
 
 @router.post("/scan-feedback")
@@ -601,22 +756,23 @@ async def scan_feedback(req: ScanFeedback):
         eval_date = date.today()
     inserted = 0
     try:
+        await _ensure_scan_eval()
         async with engine.begin() as conn:
-            await conn.execute(text(_SCAN_EVAL_DDL))
             for g in req.results:
+                kind = g.get("trade_kind") or req.trade_kind or "intraday"
                 await conn.execute(text("""
                     INSERT INTO scan_evaluations
                       (eval_date, symbol, action, predicted_confidence,
-                       predicted_signal_score, day_return_pct, realized_return_pct, correct)
-                    VALUES (:d,:sym,:act,:pc,:ps,:dr,:rr,:ok)
-                    ON CONFLICT (eval_date, symbol) DO UPDATE SET
+                       predicted_signal_score, day_return_pct, realized_return_pct, correct, trade_kind)
+                    VALUES (:d,:sym,:act,:pc,:ps,:dr,:rr,:ok,:kind)
+                    ON CONFLICT (eval_date, symbol, trade_kind) DO UPDATE SET
                       action=:act, predicted_confidence=:pc, predicted_signal_score=:ps,
                       day_return_pct=:dr, realized_return_pct=:rr, correct=:ok
                 """), {
                     "d": eval_date, "sym": g.get("symbol"), "act": g.get("action"),
                     "pc": g.get("predicted_confidence"), "ps": g.get("predicted_signal_score"),
                     "dr": g.get("day_return_pct"), "rr": g.get("realized_return_pct"),
-                    "ok": bool(g.get("correct")),
+                    "ok": bool(g.get("correct")), "kind": kind,
                 })
                 inserted += 1
     except Exception as exc:
@@ -645,35 +801,50 @@ async def scan_evaluation():
     except Exception as exc:
         logger.debug("scan eval read failed: %s", exc)
 
-    trend: list[dict] = []
-    overall = {"days": 0, "accuracy": None, "picks": 0}
+    target = SCAN_ACCURACY_TARGET
+    trends: dict[str, list[dict]] = {"intraday": [], "delivery": [], "committed": []}
+    overalls: dict[str, dict] = {k: {"days": 0, "accuracy": None, "picks": 0} for k in trends}
     try:
+        await _ensure_scan_eval()
         async with engine.begin() as conn:
-            await conn.execute(text(_SCAN_EVAL_DDL))
             rows = (await conn.execute(text("""
-                SELECT eval_date,
+                SELECT eval_date, COALESCE(trade_kind,'intraday') kind,
                        AVG(CASE WHEN correct THEN 1.0 ELSE 0.0 END) AS acc,
                        AVG(realized_return_pct) AS avg_ret,
                        COUNT(*) AS n
                 FROM scan_evaluations
-                GROUP BY eval_date ORDER BY eval_date ASC
+                GROUP BY eval_date, COALESCE(trade_kind,'intraday')
+                ORDER BY eval_date ASC
             """))).fetchall()
             for r in rows:
-                trend.append({
+                kind = r[1] if r[1] in trends else "intraday"
+                acc = round(float(r[2]), 4)
+                trends[kind].append({
                     "date": r[0].strftime("%Y-%m-%d") if r[0] else None,
-                    "accuracy": round(float(r[1]), 4),
-                    "avg_realized_return_pct": round(float(r[2] or 0.0), 2),
-                    "picks": int(r[3]),
+                    "accuracy": acc,
+                    "avg_realized_return_pct": round(float(r[3] or 0.0), 2),
+                    "picks": int(r[4]),
+                    "meets_target": acc >= target,
                 })
             agg = (await conn.execute(text("""
-                SELECT AVG(CASE WHEN correct THEN 1.0 ELSE 0.0 END), COUNT(*) FROM scan_evaluations
-            """))).fetchone()
-            if agg and agg[1]:
-                overall = {"days": len(trend), "accuracy": round(float(agg[0]), 4), "picks": int(agg[1])}
+                SELECT COALESCE(trade_kind,'intraday') kind,
+                       AVG(CASE WHEN correct THEN 1.0 ELSE 0.0 END), COUNT(*)
+                FROM scan_evaluations GROUP BY COALESCE(trade_kind,'intraday')
+            """))).fetchall()
+            for a in agg:
+                kind = a[0] if a[0] in trends else "intraday"
+                overalls[kind] = {"days": len(trends[kind]), "accuracy": round(float(a[1]), 4),
+                                  "picks": int(a[2]), "meets_target": float(a[1]) >= target}
     except Exception as exc:
         logger.debug("scan eval trend failed: %s", exc)
 
-    return {"status": "success", "data": {"latest": latest, "trend": trend, "overall": overall}}
+    return {"status": "success", "data": {
+        "latest": latest, "target": target,
+        "trend": trends["intraday"], "delivery_trend": trends["delivery"],
+        "committed_trend": trends["committed"],
+        "overall": overalls["intraday"], "overall_delivery": overalls["delivery"],
+        "overall_committed": overalls["committed"],
+    }}
 
 
 # ── Autopilot ─────────────────────────────────────────────────────────────────
@@ -702,7 +873,8 @@ async def _autopilot_status() -> dict:
     from app.utils.redis_client import cache_get
     paper = (await cache_get("ai_engine:autopilot_enabled")) == "1"
     bt    = (await cache_get("ai_engine:autopilot_backtest_enabled")) == "1"
-    return {"paper": {"enabled": paper}, "backtest": {"enabled": bt}, "service_unavailable": True}
+    timing = (await cache_get("ai_engine:autopilot_paper_timing")) or "normal"
+    return {"paper": {"enabled": paper, "timing_mode": timing}, "backtest": {"enabled": bt}, "service_unavailable": True}
 
 
 class TradeGateRequest(BaseModel):
@@ -794,48 +966,239 @@ async def reset_autopilot_cursor():
     return {"status": "success", "data": await _autopilot_status()}
 
 
+class PaperTimingRequest(BaseModel):
+    mode: str = "normal"     # "normal" | "aggressive"
+
+
+@router.post("/autopilot/paper-timing")
+async def set_autopilot_paper_timing(req: PaperTimingRequest):
+    """Set the entry-timing mode for autopilot **paper** sessions. The autopilot
+    reads this each tick, so new paper sessions open in the chosen mode (existing
+    running sessions keep the mode they started with)."""
+    mode = "aggressive" if req.mode == "aggressive" else "normal"
+    try:
+        from app.utils.redis_client import cache_get, cache_set
+        prev = (await cache_get("ai_engine:autopilot_paper_timing")) or "normal"
+        await cache_set("ai_engine:autopilot_paper_timing", mode, expire=86400 * 30)
+        if mode != prev:
+            await _log_system_event(
+                f"Autopilot timing → {mode}", "trading",
+                f"Autopilot paper entry-timing switched from {prev} to {mode}. "
+                f"{'Looser entry triggers — expect more (and more marginal) trades.' if mode == 'aggressive' else 'Standard entry triggers restored.'}",
+            )
+    except Exception as exc:
+        logger.warning("paper-timing write failed: %s", exc)
+    return {"status": "success", "data": await _autopilot_status()}
+
+
 # ── Learning curve (system getting smarter over time) ─────────────────────────
 
+_VALID_SOURCES = {"PAPER", "REPLAY", "LIVE", "BACKTEST"}
+
+
 @router.get("/learning-curve")
-async def learning_curve():
-    """Cumulative win-rate as the system accumulates experience (trades ordered by
-    time). Shows the system stabilising/improving as it learns from paper trading,
-    sessions and backtests — and extends as the autopilot trades more."""
+async def learning_curve(source: str = "PAPER,LIVE,REPLAY", window: int = 50):
+    """Learning curve as the system accumulates experience (trades ordered by time).
+
+    Win-rate alone is misleading for an asymmetric-payoff strategy (small losses,
+    large wins), so we return three aligned series plus a per-source breakdown:
+
+      • cum_win_rate    — running win-rate over all trades so far (lagging)
+      • roll_win_rate   — trailing-`window` win-rate (recency-sensitive: the real
+                          "is it learning lately?" signal)
+      • cum_equity      — cumulative sum of pnl_pct in % (the true profitability
+                          curve; rises even when win-rate is < 50%)
+
+    `source` is a comma list of PAPER/REPLAY/LIVE/BACKTEST. REPLAY (historical
+    replays) usually dwarfs real PAPER/LIVE trades, so callers can isolate sources.
+    """
     await _db_once()
     from app.database.postgres import engine
     from sqlalchemy import text
+    from collections import deque
+
+    srcs = [s.strip().upper() for s in (source or "").split(",") if s.strip().upper() in _VALID_SOURCES]
+    if not srcs:
+        srcs = ["PAPER", "LIVE", "REPLAY"]
+    window = max(5, min(500, int(window or 50)))
+
+    rows: list = []
+    by_source: list[dict] = []
+    events: list[dict] = []
     try:
+        await _ensure_learning_events()
         async with engine.begin() as conn:
-            # Intraday system → curve reflects intraday trades (paper/replay/live),
-            # not the multi-day strategy backtester.
-            rows = (await conn.execute(text("""
-                SELECT outcome, pnl_pct, created_at FROM trade_records
-                WHERE outcome IN ('WIN','LOSS')
-                  AND COALESCE(trade_source,'LIVE') IN ('PAPER','REPLAY','LIVE')
-                ORDER BY created_at ASC, id ASC
-            """))).fetchall()
+            rows = (await conn.execute(text(
+                "SELECT outcome, pnl_pct, created_at, COALESCE(trade_source,'LIVE') src "
+                "FROM trade_records WHERE outcome IN ('WIN','LOSS') "
+                "AND COALESCE(trade_source,'LIVE') = ANY(:srcs) "
+                "ORDER BY created_at ASC, id ASC"
+            ), {"srcs": srcs})).fetchall()
+            # Per-source summary across ALL sources (so the UI can show what it's filtering)
+            summ = (await conn.execute(text(
+                "SELECT COALESCE(trade_source,'LIVE') src, count(*) n, "
+                "sum((outcome='WIN')::int) wins, avg(pnl_pct) avg_ret, "
+                "avg(pnl_pct) FILTER (WHERE outcome='WIN') avg_win, "
+                "avg(pnl_pct) FILTER (WHERE outcome='LOSS') avg_loss "
+                "FROM trade_records WHERE outcome IN ('WIN','LOSS') GROUP BY 1 ORDER BY 2 DESC"
+            ))).fetchall()
+            for s in summ:
+                n_s = int(s[1] or 0); wins_s = int(s[2] or 0)
+                wr = wins_s / n_s if n_s else 0.0
+                aw = float(s[4] or 0.0); al = float(s[5] or 0.0)
+                by_source.append({
+                    "source": s[0], "trades": n_s, "win_rate": round(wr, 4),
+                    "avg_return": round(float(s[3] or 0.0) * 100, 3),
+                    "avg_win": round(aw * 100, 3), "avg_loss": round(al * 100, 3),
+                    # expectancy per trade in % — the metric that actually matters
+                    "expectancy": round((wr * aw + (1 - wr) * al) * 100, 4),
+                })
+            ev = (await conn.execute(text(
+                "SELECT occurred_at, title, category, detail FROM system_events ORDER BY occurred_at ASC"
+            ))).fetchall()
+            for e in ev:
+                events.append({
+                    "occurred_at": e[0].isoformat() if e[0] else None,
+                    "title": e[1], "category": e[2] or "update", "detail": e[3] or "",
+                })
     except Exception as exc:
         logger.warning("learning_curve failed: %s", exc)
-        rows = []
 
     n = len(rows)
     points: list[dict] = []
     if n:
-        # ~40 evenly-spaced samples of the running cumulative win-rate
-        step = max(1, n // 40)
+        step = max(1, n // 60)              # ~60 evenly-spaced samples
+        win_q: deque = deque(maxlen=window) # rolling window of 1/0 outcomes
+        ret_q: deque = deque(maxlen=window)
         cum_wins = cum_ret = 0.0
         for i, r in enumerate(rows, start=1):
-            if r[0] == "WIN":
-                cum_wins += 1
-            cum_ret += float(r[1] or 0.0)
+            is_win = 1 if r[0] == "WIN" else 0
+            pct = float(r[1] or 0.0)
+            cum_wins += is_win
+            cum_ret += pct
+            win_q.append(is_win); ret_q.append(pct)
             if i % step == 0 or i == n:
                 points.append({
                     "trade_no": i,
-                    "cum_win_rate": round(cum_wins / i, 4),
-                    "cum_avg_return": round(cum_ret / i * 100, 2),
+                    "ts": r[2].isoformat() if r[2] else None,
                     "date": r[2].strftime("%Y-%m-%d") if r[2] else None,
+                    "cum_win_rate": round(cum_wins / i, 4),
+                    "roll_win_rate": round(sum(win_q) / len(win_q), 4),
+                    "roll_avg_return": round(sum(ret_q) / len(ret_q) * 100, 3),
+                    "cum_equity": round(cum_ret * 100, 2),
+                    "cum_avg_return": round(cum_ret / i * 100, 3),
                 })
-    return {"status": "success", "data": {"points": points, "total_trades": n}}
+    return {"status": "success", "data": {
+        "points": points, "total_trades": n, "sources": srcs, "window": window,
+        "by_source": by_source, "events": events,
+    }}
+
+
+# ── System events overlay (correlate curve moves with what changed) ────────────
+
+_learning_events_ready = False
+
+# Known platform changes (seeded once) so the curve has context out of the box.
+_SEED_EVENTS = [
+    ("2026-06-01T00:00:00", "Full NSE universe scan", "scanner",
+     "Scanner expanded to the complete ~1800+ NSE universe with rate-limiting; bulk REPLAY backfill begins."),
+    ("2026-06-02T00:00:00", "Live paper trading enabled", "trading",
+     "Autopilot paper sessions start executing intraday trades."),
+    ("2026-06-10T00:00:00", "AI loss-learning loop", "learning",
+     "LLM/rule post-mortems + active lessons fed into the agent prompt to avoid repeat losing setups."),
+    ("2026-06-14T00:00:00", "Per-session entry-timing mode", "trading",
+     "Normal/Aggressive entry timing added to paper/backtest sessions."),
+    ("2026-06-16T00:00:00", "Autopilot aggressive timing", "trading",
+     "Normal/Aggressive entry-timing toggle wired into autopilot paper trading."),
+]
+
+
+async def _ensure_learning_events() -> None:
+    global _learning_events_ready
+    if _learning_events_ready:
+        return
+    from app.database.postgres import engine
+    from sqlalchemy import text
+    from datetime import datetime
+    async with engine.begin() as conn:
+        await conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS system_events ("
+            "id SERIAL PRIMARY KEY, occurred_at TIMESTAMPTZ NOT NULL DEFAULT now(), "
+            "title TEXT NOT NULL, category TEXT DEFAULT 'update', detail TEXT DEFAULT '')"
+        ))
+        cnt = (await conn.execute(text("SELECT count(*) FROM system_events"))).scalar() or 0
+        if not cnt:
+            for occ, title, cat, detail in _SEED_EVENTS:
+                await conn.execute(text(
+                    "INSERT INTO system_events (occurred_at, title, category, detail) "
+                    "VALUES (:o, :t, :c, :d)"
+                ), {"o": datetime.fromisoformat(occ), "t": title, "c": cat, "d": detail})
+    _learning_events_ready = True
+
+
+async def _log_system_event(title: str, category: str = "update", detail: str = "") -> None:
+    """Append a system-update marker to the learning curve. Best-effort: never
+    raises into the caller (a failed annotation must not break the real action)."""
+    try:
+        await _ensure_learning_events()
+        from app.database.postgres import engine
+        from sqlalchemy import text
+        async with engine.begin() as conn:
+            await conn.execute(text(
+                "INSERT INTO system_events (title, category, detail) VALUES (:t, :c, :d)"
+            ), {"t": title, "c": category, "d": detail})
+    except Exception as exc:
+        logger.warning("log_system_event failed: %s", exc)
+
+
+class LearningEventRequest(BaseModel):
+    title:       str
+    detail:      str = ""
+    category:    str = "update"
+    occurred_at: Optional[str] = None   # ISO; defaults to now()
+
+
+@router.get("/learning-events")
+async def list_learning_events():
+    """System-update markers shown on the learning curve."""
+    await _db_once()
+    await _ensure_learning_events()
+    from app.database.postgres import engine
+    from sqlalchemy import text
+    async with engine.begin() as conn:
+        rows = (await conn.execute(text(
+            "SELECT id, occurred_at, title, category, detail FROM system_events ORDER BY occurred_at ASC"
+        ))).fetchall()
+    return {"status": "success", "events": [{
+        "id": r[0], "occurred_at": r[1].isoformat() if r[1] else None,
+        "title": r[2], "category": r[3] or "update", "detail": r[4] or "",
+    } for r in rows]}
+
+
+@router.post("/learning-events")
+async def add_learning_event(req: LearningEventRequest):
+    """Log a system change so its effect on the curve can be seen."""
+    await _db_once()
+    await _ensure_learning_events()
+    from app.database.postgres import engine
+    from sqlalchemy import text
+    from datetime import datetime
+    async with engine.begin() as conn:
+        if req.occurred_at:
+            try:
+                occ_dt = datetime.fromisoformat(req.occurred_at.replace("Z", "+00:00"))
+            except ValueError:
+                raise HTTPException(status_code=400, detail="occurred_at must be ISO-8601")
+            rid = (await conn.execute(text(
+                "INSERT INTO system_events (occurred_at, title, category, detail) "
+                "VALUES (:o, :t, :c, :d) RETURNING id"
+            ), {"o": occ_dt, "t": req.title, "c": req.category, "d": req.detail})).scalar()
+        else:
+            rid = (await conn.execute(text(
+                "INSERT INTO system_events (title, category, detail) "
+                "VALUES (:t, :c, :d) RETURNING id"
+            ), {"t": req.title, "c": req.category, "d": req.detail})).scalar()
+    return {"status": "success", "id": rid}
 
 
 # ── Pattern Memory ────────────────────────────────────────────────────────────
@@ -892,6 +1255,69 @@ async def memory_sweep_status():
     """Last sweep summary + whether one is currently running."""
     from app.agents.memory_sweep import get_last_sweep, is_running
     return {"running": is_running(), "last": get_last_sweep()}
+
+
+# ── Pattern Recognition Model (dedicated, continuously-learning) ───────────────
+
+class PatternTrainRequest(BaseModel):
+    symbols:       Optional[list[str]] = None
+    lookback_days: int = 365
+    horizon:       int = 3       # bars ahead used to label the pattern's outcome
+    stride:        int = 1
+
+
+@router.post("/pattern-model/train")
+async def pattern_model_train(req: PatternTrainRequest, background: bool = True):
+    """Train the pattern-recognition model from backtest history — patterns ONLY
+    (fingerprint → realised forward move). Keeps the recogniser getting smarter."""
+    await _db_once()
+    import asyncio
+    from app.agents.pattern_model import train_pattern_model, is_training
+    if is_training():
+        return {"status": "already_running"}
+    kw = dict(symbols=req.symbols, lookback_days=req.lookback_days,
+              horizon=req.horizon, stride=req.stride, trigger="manual")
+    if background:
+        asyncio.create_task(train_pattern_model(**kw))
+        return {"status": "started"}
+    return await train_pattern_model(**kw)
+
+
+@router.get("/pattern-model/status")
+async def pattern_model_status():
+    """Training state + the model's current accuracy."""
+    from app.agents import get_pattern_model
+    from app.agents.pattern_model import is_training, get_last_train
+    stats = await get_pattern_model().stats()
+    return {"running": is_training(), "last_train": get_last_train(), "model": stats}
+
+
+@router.get("/pattern-model/curve")
+async def pattern_model_curve(limit: int = 200):
+    """The model's accuracy as it has learned (for the 'getting smarter' chart)."""
+    from app.agents import get_pattern_model
+    pts = await get_pattern_model().curve(limit=limit)
+    return {"status": "success", "data": {"points": pts}}
+
+
+@router.get("/pattern-model/weights")
+async def pattern_model_weights():
+    """The learned weights — the scanner pulls these once per sweep to score each
+    pattern locally and gate the high-conviction tier on the model's agreement."""
+    from app.agents import get_pattern_model
+    m = get_pattern_model()
+    await m.init_db()
+    return {"status": "success", "data": m.weights_payload()}
+
+
+@router.post("/pattern-model/predict")
+async def pattern_model_predict(req: AnalyzeRequest):
+    """What does the pattern model say about this candle window's *pattern* alone?"""
+    from app.agents import get_pattern_model
+    pred = get_pattern_model().predict_candles(req.candles)
+    if pred is None:
+        return {"status": "error", "detail": "not enough candles for a pattern fingerprint"}
+    return {"status": "success", "data": pred}
 
 
 @router.post("/memory/seed")

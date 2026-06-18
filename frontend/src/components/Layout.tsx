@@ -23,9 +23,10 @@ const INDICES = [
 
 // Main nav items (left of AI Engine)
 const NAV_LEFT = [
-  { to: '/',            label: 'Dashboard' },
-  { to: '/predictions', label: 'Predictions' },
-  { to: '/portfolio',   label: 'Portfolio' },
+  { to: '/',             label: 'Dashboard' },
+  { to: '/predictions',  label: 'Predictions' },
+  { to: '/portfolio',    label: 'Portfolio' },
+  { to: '/mutual-funds', label: 'Funds' },
 ];
 
 // AI Engine sub-menu items

@@ -272,6 +272,83 @@ class ApiService {
     return response.data;
   }
 
+  async sectorExposure(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/portfolio/sector-exposure', { timeout: 30000 });
+    return response.data;
+  }
+
+  async fundBaskets(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/portfolio/fund-baskets', { timeout: 30000 });
+    return response.data;
+  }
+
+  async investBasket(basket: string, amount: number): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/portfolio/fund-baskets/invest', {
+      params: { basket, amount }, timeout: 30000,
+    });
+    return response.data;
+  }
+
+  async portfolioHealth(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/portfolio/health', { timeout: 30000 });
+    return response.data;
+  }
+  async sipPlanner(p: { goalAmount?: number; years?: number; risk?: string; currentCorpus?: number; monthly?: number }): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/portfolio/sip-planner', { params: {
+      goal_amount: p.goalAmount ?? 0, years: p.years ?? 10, risk: p.risk ?? 'moderate',
+      current_corpus: p.currentCorpus ?? 0, monthly: p.monthly ?? 0,
+    } });
+    return response.data;
+  }
+  async taxHarvest(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/portfolio/tax-harvest', { timeout: 30000 });
+    return response.data;
+  }
+  async portfolioBenchmark(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/portfolio/benchmark', { timeout: 60000 });
+    return response.data;
+  }
+  async portfolioAdvisor(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/portfolio/advisor', { timeout: 90000 });
+    return response.data;
+  }
+
+  // ── Mutual Funds (real NAV/returns via AMFI/mfapi) ──
+  async mfSearch(q: string): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/mutual-funds/search', { params: { q }, timeout: 25000 });
+    return response.data;
+  }
+  async mfScheme(code: number): Promise<ApiResponse<any>> {
+    const response = await this.api.get(`/api/mutual-funds/scheme/${code}`, { timeout: 20000 });
+    return response.data;
+  }
+  async mfHoldings(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/mutual-funds/holdings', { timeout: 40000 });
+    return response.data;
+  }
+  async mfAddHolding(body: { schemeCode: number; units?: number; invested?: number }): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/mutual-funds/holdings', {
+      scheme_code: body.schemeCode, units: body.units, invested: body.invested,
+    });
+    return response.data;
+  }
+  async mfRemoveHolding(code: number): Promise<ApiResponse<any>> {
+    const response = await this.api.delete(`/api/mutual-funds/holdings/${code}`);
+    return response.data;
+  }
+  async mfCategories(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/mutual-funds/categories');
+    return response.data;
+  }
+  async mfScreener(category: string, limit = 20, sort: 'return' | 'risk' = 'return'): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/mutual-funds/screener', { params: { category, limit, sort }, timeout: 60000 });
+    return response.data;
+  }
+  async mfScan(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/mutual-funds/scan', { timeout: 60000 });
+    return response.data;
+  }
+
   async getAlerts(): Promise<ApiResponse<any>> {
     try {
       const response = await this.api.get('/api/portfolio/alerts');
@@ -716,6 +793,24 @@ class ApiService {
     const response = await this.api.get('/api/ai-engine/ranked', { params: { limit }, timeout: 20000 });
     return response.data;
   }
+  async scanDiff(limit = 60): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/ai-engine/scan-diff', { params: { limit }, timeout: 20000 });
+    return response.data;
+  }
+  async patternModelStatus(): Promise<any> {
+    const response = await this.api.get('/api/ai-engine/pattern-model/status');
+    return response.data;
+  }
+  async patternModelCurve(limit = 200): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/ai-engine/pattern-model/curve', { params: { limit } });
+    return response.data;
+  }
+  async trainPatternModel(body: { lookbackDays?: number; horizon?: number; stride?: number } = {}): Promise<any> {
+    const response = await this.api.post('/api/ai-engine/pattern-model/train', {
+      lookback_days: body.lookbackDays ?? 365, horizon: body.horizon ?? 3, stride: body.stride ?? 1,
+    });
+    return response.data;
+  }
   async getAutopilot(): Promise<ApiResponse<any>> {
     const response = await this.api.get('/api/ai-engine/autopilot');
     return response.data;
@@ -728,8 +823,23 @@ class ApiService {
     const response = await this.api.post('/api/ai-engine/autopilot/reset-cursor');
     return response.data;
   }
-  async learningCurve(): Promise<ApiResponse<any>> {
-    const response = await this.api.get('/api/ai-engine/learning-curve');
+  async setAutopilotPaperTiming(mode: 'normal' | 'aggressive'): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/ai-engine/autopilot/paper-timing', { mode });
+    return response.data;
+  }
+  async learningCurve(source = 'PAPER,LIVE,REPLAY', window = 50): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/ai-engine/learning-curve', { params: { source, window } });
+    return response.data;
+  }
+  async learningEvents(): Promise<any> {
+    const response = await this.api.get('/api/ai-engine/learning-events');
+    return response.data;
+  }
+  async addLearningEvent(ev: { title: string; detail?: string; category?: string; occurredAt?: string }): Promise<any> {
+    const response = await this.api.post('/api/ai-engine/learning-events', {
+      title: ev.title, detail: ev.detail ?? '', category: ev.category ?? 'update',
+      occurred_at: ev.occurredAt,
+    });
     return response.data;
   }
 
@@ -774,7 +884,7 @@ class ApiService {
   async sessionStart(payload: {
     mode: 'replay' | 'paper'; symbol: string; date?: string;
     start_time?: string; capital?: number; speed?: number; model?: string;
-    max_hold_minutes?: number;
+    max_hold_minutes?: number; timing_mode?: 'normal' | 'aggressive';
   }): Promise<ApiResponse<any>> {
     const response = await this.api.post('/api/sessions/start', payload);
     return response.data;

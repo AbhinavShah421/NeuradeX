@@ -7,6 +7,7 @@ import Signup from './pages/Signup';
 import Dashboard from './pages/Dashboard';
 import StockDetail from './pages/StockDetail';
 import Portfolio from './pages/Portfolio';
+import MutualFunds from './pages/MutualFunds';
 import Predictions from './pages/Predictions';
 import AIEngineLayout from './pages/AIEngineLayout';
 import AIEngine from './pages/AIEngine';
@@ -37,6 +38,7 @@ const App: React.FC = () => {
                   <Route path="/" element={<Dashboard />} />
                   <Route path="/stocks/:symbol" element={<StockDetail />} />
                   <Route path="/portfolio" element={<Portfolio />} />
+                  <Route path="/mutual-funds" element={<MutualFunds />} />
                   <Route path="/predictions" element={<Predictions />} />
 
                   {/* AI Engine — nested sub-routes under shared layout */}

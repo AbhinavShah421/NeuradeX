@@ -806,13 +806,17 @@ def _intraday_indicators(candles: list[dict], idx: int) -> dict:
     }
 
 
-def _tech_signal(ind: dict, position: str, candle: dict, entry_price: float) -> int:
+def _tech_signal(ind: dict, position: str, candle: dict, entry_price: float, aggressive: bool = False) -> int:
     """1 = buy, -1 = sell, 0 = hold based on technicals.
 
     Entries are trend-filtered (no counter-trend knife-catching); exits are
     volatility-scaled (ATR) with a profit-lock so winners are allowed to run
     while bad entries are cut quickly — the realised reward:risk that fixed
     +2.5%/-1.5% with eager momentum exits was giving away.
+
+    `aggressive=True` loosens the entry triggers (wider RSI bands, lower momentum
+    thresholds, milder downtrend filter) so a session takes more trades — useful
+    for observing/training. Exits are unchanged.
     """
     rsi, mom5 = ind["rsi"], ind["mom5"]
     price = candle["close"]
@@ -830,6 +834,14 @@ def _tech_signal(ind: dict, position: str, candle: dict, entry_price: float) -> 
         return -1
 
     if position == "NONE":
+        if aggressive:
+            # Looser bar: only veto strong downtrends; wider RSI/momentum bands.
+            if sma5 < sma20 and mom5 < -0.30:
+                return 0
+            if rsi < 48 and price >= vwap * 0.995 and mom5 > -0.10:   return 1   # dip near VWAP
+            if sma5 >= sma20 and mom5 > 0.05 and rsi < 72:            return 1   # trend continuation
+            if mom5 > 0.12 and price > vwap * 0.998 and rsi < 74:     return 1   # momentum
+            return 0
         # Trend filter: skip entries while clearly trending down (don't catch
         # falling knives). VWAP + RSI still gate the individual triggers.
         downtrend = sma5 < sma20 and mom5 < -0.10

@@ -9,11 +9,13 @@ from .rl_agent  import RLAgent
 from .ensemble  import EnsembleEngine
 from .learning  import LearningSystem
 from .memory    import PatternMemory, MemoryAgent
+from .pattern_model import PatternRecognitionModel
 
 _engine:   EnsembleEngine | None = None
 _learning: LearningSystem | None = None
 _rl_agent: RLAgent        | None = None
 _memory:   PatternMemory  | None = None
+_pattern_model: PatternRecognitionModel | None = None
 
 
 def get_memory() -> PatternMemory:
@@ -21,6 +23,13 @@ def get_memory() -> PatternMemory:
     if _memory is None:
         _memory = PatternMemory()
     return _memory
+
+
+def get_pattern_model() -> PatternRecognitionModel:
+    global _pattern_model
+    if _pattern_model is None:
+        _pattern_model = PatternRecognitionModel()
+    return _pattern_model
 
 
 def get_engine() -> EnsembleEngine:
@@ -52,7 +61,8 @@ def get_learning() -> LearningSystem:
     return _learning
 
 
-__all__ = ["get_engine", "get_learning", "get_rl_agent", "get_memory",
+__all__ = ["get_engine", "get_learning", "get_rl_agent", "get_memory", "get_pattern_model",
            "EnsembleEngine", "LearningSystem", "PatternMemory", "MemoryAgent",
+           "PatternRecognitionModel",
            "TechnicalAgent", "PatternAgent", "MomentumAgent",
            "VolatilityAgent", "SentimentAgent", "RLAgent"]

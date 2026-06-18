@@ -8,95 +8,62 @@ sidebar_label: Portfolio & Predictions
 
 **File:** `frontend/src/pages/Portfolio.tsx`
 
-Displays the user's holdings, performance metrics, risk analysis, and active price alerts.
+Live Groww holdings with real prices, plus AI-driven rebalancing, investing and
+order management.
 
 ## API Calls
 
-| # | Method | Endpoint | When | Purpose |
-|---|---|---|---|---|
-| 1 | GET | `/api/portfolio/` | On mount | Holdings list with P&L per stock |
-| 2 | GET | `/api/portfolio/performance` | On mount | Aggregate performance metrics |
-| 3 | GET | `/api/portfolio/alerts` | On mount | Active price alerts |
-
-## Data Flow
-
-```
-Portfolio mounts
-    │
-    ├─ GET /api/portfolio/
-    │      → { totalValue, investedValue, gainPercent,
-    │           stocks: [{ symbol, qty, avgBuyPrice, currentPrice,
-    │                       gainLoss, gainLossPercent }] }
-    │
-    ├─ GET /api/portfolio/performance
-    │      → { sharpe, maxDrawdown, beta, alpha,
-    │           hhiConcentration, valueAtRisk }
-    │
-    └─ GET /api/portfolio/alerts
-           → [{ symbol, alertType, triggerPrice, isActive }]
-```
+| Method | Endpoint | Purpose |
+|---|---|---|
+| GET | `/api/portfolio/` | Holdings + **real** current prices (Yahoo fallback when Groww live-data is unentitled), P&L, 1D return |
+| GET | `/api/portfolio/optimize?refresh=` | AI rebalancing plan (cached, scan-keyed) |
+| GET | `/api/portfolio/invest-plan?amount=` | AI allocation of an amount across the best picks |
+| GET | `/api/orders/` · POST `/api/orders/cancel` | Live Groww order book + cancel |
+| POST | `/api/orders/` | Place a Buy/Sell/Swap leg (protective LIMIT) |
+| GET | `/api/ai-engine/scan-status` | Shared scan status (Rescan button) |
+| GET | `/api/portfolio/performance` · `/api/portfolio/alerts` | Metrics + alerts |
 
 ## UI Tabs
 
 | Tab | Content |
 |---|---|
-| Holdings | Table: Symbol, Qty, Avg Price, CMP, P&L, P&L% |
-| Performance | Sharpe ratio, Max Drawdown, Beta, Alpha charts |
-| Risk | HHI concentration, VaR, sector allocation breakdown |
+| **Holdings** | Symbol, Qty, Avg, CMP (live), P&L, P&L% |
+| **Performance** | Sharpe, Max Drawdown, returns |
+| **Risk** | HHI concentration, VaR, sector breakdown |
+| **AI Optimize** | Scan-keyed rebalancing plan: per-holding AI signal + EXIT/TRIM/HOLD/ADD + target weight; for at-risk holdings an AI **alternative** and a one-click **Swap** (sell→buy, with the basis shown); live "Today's Orders" panel with cancel |
+| **AI Invest** | Enter an amount → AI divides it across the best A/B picks (conviction-weighted) as protective LIMIT buys; per-stock Buy + **Invest all** |
+
+Every page (Holdings header, Predictions, Dashboard) shares one **ScanControl**
+(scan status + Rescan) backed by [`scanStore`](https://github.com/AbhinavShah421/NeuradeX/blob/main/frontend/src/stores/scanStore.ts);
+the Rescan button is disabled on all pages while a sweep runs. Orders are placed
+only behind an explicit confirmation modal; the order book stays in sync with
+Groww (poll + refresh on tab focus).
 
 ---
 
 ---
 
-# Predictions (`/predictions`)
+# Predictions (`/predictions`) — AI Stock Rankings
 
 **File:** `frontend/src/pages/Predictions.tsx`
 
-Multi-stock AI prediction comparison view with custom timeframe analysis.
+A ranked board of **every AI-scanned stock**, sourced from the full-market
+scanner. Filter by **Top 10 / 20 / 50 / 100 / All**, and click any row to see
+**why it earned its rank**.
 
 ## API Calls
 
-| # | Method | Endpoint | When | Purpose |
-|---|---|---|---|---|
-| 1 | GET | `/api/predictions/{symbol}` | On mount (×8, parallel) | AI predictions for 8 predefined stocks |
-| 2 | POST | `/api/predictions/{symbol}/custom-analysis` | On "Analyze" button | Custom timeframe prediction analysis |
+| Method | Endpoint | Purpose |
+|---|---|---|
+| GET | `/api/ai-engine/ranked?limit=N` | Ranked board (top N) with full per-stock evidence + news |
+| GET | `/api/ai-engine/scan-status` | Shared scan status / Rescan (via ScanControl) |
 
-## Predefined Stocks
+## UI
 
-The page pre-fetches predictions for these 8 symbols on load:  
-`RELIANCE, TCS, INFY, HDFCBANK, ICICIBANK, KOTAKBANK, BAJFINANCE, WIPRO`
+- **Filter bar:** Top 10 / 20 / 50 / 100 / All + `scanned/universe · ranked · time` + shared **Rescan**.
+- **Ranked table:** `#rank · symbol/company · action · grade · win% · signal score · momentum · price`.
+- **Detail modal** (click a row) — *why this rank*: signal/rank score, win probability, factors aligned (x/6), news boost; the **agent factor vote** (trend / momentum / MACD / volume / regime / RSI — ✓/✗); LLM **news sentiment**; the full **market-indicator evidence**; and the reasoning string.
 
-## Data Flow
-
-```
-Predictions mounts
-    │
-    └─ GET /api/predictions/{symbol}  (×8, parallel)
-           → predictions{} map
-
-[Custom Analysis Form]
-User selects: symbol, timeframe (1D / 1W / 1M)
-    │
-    └─ POST /api/predictions/{symbol}/custom-analysis
-           body: { timeframe: "1W" }
-           → { signal, confidence, targetPrice, stopLoss,
-                technicalSummary, sentimentSummary, fundamentalSummary }
-```
-
-## UI Layout
-
-- Left panel: 8-stock prediction grid (signal badge + confidence)
-- Right panel: Custom analysis form + detailed breakdown
-  - Technical tab: RSI, MACD, Bollinger Band summary
-  - Sentiment tab: News sentiment score + headlines
-  - Fundamental tab: PE ratio, earnings trend, sector comparison
-
-## State
-
-```typescript
-predictions: Record<string, Prediction>  // 8-stock map
-selectedSymbol: string
-analysis: CustomAnalysis | null
-timeframe: '1D' | '1W' | '1M'
-loadingAnalysis: boolean
-```
+When a centralized scan finishes, the board auto re-pulls so it reflects the
+latest ranks. Backed by the scanner's `ai_engine:ranked` board (see
+[Stock Scanner](../microservices/stock-scanner.md#ranked-board-predictions-page)).
