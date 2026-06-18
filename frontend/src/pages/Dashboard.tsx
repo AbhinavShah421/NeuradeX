@@ -662,18 +662,21 @@ const LearningCurveCard: React.FC<{ embedded?: boolean }> = ({ embedded }) => {
 
   const W = 600, H = 170, PL = 42, PR = 12, PT = 16, PB = 26;
   const ys = pts.map(val);
-  const t0 = Date.parse(pts[0].ts) || 0;
-  const t1 = Date.parse(pts[pts.length - 1].ts) || (pts.length - 1);
-  const span = (t1 - t0) || 1;
   const pad = (Math.max(...ys) - Math.min(...ys)) * 0.08 || 1;
   let yMin = Math.min(...ys) - pad, yMax = Math.max(...ys) + pad;
   if (isPct) { yMin = Math.max(0, yMin); yMax = Math.min(100, yMax); }
-  const tx = (ts: string | number) => {
-    const t = typeof ts === 'number' ? ts : (Date.parse(ts) || t0);
-    return PL + Math.max(0, Math.min(1, (t - t0) / span)) * (W - PL - PR);
-  };
-  const sx = (i: number) => tx(pts[i].ts);
+  // x = trade SEQUENCE (evenly spaced), not wall-clock — backtest trades cluster
+  // by backfill date, so a time axis crushes thousands of trades into a flat line
+  // then a cliff. Sequence spacing shows the real trade-by-trade progression.
+  const sx = (i: number) => PL + (pts.length <= 1 ? 0.5 : i / (pts.length - 1)) * (W - PL - PR);
   const sy = (v: number) => PT + (1 - (v - yMin) / (yMax - yMin || 1)) * (H - PT - PB);
+  // Place an event marker at the trade closest in time to the event date.
+  const eventX = (ts: string) => {
+    const t = Date.parse(ts); if (isNaN(t)) return null;
+    let best = 0, bd = Infinity;
+    pts.forEach((p, i) => { const d = Math.abs((Date.parse(p.ts) || 0) - t); if (d < bd) { bd = d; best = i; } });
+    return sx(best);
+  };
   const line = pts.map((p, i) => `${sx(i).toFixed(1)},${sy(val(p)).toFixed(1)}`).join(' ');
   const last = pts[pts.length - 1];
   const fmt = (v: number) => isPct ? `${v.toFixed(0)}%` : `${v >= 0 ? '+' : ''}${v.toFixed(0)}%`;
@@ -730,9 +733,8 @@ const LearningCurveCard: React.FC<{ embedded?: boolean }> = ({ embedded }) => {
         )}
         {/* System-update event markers */}
         {events.map((ev, i) => {
-          const t = Date.parse(ev.occurredAt);
-          if (isNaN(t) || t < t0 - span * 0.02 || t > t1 + span * 0.02) return null;
-          const x = tx(t);
+          const x = eventX(ev.occurredAt);
+          if (x == null) return null;
           const c = EVENT_COLOR[ev.category] || EVENT_COLOR.update;
           return (
             <g key={i} style={{ cursor: 'pointer' }}
