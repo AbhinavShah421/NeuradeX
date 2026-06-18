@@ -8,6 +8,7 @@ Day-Autopilot: AI-driven intraday simulation with LLM decision-making.
 import asyncio
 import json
 import math
+import os
 import random
 import re
 import uuid
@@ -1040,6 +1041,19 @@ async def day_autopilot(req: DayAutopilotRequest):
 
         action = dec["action"]
 
+        # Pattern-quality gate: in backtesting we only enter A-grade patterns, so
+        # the memory/ensemble learn from good setups instead of churning losers.
+        if action == "BUY" and position == "NONE":
+            try:
+                from app.agents import get_pattern_engine
+                from app.agents.pattern_engine import grade_rank
+                psig = await get_pattern_engine().signal(candles[:idx + 1], symbol)
+                min_grade = os.getenv("PATTERN_MIN_GRADE_BACKTEST", "A").upper()
+                if psig.get("ok") and grade_rank(psig["grade"]) > grade_rank(min_grade):
+                    action = "HOLD"
+            except Exception as exc:
+                logger.debug("backtest pattern gate skipped: %s", exc)
+
         if action == "BUY" and position == "NONE":
             qty  = max(1, int(cash * 0.95 / candle["close"]))
             cost = qty * candle["close"]
@@ -1584,6 +1598,19 @@ async def progressive_step(req: ProgressiveStepRequest):
         dec["confidence"] = 99
 
     trade_executed = None
+
+    # Pattern-quality gate — backtesting only enters A-grade patterns.
+    if dec["action"] == "BUY" and position == "NONE":
+        try:
+            from app.agents import get_pattern_engine
+            from app.agents.pattern_engine import grade_rank
+            psig = await get_pattern_engine().signal(candles[:idx + 1], symbol)
+            min_grade = os.getenv("PATTERN_MIN_GRADE_BACKTEST", "A").upper()
+            if psig.get("ok") and grade_rank(psig["grade"]) > grade_rank(min_grade):
+                dec["action"] = "HOLD"
+                dec["reason"] = f"Pattern grade {psig['grade']} below required {min_grade} — no entry."
+        except Exception as exc:
+            logger.debug("backtest pattern gate skipped: %s", exc)
 
     if dec["action"] == "BUY" and position == "NONE":
         qty  = dec.get("quantity") or max(1, int(cash * 0.95 / candle["close"]))
