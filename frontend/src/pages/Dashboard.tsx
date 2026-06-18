@@ -837,6 +837,7 @@ const ScanAccuracyCard: React.FC = () => {
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
           {series.map(s => {
             const la = latestAcc(s);
+            const er = s.overall?.avgReturn;        // expectancy: avg return per graded pick
             return (
               <button key={s.key} onClick={() => setShow(p => ({ ...p, [s.key]: !(p as any)[s.key] }))} style={{
                 padding: '4px 9px', borderRadius: 7, cursor: 'pointer', textAlign: 'right',
@@ -845,6 +846,7 @@ const ScanAccuracyCard: React.FC = () => {
               }}>
                 <div style={{ fontSize: 10, color: 'var(--nd-text-3)' }}>{s.label}</div>
                 <div style={{ fontSize: 15, fontWeight: 700, color: s.color }}>{la != null ? `${la.toFixed(0)}%` : '—'}</div>
+                {er != null && <div style={{ fontSize: 9.5, color: er >= 0 ? 'var(--nd-green)' : 'var(--nd-red)' }}>{er >= 0 ? '+' : ''}{er.toFixed(1)}%/pick</div>}
               </button>
             );
           })}
