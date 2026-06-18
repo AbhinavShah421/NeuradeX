@@ -10,7 +10,7 @@ const inr = (v: number) => Number(v || 0).toLocaleString('en-IN', { maximumFract
 const ReturnCells: React.FC<{ f: any }> = ({ f }) => (
   <>
     {['1m', '3m', '6m', '1y', '3y'].map(k => (
-      <td key={k} style={{ textAlign: 'right', fontSize: 12.5, color: pctColor(f[k]), fontWeight: 600 }}>{pct(f[k])}</td>
+      <td key={k} style={{ textAlign: 'right', padding: '8px 10px', whiteSpace: 'nowrap', fontSize: 12.5, color: pctColor(f[k]), fontWeight: 600 }}>{pct(f[k])}</td>
     ))}
   </>
 );
@@ -131,22 +131,24 @@ const MutualFunds: React.FC = () => {
             {!funds.length ? (
               <div style={{ textAlign: 'center', padding: 40, color: 'var(--nd-text-3)', fontSize: 13 }}>No funds yet — search above and add the funds you hold.</div>
             ) : (
-              <div style={{ overflowX: 'auto' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
-                  <thead><tr style={{ color: 'var(--nd-text-3)', fontSize: 11, textAlign: 'right' }}>
-                    <th style={{ textAlign: 'left', padding: '6px 8px' }}>Fund</th><th>NAV</th><th>Value</th><th>1M</th><th>3M</th><th>6M</th><th>1Y</th><th>3Y</th><th></th>
+              <div style={{ overflowX: 'auto', width: '100%' }}>
+                <table style={{ minWidth: 720, width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
+                  <thead><tr style={{ color: 'var(--nd-text-3)', fontSize: 11 }}>
+                    {[['Fund', 'left'], ['NAV', 'right'], ['Value', 'right'], ['1M', 'right'], ['3M', 'right'], ['6M', 'right'], ['1Y', 'right'], ['3Y', 'right'], ['', 'right']].map(([h, a], i) => (
+                      <th key={i} style={{ textAlign: a as any, padding: '6px 10px', whiteSpace: 'nowrap', fontWeight: 600 }}>{h}</th>
+                    ))}
                   </tr></thead>
                   <tbody>
                     {funds.map((f: any) => (
                       <tr key={f.schemeCode} style={{ borderTop: '1px solid var(--nd-border)' }}>
-                        <td style={{ padding: '8px', maxWidth: 280 }}>
-                          <div style={{ fontWeight: 600, color: 'var(--nd-text-1)' }}>{f.name}</div>
-                          <div style={{ fontSize: 10.5, color: 'var(--nd-text-3)' }}>{f.category} · {f.fundHouse}</div>
+                        <td style={{ padding: '8px 10px', maxWidth: 260 }}>
+                          <div style={{ fontWeight: 600, color: 'var(--nd-text-1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={f.name}>{f.name}</div>
+                          <div style={{ fontSize: 10.5, color: 'var(--nd-text-3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{f.category} · {f.fundHouse}</div>
                         </td>
-                        <td style={{ textAlign: 'right' }}>₹{f.nav}</td>
-                        <td style={{ textAlign: 'right' }}>{f.currentValue ? `₹${inr(f.currentValue)}` : '—'}</td>
+                        <td style={{ textAlign: 'right', padding: '8px 10px', whiteSpace: 'nowrap' }}>₹{f.nav}</td>
+                        <td style={{ textAlign: 'right', padding: '8px 10px', whiteSpace: 'nowrap' }}>{f.currentValue ? `₹${inr(f.currentValue)}` : '—'}</td>
                         <ReturnCells f={f} />
-                        <td style={{ textAlign: 'right' }}><button onClick={() => removeFund(f.schemeCode)} style={{ background: 'none', border: 'none', color: 'var(--nd-red)', cursor: 'pointer', fontSize: 16 }}>×</button></td>
+                        <td style={{ textAlign: 'right', padding: '8px 10px' }}><button onClick={() => removeFund(f.schemeCode)} style={{ background: 'none', border: 'none', color: 'var(--nd-red)', cursor: 'pointer', fontSize: 16 }}>×</button></td>
                       </tr>
                     ))}
                   </tbody>
@@ -207,23 +209,25 @@ const MutualFunds: React.FC = () => {
             ) : !screen?.funds?.length ? (
               <div style={{ textAlign: 'center', padding: 40, color: 'var(--nd-text-3)', fontSize: 13 }}>No funds found for this category.</div>
             ) : (
-              <div style={{ overflowX: 'auto' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
-                  <thead><tr style={{ color: 'var(--nd-text-3)', fontSize: 11, textAlign: 'right' }}>
-                    <th style={{ textAlign: 'left', padding: '6px 8px' }}>#</th><th style={{ textAlign: 'left' }}>Fund</th><th>NAV</th><th>1M</th><th>3M</th><th>6M</th><th>1Y</th><th>3Y</th><th>Vol</th><th>Risk-adj</th>
+              <div style={{ overflowX: 'auto', width: '100%' }}>
+                <table style={{ minWidth: 760, width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
+                  <thead><tr style={{ color: 'var(--nd-text-3)', fontSize: 11 }}>
+                    {[['#', 'left'], ['Fund', 'left'], ['NAV', 'right'], ['1M', 'right'], ['3M', 'right'], ['6M', 'right'], ['1Y', 'right'], ['3Y', 'right'], ['Vol', 'right'], ['Risk-adj', 'right']].map(([h, a]) => (
+                      <th key={h as string} style={{ textAlign: a as any, padding: '6px 10px', whiteSpace: 'nowrap', fontWeight: 600 }}>{h}</th>
+                    ))}
                   </tr></thead>
                   <tbody>
                     {screen.funds.map((f: any) => (
                       <tr key={f.schemeCode} style={{ borderTop: '1px solid var(--nd-border)', background: f.aiPick ? 'var(--nd-green-50)' : 'transparent' }}>
-                        <td style={{ padding: '8px', color: 'var(--nd-text-3)' }}>{f.rank}{f.aiPick ? ' ⭐' : ''}</td>
-                        <td style={{ padding: '8px', maxWidth: 300 }}>
-                          <div style={{ fontWeight: 600, color: 'var(--nd-text-1)' }}>{f.name}</div>
-                          <div style={{ fontSize: 10.5, color: 'var(--nd-text-3)' }}>{f.fundHouse}</div>
+                        <td style={{ padding: '8px 10px', color: 'var(--nd-text-3)', whiteSpace: 'nowrap' }}>{f.rank}{f.aiPick ? ' ⭐' : ''}</td>
+                        <td style={{ padding: '8px 10px', maxWidth: 260 }}>
+                          <div style={{ fontWeight: 600, color: 'var(--nd-text-1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={f.name}>{f.name}</div>
+                          <div style={{ fontSize: 10.5, color: 'var(--nd-text-3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{f.fundHouse}</div>
                         </td>
-                        <td style={{ textAlign: 'right' }}>₹{f.nav}</td>
+                        <td style={{ textAlign: 'right', padding: '8px 10px', whiteSpace: 'nowrap' }}>₹{f.nav}</td>
                         <ReturnCells f={f} />
-                        <td style={{ textAlign: 'right', color: 'var(--nd-text-2)' }}>{f.vol != null ? `${f.vol.toFixed(0)}%` : '—'}</td>
-                        <td style={{ textAlign: 'right', fontWeight: 700, color: pctColor(f.riskAdjusted) }}>{f.riskAdjusted != null ? f.riskAdjusted.toFixed(2) : '—'}</td>
+                        <td style={{ textAlign: 'right', padding: '8px 10px', whiteSpace: 'nowrap', color: 'var(--nd-text-2)' }}>{f.vol != null ? `${f.vol.toFixed(0)}%` : '—'}</td>
+                        <td style={{ textAlign: 'right', padding: '8px 10px', whiteSpace: 'nowrap', fontWeight: 700, color: pctColor(f.riskAdjusted) }}>{f.riskAdjusted != null ? f.riskAdjusted.toFixed(2) : '—'}</td>
                       </tr>
                     ))}
                   </tbody>
