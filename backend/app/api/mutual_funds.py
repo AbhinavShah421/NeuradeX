@@ -23,9 +23,13 @@ _NAV_KEY = "mf:nav:{}"           # per-scheme meta+nav — few hours
 _SCREEN_KEY = "mf:screen:{}"     # per-category leaderboard — few hours
 _HOLDINGS_KEY = "mf:holdings"    # user's saved funds
 
-# Recognised equity categories (matched against scheme names for the screener).
+# Categories matched against scheme names for the screener (equity + hybrid + debt
+# + sectoral/thematic).
 CATEGORIES = ["Large Cap", "Mid Cap", "Small Cap", "Flexi Cap", "Multi Cap",
-              "Large & Mid Cap", "Focused", "Value", "ELSS", "Index", "Balanced Advantage"]
+              "Large & Mid Cap", "Focused", "Value", "ELSS", "Index",
+              "Balanced Advantage", "Aggressive Hybrid", "Multi Asset", "Equity Savings",
+              "Liquid", "Corporate Bond", "Gilt", "Short Duration",
+              "Pharma", "Healthcare", "Technology", "Infrastructure", "Banking", "Consumption", "Energy"]
 
 
 async def _cache_get(key: str):
@@ -101,8 +105,25 @@ def _returns(navs: list[dict]) -> dict:
             return round(((latest_v / v0) ** (1 / years) - 1) * 100, 2)
         return round((latest_v / v0 - 1) * 100, 2)
 
+    r1y = ret_for(365)
+
+    # Annualised volatility from the last ~1y of NAV moves + a risk-adjusted score
+    # (1y return ÷ volatility — Sharpe-like, higher = better return per unit risk).
+    vol = risk_adjusted = None
+    cutoff = latest_d.toordinal() - 365
+    recent = [v for d, v in pts if d.toordinal() >= cutoff]
+    if len(recent) >= 20:
+        steps = [recent[i] / recent[i - 1] - 1 for i in range(1, len(recent)) if recent[i - 1] > 0]
+        if len(steps) >= 15:
+            import statistics
+            sd = statistics.pstdev(steps)
+            vol = round(sd * (252 ** 0.5) * 100, 2)              # annualised %
+            if vol and r1y is not None:
+                risk_adjusted = round(r1y / vol, 2)
+
     return {"1m": ret_for(30), "3m": ret_for(91), "6m": ret_for(182),
-            "1y": ret_for(365), "3y": ret_for(365 * 3), "5y": ret_for(365 * 5),
+            "1y": r1y, "3y": ret_for(365 * 3), "5y": ret_for(365 * 5),
+            "vol": vol, "risk_adjusted": risk_adjusted,
             "nav": round(latest_v, 4), "nav_date": latest_d.strftime("%Y-%m-%d")}
 
 
@@ -218,8 +239,14 @@ async def remove_mf_holding(code: int):
 
 # ── Category screener ──────────────────────────────────────────────────────────
 
-async def _screen_category(category: str, limit: int = 30) -> list[dict]:
-    cached = await _cache_get(_SCREEN_KEY.format(category.lower()))
+def _sort_key(sort: str):
+    if sort == "risk":
+        return lambda x: -(x.get("risk_adjusted") if x.get("risk_adjusted") is not None else -999)
+    return lambda x: -(x.get("1y") if x.get("1y") is not None else -999)
+
+
+async def _screen_category(category: str, limit: int = 30, sort: str = "return") -> list[dict]:
+    cached = await _cache_get(_SCREEN_KEY.format(f"{category.lower()}:{sort}"))
     if cached:
         return cached
     schemes = await _all_schemes()
@@ -240,11 +267,11 @@ async def _screen_category(category: str, limit: int = 30) -> list[dict]:
             names.add(f["name"]); funds.append(f)
         if len(funds) >= limit + 10:
             break
-    funds.sort(key=lambda x: -(x.get("1y") or -999))
+    funds.sort(key=_sort_key(sort))
     for i, f in enumerate(funds, 1):
         f["rank"] = i
     funds = funds[:limit]
-    await _cache_set(_SCREEN_KEY.format(category.lower()), funds, 6 * 3600)
+    await _cache_set(_SCREEN_KEY.format(f"{category.lower()}:{sort}"), funds, 6 * 3600)
     return funds
 
 
@@ -254,14 +281,18 @@ async def categories():
 
 
 @router.get("/screener")
-async def screener(category: str = "Large Cap", limit: int = 20):
-    """Category leaderboard ranked by 1-year return, with AI top-picks flagged."""
-    funds = await _screen_category(category, limit=limit)
+async def screener(category: str = "Large Cap", limit: int = 20, sort: str = "return"):
+    """Category leaderboard, ranked by 1-year return or risk-adjusted (return ÷
+    volatility), with AI top-picks flagged."""
+    sort = "risk" if sort == "risk" else "return"
+    funds = await _screen_category(category, limit=limit, sort=sort)
     if funds:
-        med = sorted([f["1y"] for f in funds if f.get("1y") is not None])[len(funds) // 2]
+        key = "risk_adjusted" if sort == "risk" else "1y"
+        vals = sorted([f[key] for f in funds if f.get(key) is not None])
+        med = vals[len(vals) // 2] if vals else 0
         for f in funds:
-            f["ai_pick"] = bool(f.get("rank", 99) <= 3 and (f.get("1y") or 0) >= med)
-    return {"status": "success", "data": {"category": category, "funds": funds,
+            f["ai_pick"] = bool(f.get("rank", 99) <= 3 and (f.get(key) or -999) >= med)
+    return {"status": "success", "data": {"category": category, "sort": sort, "funds": funds,
             "count": len(funds), "updated_at": datetime.now().isoformat()}}
 
 
@@ -277,26 +308,30 @@ async def scan_holdings():
         f = await _fund_summary(h["scheme_code"])
         if not f:
             continue
-        peers = await _screen_category(f["category"], limit=20)
-        peer_1y = sorted([p["1y"] for p in peers if p.get("1y") is not None])
-        median = peer_1y[len(peer_1y) // 2] if peer_1y else None
-        best = next((p for p in peers if p["scheme_code"] != f["scheme_code"]), None)
-        lagging = (median is not None and f.get("1y") is not None and f["1y"] < median)
-        better = bool(best and f.get("1y") is not None and (best.get("1y") or 0) - f["1y"] >= 2.0)
+        # Rank peers by risk-adjusted return (return per unit volatility).
+        peers = await _screen_category(f["category"], limit=20, sort="risk")
+        peer_ra = sorted([p["risk_adjusted"] for p in peers if p.get("risk_adjusted") is not None])
+        median = peer_ra[len(peer_ra) // 2] if peer_ra else None
+        best = next((p for p in peers if p["scheme_code"] != f["scheme_code"]
+                     and p.get("risk_adjusted") is not None), None)
+        fra = f.get("risk_adjusted")
+        lagging = (median is not None and fra is not None and fra < median)
+        better = bool(best and fra is not None and (best.get("risk_adjusted") or 0) - fra >= 0.15)
         verdict = "REPLACE" if (lagging and better) else "REVIEW" if lagging else "HOLD"
         suggestion = None
         if verdict == "REPLACE" and best:
             suggestion = {
                 "scheme_code": best["scheme_code"], "name": best["name"], "fund_house": best["fund_house"],
-                "1y": best.get("1y"), "3y": best.get("3y"),
+                "1y": best.get("1y"), "3y": best.get("3y"), "vol": best.get("vol"),
+                "risk_adjusted": best.get("risk_adjusted"),
                 "edge_1y": round((best.get("1y") or 0) - (f.get("1y") or 0), 2),
-                "reason": f"Top {f['category']} peer beats your fund by "
-                          f"{round((best.get('1y') or 0) - (f.get('1y') or 0), 1)}% over 1y "
-                          f"({best.get('1y')}% vs {f.get('1y')}%).",
+                "reason": f"Better risk-adjusted {f['category']} peer: {best.get('1y')}% 1y at "
+                          f"{best.get('vol')}% vol (risk-adj {best.get('risk_adjusted')}) vs your "
+                          f"{f.get('1y')}% at {f.get('vol')}% vol (risk-adj {fra}).",
             }
         results.append({
-            "fund": f, "category_median_1y": median, "verdict": verdict,
-            "lagging": lagging, "suggestion": suggestion,
+            "fund": f, "verdict": verdict, "lagging": lagging,
+            "risk_adjusted": fra, "category_median_ra": median, "suggestion": suggestion,
         })
     order = {"REPLACE": 0, "REVIEW": 1, "HOLD": 2}
     results.sort(key=lambda r: order.get(r["verdict"], 3))

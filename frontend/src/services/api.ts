@@ -316,8 +316,8 @@ class ApiService {
     const response = await this.api.get('/api/mutual-funds/categories');
     return response.data;
   }
-  async mfScreener(category: string, limit = 20): Promise<ApiResponse<any>> {
-    const response = await this.api.get('/api/mutual-funds/screener', { params: { category, limit }, timeout: 60000 });
+  async mfScreener(category: string, limit = 20, sort: 'return' | 'risk' = 'return'): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/mutual-funds/screener', { params: { category, limit, sort }, timeout: 60000 });
     return response.data;
   }
   async mfScan(): Promise<ApiResponse<any>> {

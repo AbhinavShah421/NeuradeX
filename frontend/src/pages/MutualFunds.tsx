@@ -33,6 +33,7 @@ const MutualFunds: React.FC = () => {
   // screener
   const [cats, setCats] = useState<string[]>([]);
   const [cat, setCat] = useState('Flexi Cap');
+  const [sortBy, setSortBy] = useState<'return' | 'risk'>('return');
   const [screen, setScreen] = useState<any>(null);
   const [loadingScreen, setLoadingScreen] = useState(false);
 
@@ -63,11 +64,11 @@ const MutualFunds: React.FC = () => {
     setLoadingScan(true);
     try { setScan((await apiService.mfScan() as any).data); } catch {} finally { setLoadingScan(false); }
   };
-  const runScreener = useCallback(async (c: string) => {
+  const runScreener = useCallback(async (c: string, s: 'return' | 'risk') => {
     setLoadingScreen(true);
-    try { setScreen((await apiService.mfScreener(c, 20) as any).data); } catch {} finally { setLoadingScreen(false); }
+    try { setScreen((await apiService.mfScreener(c, 20, s) as any).data); } catch {} finally { setLoadingScreen(false); }
   }, []);
-  useEffect(() => { if (tab === 'screener') runScreener(cat); /* eslint-disable-next-line */ }, [tab]);
+  useEffect(() => { if (tab === 'screener') runScreener(cat, sortBy); /* eslint-disable-next-line */ }, [tab]);
 
   const funds = holdings?.funds ?? [];
 
@@ -165,7 +166,7 @@ const MutualFunds: React.FC = () => {
                     <div key={r.fund.schemeCode} style={{ border: '1px solid var(--nd-border)', borderLeft: `3px solid ${col}`, borderRadius: 8, padding: '10px 12px', marginBottom: 8 }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
                         <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--nd-text-1)' }}>{r.fund.name}</span>
-                        <span style={{ fontSize: 10.5, fontWeight: 700, color: col }}>{r.verdict} · 1Y {pct(r.fund['1y'])} (cat med {pct(r.categoryMedian1y)})</span>
+                        <span style={{ fontSize: 10.5, fontWeight: 700, color: col }}>{r.verdict} · 1Y {pct(r.fund['1y'])} · risk-adj {r.riskAdjusted ?? '—'} (cat med {r.categoryMedianRa ?? '—'})</span>
                       </div>
                       {r.suggestion && (
                         <div style={{ marginTop: 6, fontSize: 11.5, color: 'var(--nd-text-2)', background: 'var(--nd-surface)', borderRadius: 6, padding: '7px 9px' }}>
@@ -182,13 +183,23 @@ const MutualFunds: React.FC = () => {
 
         {tab === 'screener' && (
           <div style={{ padding: '16px 20px' }}>
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 14 }}>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
               {cats.map(c => (
-                <button key={c} onClick={() => { setCat(c); runScreener(c); }} style={{
+                <button key={c} onClick={() => { setCat(c); runScreener(c, sortBy); }} style={{
                   padding: '5px 11px', fontSize: 12, borderRadius: 7, cursor: 'pointer',
                   border: `1px solid ${cat === c ? 'var(--nd-green)' : 'var(--nd-border)'}`,
                   background: cat === c ? 'var(--nd-green)' : 'transparent', color: cat === c ? '#fff' : 'var(--nd-text-2)',
                 }}>{c}</button>
+              ))}
+            </div>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 14, fontSize: 12 }}>
+              <span style={{ color: 'var(--nd-text-3)' }}>Rank by:</span>
+              {([['return', '1Y Return'], ['risk', 'Risk-adjusted']] as [typeof sortBy, string][]).map(([s, label]) => (
+                <button key={s} onClick={() => { setSortBy(s); runScreener(cat, s); }} style={{
+                  padding: '4px 10px', fontSize: 11.5, borderRadius: 6, cursor: 'pointer',
+                  border: `1px solid ${sortBy === s ? 'var(--nd-blue)' : 'var(--nd-border)'}`,
+                  background: sortBy === s ? 'var(--nd-blue)' : 'transparent', color: sortBy === s ? '#fff' : 'var(--nd-text-2)',
+                }}>{label}</button>
               ))}
             </div>
             {loadingScreen ? (
@@ -199,7 +210,7 @@ const MutualFunds: React.FC = () => {
               <div style={{ overflowX: 'auto' }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
                   <thead><tr style={{ color: 'var(--nd-text-3)', fontSize: 11, textAlign: 'right' }}>
-                    <th style={{ textAlign: 'left', padding: '6px 8px' }}>#</th><th style={{ textAlign: 'left' }}>Fund</th><th>NAV</th><th>1M</th><th>3M</th><th>6M</th><th>1Y</th><th>3Y</th>
+                    <th style={{ textAlign: 'left', padding: '6px 8px' }}>#</th><th style={{ textAlign: 'left' }}>Fund</th><th>NAV</th><th>1M</th><th>3M</th><th>6M</th><th>1Y</th><th>3Y</th><th>Vol</th><th>Risk-adj</th>
                   </tr></thead>
                   <tbody>
                     {screen.funds.map((f: any) => (
@@ -211,6 +222,8 @@ const MutualFunds: React.FC = () => {
                         </td>
                         <td style={{ textAlign: 'right' }}>₹{f.nav}</td>
                         <ReturnCells f={f} />
+                        <td style={{ textAlign: 'right', color: 'var(--nd-text-2)' }}>{f.vol != null ? `${f.vol.toFixed(0)}%` : '—'}</td>
+                        <td style={{ textAlign: 'right', fontWeight: 700, color: pctColor(f.riskAdjusted) }}>{f.riskAdjusted != null ? f.riskAdjusted.toFixed(2) : '—'}</td>
                       </tr>
                     ))}
                   </tbody>
