@@ -341,3 +341,146 @@ async def scan_holdings():
         "updated_at": datetime.now().isoformat(),
         "note": "MF holdings are entered manually — Groww's API doesn't expose mutual funds.",
     }}
+
+
+# ── AI MF Portfolio Optimizer ──────────────────────────────────────────────────
+
+_EQUITY_CATS = {"Large Cap", "Mid Cap", "Small Cap", "Flexi Cap", "Multi Cap", "Large & Mid Cap",
+                "Focused", "Value", "ELSS", "Index", "Pharma", "Healthcare", "Technology",
+                "Infrastructure", "Banking", "Consumption", "Energy"}
+_HYBRID_CATS = {"Aggressive Hybrid", "Balanced Advantage", "Multi Asset", "Equity Savings"}
+_DEBT_CATS = {"Liquid", "Corporate Bond", "Gilt", "Short Duration"}
+
+# Target asset mix by risk profile.
+_MF_TARGET = {
+    "conservative": {"Equity": 35, "Hybrid": 15, "Debt": 50},
+    "moderate":     {"Equity": 60, "Hybrid": 15, "Debt": 25},
+    "aggressive":   {"Equity": 80, "Hybrid": 10, "Debt": 10},
+}
+
+
+def _asset_class(cat: str) -> str:
+    if cat in _DEBT_CATS:
+        return "Debt"
+    if cat in _HYBRID_CATS:
+        return "Hybrid"
+    return "Equity"
+
+
+@router.get("/optimize")
+async def optimize_mf(risk: str = "moderate"):
+    """AI MF portfolio optimizer: checks asset-allocation fit vs a risk-based
+    target, finds category redundancy (multiple funds doing the same job) and
+    laggards, and produces a KEEP / REPLACE / CONSOLIDATE plan per fund."""
+    risk = risk if risk in _MF_TARGET else "moderate"
+    held = await _load_holdings()
+    funds: list[dict] = []
+    for h in held:
+        f = await _fund_summary(h["scheme_code"])
+        if not f:
+            continue
+        units = h.get("units")
+        f["units"] = units
+        f["value"] = round(units * f["nav"], 2) if units else None
+        f["asset_class"] = _asset_class(f["category"])
+        funds.append(f)
+    if not funds:
+        return {"status": "success", "data": {"note": "Add your funds first (My Funds), then optimize."}}
+
+    total_val = sum(f["value"] for f in funds if f["value"]) or 0.0
+    for f in funds:
+        f["weight"] = (f["value"] / total_val * 100) if (f["value"] and total_val) else (100 / len(funds))
+
+    # Current asset-class allocation vs risk target
+    alloc: dict[str, float] = {"Equity": 0.0, "Hybrid": 0.0, "Debt": 0.0}
+    for f in funds:
+        alloc[f["asset_class"]] += f["weight"]
+    target = _MF_TARGET[risk]
+    alloc_rows = [{
+        "asset": a, "current_pct": round(alloc[a], 1), "target_pct": target[a],
+        "delta": round(alloc[a] - target[a], 1),
+        "status": "overweight" if alloc[a] - target[a] >= 10 else "underweight" if alloc[a] - target[a] <= -10 else "balanced",
+    } for a in ("Equity", "Hybrid", "Debt")]
+
+    # Peers per distinct category (risk-adjusted leaderboard), cached
+    cats = {f["category"] for f in funds}
+    peers_by_cat = {c: await _screen_category(c, limit=20, sort="risk") for c in cats}
+
+    # Group holdings by fine category to detect redundancy
+    by_cat: dict[str, list] = {}
+    for f in funds:
+        by_cat.setdefault(f["category"], []).append(f)
+
+    actions = []
+    for cat, group in by_cat.items():
+        group.sort(key=lambda x: -(x.get("risk_adjusted") if x.get("risk_adjusted") is not None else -999))
+        best_held = group[0]
+        peers = peers_by_cat.get(cat, [])
+        held_codes = {f["scheme_code"] for f in funds}
+        ras = sorted([p["risk_adjusted"] for p in peers if p.get("risk_adjusted") is not None])
+        med = ras[len(ras) // 2] if ras else None
+        best_peer = next((p for p in peers if p["scheme_code"] not in held_codes and p.get("risk_adjusted") is not None), None)
+        for i, f in enumerate(group):
+            fra = f.get("risk_adjusted")
+            lagging = med is not None and fra is not None and fra < med
+            if len(group) > 1 and i > 0:
+                actions.append({
+                    "verdict": "CONSOLIDATE", "fund": f,
+                    "reason": f"Redundant {cat} fund — you already hold {len(group)} here. "
+                              f"Merge into your best {cat} fund ({best_held['name']}, risk-adj {best_held.get('risk_adjusted')}).",
+                    "into": {"scheme_code": best_held["scheme_code"], "name": best_held["name"]},
+                })
+            elif lagging and best_peer and (best_peer.get("risk_adjusted") or 0) - (fra or 0) >= 0.15:
+                actions.append({
+                    "verdict": "REPLACE", "fund": f,
+                    "reason": f"Lagging {cat} on risk-adjusted return ({fra} vs cat median {med}).",
+                    "suggestion": {"scheme_code": best_peer["scheme_code"], "name": best_peer["name"],
+                                   "fund_house": best_peer["fund_house"], "1y": best_peer.get("1y"),
+                                   "risk_adjusted": best_peer.get("risk_adjusted"), "vol": best_peer.get("vol")},
+                })
+            else:
+                actions.append({"verdict": "KEEP", "fund": f, "reason": f"Solid {cat} holding — risk-adj {fra}."})
+
+    rank = {"REPLACE": 0, "CONSOLIDATE": 1, "KEEP": 2}
+    actions.sort(key=lambda a: rank.get(a["verdict"], 3))
+    n_replace = sum(1 for a in actions if a["verdict"] == "REPLACE")
+    n_consol = sum(1 for a in actions if a["verdict"] == "CONSOLIDATE")
+
+    # Diversification notes
+    notes = []
+    if len(funds) > 8:
+        notes.append(f"You hold {len(funds)} funds — beyond ~6-8 adds overlap, not diversification. Consolidate the weakest.")
+    if len([a for a in alloc_rows if a["status"] == "underweight"]):
+        for a in alloc_rows:
+            if a["status"] == "underweight":
+                notes.append(f"{a['asset']} is {abs(a['delta']):.0f}% below your {risk} target — add a {a['asset'].lower()} fund.")
+    overweight_eq = next((a for a in alloc_rows if a["asset"] == "Equity" and a["status"] == "overweight"), None)
+    if overweight_eq:
+        notes.append(f"Equity is {overweight_eq['delta']:+.0f}% vs target — trim toward debt/hybrid to de-risk.")
+
+    avg_ra = round(sum(f.get("risk_adjusted") or 0 for f in funds) / len(funds), 2)
+    summary = (f"{len(funds)} funds across {len(cats)} categories. "
+               f"{n_replace} to replace, {n_consol} to consolidate. "
+               f"Asset mix Equity {alloc['Equity']:.0f}% / Hybrid {alloc['Hybrid']:.0f}% / Debt {alloc['Debt']:.0f}% "
+               f"vs {risk} target {target['Equity']}/{target['Hybrid']}/{target['Debt']}. Avg risk-adjusted {avg_ra}.")
+
+    # LLM enrichment (optional; falls back to the rule summary)
+    ai_summary = summary
+    try:
+        from app.utils.llm_client import llm_chat
+        out = await llm_chat(
+            f"You are a concise Indian mutual-fund advisor. In 2-3 short sentences, give the single most "
+            f"important optimization for this MF portfolio:\n{summary}\nNotes: {' '.join(notes)}",
+            temperature=0.3, max_tokens=180)
+        if out and out.strip():
+            ai_summary = out.strip()
+    except Exception:
+        pass
+
+    return {"status": "success", "data": {
+        "risk": risk, "fund_count": len(funds), "categories": len(cats),
+        "allocation": alloc_rows, "actions": actions, "notes": notes,
+        "replace": n_replace, "consolidate": n_consol, "keep": len(funds) - n_replace - n_consol,
+        "avg_risk_adjusted": avg_ra, "summary": summary, "ai_summary": ai_summary,
+        "updated_at": datetime.now().isoformat(),
+    }}

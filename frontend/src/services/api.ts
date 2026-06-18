@@ -348,6 +348,10 @@ class ApiService {
     const response = await this.api.get('/api/mutual-funds/scan', { timeout: 60000 });
     return response.data;
   }
+  async mfOptimize(risk = 'moderate'): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/mutual-funds/optimize', { params: { risk }, timeout: 90000 });
+    return response.data;
+  }
 
   async getAlerts(): Promise<ApiResponse<any>> {
     try {
