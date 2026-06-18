@@ -992,6 +992,46 @@ const PortfolioPage: React.FC = () => {
                     <div key={i} style={{ fontSize: 12, color: '#fca5a5', background: '#ef444415', border: '1px solid #ef444433', borderRadius: 8, padding: '8px 11px', marginBottom: 10 }}>⚠ {w}</div>
                   ))}
 
+                  {/* Donut of current sector allocation */}
+                  {(() => {
+                    const PALETTE = ['#22c55e', '#3b82f6', '#a855f7', '#f59e0b', '#ef4444', '#06b6d4', '#ec4899', '#84cc16', '#94a3b8'];
+                    const entries = Object.entries(sectorData.current || {}) as [string, number][];
+                    if (!entries.length) return null;
+                    const top = entries.slice(0, 8);
+                    const restPct = entries.slice(8).reduce((s, [, v]) => s + (v as number), 0);
+                    const segs = restPct > 0.1 ? [...top, ['Other', restPct] as [string, number]] : top;
+                    const R = 52, C = 2 * Math.PI * R;
+                    let off = 0;
+                    return (
+                      <div className="nd-card" style={{ padding: '14px 18px', marginBottom: 14, display: 'flex', gap: 22, alignItems: 'center', flexWrap: 'wrap' }}>
+                        <svg width={140} height={140} viewBox="0 0 140 140" style={{ flexShrink: 0 }}>
+                          <g transform="rotate(-90 70 70)">
+                            {segs.map(([sec, pct], i) => {
+                              const len = (pct / 100) * C;
+                              const el = (
+                                <circle key={sec} cx={70} cy={70} r={R} fill="none"
+                                  stroke={PALETTE[i % PALETTE.length]} strokeWidth={16}
+                                  strokeDasharray={`${len} ${C - len}`} strokeDashoffset={-off} />
+                              );
+                              off += len; return el;
+                            })}
+                          </g>
+                          <text x={70} y={66} textAnchor="middle" fontSize="11" fill="var(--nd-text-3)">sectors</text>
+                          <text x={70} y={82} textAnchor="middle" fontSize="15" fontWeight="700" fill="var(--nd-text-1)">{entries.length}</text>
+                        </svg>
+                        <div style={{ flex: 1, minWidth: 180, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '4px 14px' }}>
+                          {segs.map(([sec, pct], i) => (
+                            <div key={sec} style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 12 }}>
+                              <span style={{ width: 10, height: 10, borderRadius: 2, background: PALETTE[i % PALETTE.length], flexShrink: 0 }} />
+                              <span style={{ color: 'var(--nd-text-2)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{sec}</span>
+                              <span style={{ color: 'var(--nd-text-1)', fontWeight: 600 }}>{(pct as number).toFixed(0)}%</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   <div className="nd-card" style={{ padding: '14px 18px', marginBottom: 14 }}>
                     <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--nd-text-1)', marginBottom: 10 }}>Your sectors vs the AI-favoured target</div>
                     {(sectorData.sectors ?? []).map((r: any) => {

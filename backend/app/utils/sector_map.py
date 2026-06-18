@@ -23,11 +23,18 @@ logger = get_logger(__name__)
 _UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
        "Accept": "text/csv,application/csv,*/*"}
 
-# Broadest first so the widest coverage wins; both carry Symbol + Industry.
+# NSE index-constituent CSVs that carry a Symbol + Industry column. Total Market
+# (~750) covers ~96% of market cap; the micro/small-cap lists extend the tail.
 _URLS = [
     "https://archives.nseindia.com/content/indices/ind_niftytotalmarket_list.csv",
     "https://archives.nseindia.com/content/indices/ind_nifty500list.csv",
+    "https://archives.nseindia.com/content/indices/ind_niftymicrocap250_list.csv",
+    "https://archives.nseindia.com/content/indices/ind_niftysmallcap250list.csv",
+    "https://archives.nseindia.com/content/indices/ind_niftymidcap150list.csv",
 ]
+# Persistent (non-daily) Redis key holding Yahoo-discovered sectors for names not
+# in any NSE index list — fills the long tail toward 100% coverage.
+_YAHOO_KEY = "ai_engine:sector_map:yahoo"
 
 _map: dict[str, str] = {}
 _loaded_date: str | None = None
@@ -73,6 +80,16 @@ async def ensure_loaded() -> None:
             except Exception as exc:
                 logger.warning("sector map fetch failed for %s: %s", url, exc)
 
+    # Merge in any Yahoo-discovered sectors for names outside the NSE index lists.
+    try:
+        from app.utils.redis_client import cache_get
+        yraw = await cache_get(_YAHOO_KEY)
+        if yraw:
+            for sym, ind in json.loads(yraw).items():
+                m.setdefault(sym, ind)
+    except Exception:
+        pass
+
     if m:
         _map = m
         _loaded_date = today
@@ -82,6 +99,50 @@ async def ensure_loaded() -> None:
         except Exception:
             pass
         logger.info("NSE sector map loaded: %d symbols", len(m))
+
+
+async def backfill_yahoo(symbols: list[str], limit: int = 400) -> dict:
+    """Fill sectors for symbols not yet mapped, via Yahoo's assetProfile, and
+    persist them (so coverage approaches 100% over successive runs)."""
+    await ensure_loaded()
+    todo = [s.upper() for s in symbols if s and s.upper() not in _map][:max(1, limit)]
+    if not todo:
+        return {"status": "nothing_to_do", "remaining": 0}
+    found: dict[str, str] = {}
+    ua = {"User-Agent": _UA["User-Agent"], "Accept": "application/json"}
+    async with httpx.AsyncClient(follow_redirects=True, timeout=12.0) as client:
+        import asyncio
+        # Yahoo's quoteSummary needs a cookie + crumb (the chart API doesn't).
+        crumb = ""
+        try:
+            await client.get("https://fc.yahoo.com", headers=ua)
+            crumb = (await client.get("https://query2.finance.yahoo.com/v1/test/getcrumb", headers=ua)).text.strip()
+        except Exception:
+            crumb = ""
+        for sym in todo:
+            try:
+                r = await client.get(
+                    f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{sym}.NS",
+                    params={"modules": "assetProfile", "crumb": crumb}, headers=ua)
+                if r.status_code == 200:
+                    res = (r.json().get("quoteSummary", {}).get("result") or [None])[0]
+                    sec = ((res or {}).get("assetProfile") or {}).get("sector")
+                    if sec:
+                        found[sym] = sec.strip()
+                        _map[sym] = sec.strip()
+            except Exception:
+                pass
+            await asyncio.sleep(0.25)
+    if found:
+        try:
+            from app.utils.redis_client import cache_get, cache_set
+            existing = json.loads(await cache_get(_YAHOO_KEY) or "{}")
+            existing.update(found)
+            await cache_set(_YAHOO_KEY, json.dumps(existing), expire=86400 * 60)
+        except Exception:
+            pass
+    logger.info("yahoo sector backfill: +%d of %d attempted", len(found), len(todo))
+    return {"status": "ok", "filled": len(found), "attempted": len(todo)}
 
 
 def sector_of(symbol: str) -> str:

@@ -324,6 +324,26 @@ async def get_stock_directory(
     }
 
 
+@router.post("/directory/backfill-sectors")
+async def backfill_sectors(limit: int = 400):
+    """Fill sectors for universe names still showing 'Other' (via Yahoo), toward
+    100% coverage. Runs in the background; call repeatedly to cover the long tail."""
+    import asyncio
+    from app.utils.sector_map import ensure_loaded, backfill_yahoo, sector_of
+    await ensure_loaded()
+    try:
+        from app.utils.redis_client import cache_get
+        ist = datetime.now(_tz(timedelta(hours=5, minutes=30))).strftime("%Y-%m-%d")
+        uni = _json.loads(await cache_get(f"ai_engine:scan_universe:{ist}") or "{}")
+        syms = list(uni.keys()) if isinstance(uni, dict) else list(uni)
+    except Exception:
+        syms = [s["symbol"] for s in STOCKS_DEDUPED]
+    pending = [s for s in syms if sector_of(s) == "Other"]
+    _dir_cache["list"] = None                       # bust the directory cache after fill
+    asyncio.create_task(backfill_yahoo(pending, limit=limit))
+    return {"status": "started", "still_other": len(pending), "batch": min(limit, len(pending))}
+
+
 @router.get("/directory/symbols")
 async def get_directory_symbols(tradable_only: bool = True):
     """The complete stock master as a flat symbol list — used by the stock-scanner

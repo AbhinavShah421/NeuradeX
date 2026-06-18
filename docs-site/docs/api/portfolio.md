@@ -23,3 +23,38 @@ sidebar_position: 4
 **Alerts storage:** MongoDB `alerts` collection.
 
 See the [Portfolio & Predictions frontend](../frontend/portfolio-predictions.md) for the AI Optimize / AI Invest / Swap UI.
+
+## AI Sector Exposure (scanner + optimizer)
+
+Maps holdings to their real NSE sector, scores each sector with the live AI scan,
+and compares the book's sector weights against an AI-favoured target.
+
+| Method & path | Description |
+|---|---|
+| `GET /api/portfolio/sector-exposure` | Current sector weights vs AI-favoured target, per-sector over/under-exposure, concentration (effective sectors, top sector), warnings, and concrete rebalance moves (TRIM the most overweight, ADD AI-favoured under-owned sectors with a stock to buy). |
+
+The AI sector score weights sectors by how many high-win-probability BUY setups
+they hold in the live ranked board; the target is those scores normalised over the
+strongest sectors. Surfaced on the Portfolio **Sector Exposure** tab (donut +
+current-vs-target bars + rebalance list).
+
+## AI Fund Baskets (mutual-fund-style, AI-scanned)
+
+Themed, conviction-weighted stock baskets built from the live AI ranked board.
+
+| Method & path | Description |
+|---|---|
+| `GET /api/portfolio/fund-baskets` | Baskets: **AI Top Picks**, **Sector Leaders** (max diversification), **Momentum Movers**, **Balanced Multi-Sector** (≤2/sector), **High-Conviction** (committed tier). Each returns holdings + weights + stats. |
+| `GET /api/portfolio/fund-baskets/invest?basket=&amount=` | Allocate `amount` across a basket by weight as protective LIMIT buys (sized to real prices). |
+
+Shown on the Portfolio **AI Funds** tab; one-click Invest reuses the order confirm modal.
+
+## Sector mapping
+
+`app/utils/sector_map.py` builds a symbol→industry map from NSE index-constituent
+CSVs (NIFTY Total Market / 500 / mid / small / micro-cap — they carry an Industry
+column the equity master lacks), cached daily in Redis. `sector_of()` resolves
+NSE industry → curated stock master → `Other`. Names outside the NSE index lists
+are filled via Yahoo `assetProfile` (`POST /api/stocks/directory/backfill-sectors`,
+persisted), taking coverage toward 100%. Used by sector-exposure, fund-baskets and
+the All Stocks directory.
