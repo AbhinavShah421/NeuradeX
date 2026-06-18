@@ -289,6 +289,42 @@ class ApiService {
     return response.data;
   }
 
+  // ── Mutual Funds (real NAV/returns via AMFI/mfapi) ──
+  async mfSearch(q: string): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/mutual-funds/search', { params: { q }, timeout: 25000 });
+    return response.data;
+  }
+  async mfScheme(code: number): Promise<ApiResponse<any>> {
+    const response = await this.api.get(`/api/mutual-funds/scheme/${code}`, { timeout: 20000 });
+    return response.data;
+  }
+  async mfHoldings(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/mutual-funds/holdings', { timeout: 40000 });
+    return response.data;
+  }
+  async mfAddHolding(body: { schemeCode: number; units?: number; invested?: number }): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/mutual-funds/holdings', {
+      scheme_code: body.schemeCode, units: body.units, invested: body.invested,
+    });
+    return response.data;
+  }
+  async mfRemoveHolding(code: number): Promise<ApiResponse<any>> {
+    const response = await this.api.delete(`/api/mutual-funds/holdings/${code}`);
+    return response.data;
+  }
+  async mfCategories(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/mutual-funds/categories');
+    return response.data;
+  }
+  async mfScreener(category: string, limit = 20): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/mutual-funds/screener', { params: { category, limit }, timeout: 60000 });
+    return response.data;
+  }
+  async mfScan(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/mutual-funds/scan', { timeout: 60000 });
+    return response.data;
+  }
+
   async getAlerts(): Promise<ApiResponse<any>> {
     try {
       const response = await this.api.get('/api/portfolio/alerts');
