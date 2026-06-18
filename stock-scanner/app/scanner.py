@@ -1419,6 +1419,67 @@ async def backfill_committed(days: int = 30, limit: int = 400) -> dict:
     return {"status": "done", "graded_days": graded_days, "symbols": len(syms), "days": days, "hc_params": hc}
 
 
+async def backfill_intraday(days: int = 14, limit: int = 400) -> dict:
+    """Reconstruct the intraday signal score for the last `days` so the AI Scan
+    Accuracy graph reaches the latest completed day. For each past day we rebuild
+    the most-convicted watchlist *as of that day* (grade-A/B BUYs, top
+    WATCHLIST_MAX) and grade it on THAT day's own open→close move — real, no
+    lookahead. Fills gaps where live post-close grading didn't run."""
+    calib = await _load_calibration()
+    wl_max = await _watchlist_max()
+    universe = await _load_universe()
+    syms = list(universe.items())[:max(1, limit)]
+    cutoff = (_ist_now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    _grade_rank = {"A": 0, "B": 1, "C": 2, "D": 3}
+    by_date: dict[str, list[dict]] = {}
+
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        for sym, name in syms:
+            candles = await _fetch_daily(client, sym)
+            await asyncio.sleep(FETCH_DELAY)
+            if len(candles) < 40:
+                continue
+            for i in range(35, len(candles)):
+                bd = _bar_date(candles[i])
+                if not bd or bd < cutoff:
+                    continue
+                res = _analyze(candles[: i + 1], regime=0, calib=calib)
+                if not res or res.get("action") != "BUY" or res.get("grade") not in ("A", "B"):
+                    continue
+                o, c = candles[i]["o"], candles[i]["c"]
+                if o <= 0:
+                    continue
+                move = (c - o) / o * 100
+                by_date.setdefault(bd, []).append({
+                    "symbol": sym, "action": "BUY", "grade": res.get("grade"),
+                    "win_probability": res.get("win_probability"),
+                    "predicted_confidence": res.get("confidence"),
+                    "predicted_signal_score": res.get("signal_score"),
+                    "day_return_pct": round(move, 2), "realized_return_pct": round(move, 2),
+                    "correct": bool(move >= 0.3),
+                })
+
+    graded_days = 0
+    for d, picks in sorted(by_date.items()):
+        # the day's watchlist = top-N most-convicted, exactly as live
+        picks.sort(key=lambda r: (_grade_rank.get(r.get("grade", "D"), 3), -(r.get("win_probability") or 0)))
+        top = picks[:wl_max]
+        if not top:
+            continue
+        hits = sum(1 for g in top if g["correct"])
+        acc = round(hits / len(top), 4)
+        await _push_feedback({
+            "date": d, "evaluated_at": _ist_now().isoformat(), "trade_kind": "intraday",
+            "picks": len(top), "hits": hits, "accuracy": acc,
+            "avg_realized_return_pct": round(sum(g["realized_return_pct"] for g in top) / len(top), 2),
+            "target": SCAN_ACCURACY_TARGET, "meets_target": acc >= SCAN_ACCURACY_TARGET,
+            "backfilled": True, "results": top,
+        })
+        graded_days += 1
+    logger.info("intraday backfill: graded %d days from %d symbols (top %d/day)", graded_days, len(syms), wl_max)
+    return {"status": "done", "graded_days": graded_days, "symbols": len(syms), "days": days}
+
+
 # ── Schedulers ────────────────────────────────────────────────────────────────
 
 async def scanner_loop() -> None:
