@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .scanner import (
     scanner_loop, schedule_loop, scan_once, evaluate_day,
-    evaluate_delivery, grade_due_delivery, backfill_delivery, backfill_committed,
+    evaluate_delivery, grade_due_delivery, backfill_delivery, backfill_committed, backfill_intraday,
     get_state, get_latest_eval, warm_state,
 )
 from .universe import UNIVERSE
@@ -92,4 +92,12 @@ async def backfill_delivery_ep(days: int = 14, limit: int = 250):
 async def backfill_committed_ep(days: int = 20, limit: int = 400):
     """Reconstruct the high-conviction tier's accuracy history. Runs in background."""
     asyncio.create_task(backfill_committed(days=days, limit=limit))
+    return {"status": "started", "days": days, "limit": limit}
+
+
+@app.post("/backfill-intraday")
+async def backfill_intraday_ep(days: int = 14, limit: int = 400):
+    """Reconstruct the intraday signal score so the accuracy graph reaches the
+    latest completed day. Runs in background."""
+    asyncio.create_task(backfill_intraday(days=days, limit=limit))
     return {"status": "started", "days": days, "limit": limit}
