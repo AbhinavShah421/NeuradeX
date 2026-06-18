@@ -1475,6 +1475,163 @@ async def benchmark():
     }}
 
 
+# ── AI Risk Lab — diversification, smart exits, stress-test, dividends ────────
+
+async def _yh_full(client: httpx.AsyncClient, ysym: str) -> dict | None:
+    """One 1-year daily chart with dividend events → closes/highs/lows/divs."""
+    try:
+        r = await client.get(_YH_BASE + ysym, params={"range": "1y", "interval": "1d", "events": "div"}, headers=_YH_UA)
+        res = (r.json().get("chart", {}).get("result") or [None])[0]
+        q = res["indicators"]["quote"][0]
+        closes = q.get("close") or []
+        highs = q.get("high") or []
+        lows = q.get("low") or []
+        divs = (res.get("events", {}).get("dividends") or {})
+    except Exception:
+        return None
+    idx = [i for i, c in enumerate(closes) if c]
+    if len(idx) < 30:
+        return None
+    return {
+        "closes": [closes[i] for i in idx],
+        "highs": [highs[i] if i < len(highs) and highs[i] else closes[i] for i in idx],
+        "lows": [lows[i] if i < len(lows) and lows[i] else closes[i] for i in idx],
+        "div_total": round(sum(float(d.get("amount", 0) or 0) for d in divs.values()), 4),
+    }
+
+
+@router.get("/risk-lab")
+async def risk_lab(market_shock: float = 10.0, sector_shock: float = 20.0):
+    """AI Risk Lab: true (correlation-based) diversification, volatility-aware
+    smart exits, scenario stress-test, and dividend income — in one pass."""
+    import numpy as np
+    from app.data.stocks_master import STOCKS_BY_SYMBOL
+    from app.utils.sector_map import ensure_loaded
+    await ensure_loaded()
+    pf = (await get_portfolio()).get("data", {})
+    stocks = pf.get("stocks", [])
+    tv = float(pf.get("total_value") or 0.0)
+    if not stocks or tv <= 0:
+        return {"status": "success", "data": {"note": "No holdings to analyse."}}
+    ranked = await _ranked_by_symbol()
+
+    series: dict[str, dict] = {}
+    async with httpx.AsyncClient(timeout=12.0) as client:
+        for s in stocks:
+            ex = _exchange_for(s["symbol"], STOCKS_BY_SYMBOL)
+            suf = ".BO" if ex == "BSE" else ".NS"
+            d = await _yh_full(client, f"{s['symbol']}{suf}")
+            if d:
+                series[s["symbol"]] = d
+        nifty = await _yh_full(client, "^NSEI")
+
+    def rets(c):
+        a = np.array(c, dtype=float)
+        return np.diff(a) / a[:-1]
+
+    nret = rets(nifty["closes"]) if nifty else None
+    nvar = float(np.var(nret)) if nret is not None and len(nret) > 5 else None
+
+    rows, ret_map = [], {}
+    for s in stocks:
+        sym = s["symbol"]; w = s["value"] / tv
+        d = series.get(sym)
+        sig = ranked.get(sym.upper(), {})
+        row = {"symbol": sym, "weight_pct": round(w * 100, 1), "value": s["value"],
+               "current": s["current_price"], "sector": _sector_of(sym),
+               "signal": sig.get("action"), "grade": sig.get("grade")}
+        if d:
+            r = rets(d["closes"]); ret_map[sym] = r
+            atr = float(np.mean(np.array(d["highs"][-14:]) - np.array(d["lows"][-14:])))
+            atr_pct = atr / s["current_price"] * 100 if s["current_price"] else 0
+            if nret is not None and nvar and len(r) > 10:
+                n = min(len(r), len(nret))
+                beta = float(np.cov(r[-n:], nret[-n:])[0, 1]) / nvar
+            else:
+                beta = 1.0
+            row.update({"atr_pct": round(atr_pct, 2), "beta": round(beta, 2), "div_ps": d["div_total"]})
+        rows.append(row)
+
+    # 1) True diversification (correlation)
+    syms = list(ret_map.keys())
+    L = min((len(ret_map[s]) for s in syms), default=0)
+    if len(syms) >= 2 and L >= 20:
+        M = np.array([ret_map[s][-L:] for s in syms])
+        C = np.corrcoef(M)
+        off = C[np.triu_indices(len(syms), k=1)]
+        avg_corr = float(np.mean(off))
+        diversification = {
+            "score": round(max(0, min(100, (1 - avg_corr) * 100)), 0),
+            "avg_correlation": round(avg_corr, 2),
+            "correlated_pairs": sorted(
+                ({"a": syms[i], "b": syms[j], "corr": round(float(C[i, j]), 2)}
+                 for i in range(len(syms)) for j in range(i + 1, len(syms)) if C[i, j] >= 0.6),
+                key=lambda x: -x["corr"])[:6],
+            "note": ("Holdings move together — real diversification is weaker than the count suggests."
+                     if avg_corr > 0.5 else "Holdings are reasonably independent."),
+        }
+    else:
+        diversification = {"score": None, "note": "Need ≥2 holdings with price history."}
+
+    # 2) Smart exits
+    exits = []
+    for row in rows:
+        if "atr_pct" not in row:
+            continue
+        cur = row["current"]; ap = max(2.0, min(12.0, row["atr_pct"]))
+        stop = round(cur * (1 - 2 * ap / 100), 2)
+        target = round(cur + 2 * (cur - stop), 2)
+        exits.append({"symbol": row["symbol"], "current": cur, "stop": stop, "target": target,
+                      "trail_pct": round(1.5 * ap, 1), "signal": row["signal"], "grade": row["grade"],
+                      "exit_flag": bool(row["signal"] == "SELL" or row["grade"] == "D")})
+    exits.sort(key=lambda x: (not x["exit_flag"], x["symbol"]))
+
+    # 3) Scenario stress-test
+    betas = {row["symbol"]: row.get("beta", 1.0) for row in rows}
+    top_sector = max(({"sec": _sector_of(s["symbol"]), "v": s["value"]} for s in stocks), key=lambda x: x["v"])["sec"]
+
+    def market_impact(shock):
+        return round(sum((s["value"] / tv) * betas.get(s["symbol"], 1.0) * -shock for s in stocks), 1)
+    sector_w = sum(s["value"] for s in stocks if _sector_of(s["symbol"]) == top_sector) / tv
+    rate_sens = {"Financial Services", "Banking", "Realty", "Automobile and Auto Components", "Construction"}
+    rate_w = sum(s["value"] for s in stocks if _sector_of(s["symbol"]) in rate_sens) / tv
+    scenarios = [
+        {"name": f"Market −{market_shock:.0f}%", "impact_pct": market_impact(market_shock)},
+        {"name": "Market −20%", "impact_pct": market_impact(20)},
+        {"name": f"{top_sector} −{sector_shock:.0f}%", "impact_pct": round(sector_w * -sector_shock, 1)},
+        {"name": "Rate shock (rate-sensitive −8%)", "impact_pct": round(rate_w * -8, 1)},
+    ]
+    for sc in scenarios:
+        sc["impact_value"] = round(tv * sc["impact_pct"] / 100, 0)
+    fragile = sorted(({"symbol": row["symbol"], "beta": row.get("beta"), "weight_pct": row["weight_pct"],
+                       "exposure": round(row.get("beta", 1) * row["weight_pct"], 1)} for row in rows if "beta" in row),
+                     key=lambda x: -x["exposure"])[:5]
+
+    # 4) Dividend forecast
+    div_rows, total_income = [], 0.0
+    for s in stocks:
+        d = series.get(s["symbol"])
+        dps = d["div_total"] if d else 0.0
+        income = round(dps * s["quantity"], 2)
+        total_income += income
+        if dps > 0:
+            div_rows.append({"symbol": s["symbol"], "div_per_share": dps, "annual_income": income,
+                             "yield_pct": round(dps / s["current_price"] * 100, 2) if s["current_price"] else 0,
+                             "yoc_pct": round(dps / s["purchase_price"] * 100, 2) if s.get("purchase_price") else None})
+    div_rows.sort(key=lambda x: -x["annual_income"])
+
+    return {"status": "success", "data": {
+        "total_value": round(tv, 2),
+        "diversification": diversification,
+        "smart_exits": exits,
+        "stress": {"scenarios": scenarios, "fragile": fragile, "top_sector": top_sector},
+        "dividends": {"annual_income": round(total_income, 0),
+                      "portfolio_yield_pct": round(total_income / tv * 100, 2) if tv else 0,
+                      "payers": div_rows},
+        "updated_at": datetime.now().isoformat(),
+    }}
+
+
 # ── AI Advisor — plain-English insights synthesising everything ───────────────
 
 @router.get("/advisor")

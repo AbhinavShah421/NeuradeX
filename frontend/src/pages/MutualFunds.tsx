@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import apiService from '../services/api';
 
-type Tab = 'holdings' | 'screener';
+type Tab = 'holdings' | 'optimize' | 'screener';
 
 const pct = (v: any) => (v === null || v === undefined) ? '—' : `${v > 0 ? '+' : ''}${Number(v).toFixed(1)}%`;
 const pctColor = (v: any) => v === null || v === undefined ? 'var(--nd-text-3)' : v >= 0 ? 'var(--nd-green)' : 'var(--nd-red)';
@@ -29,6 +29,16 @@ const MutualFunds: React.FC = () => {
   const [holdings, setHoldings] = useState<any>(null);
   const [scan, setScan] = useState<any>(null);
   const [loadingScan, setLoadingScan] = useState(false);
+
+  // optimizer
+  const [opt, setOpt] = useState<any>(null);
+  const [optRisk, setOptRisk] = useState('moderate');
+  const [optLoading, setOptLoading] = useState(false);
+  const runOptimize = useCallback(async (r: string) => {
+    setOptLoading(true);
+    try { setOpt((await apiService.mfOptimize(r) as any).data); } catch {} finally { setOptLoading(false); }
+  }, []);
+  useEffect(() => { if (tab === 'optimize' && !opt) runOptimize(optRisk); /* eslint-disable-next-line */ }, [tab]);
 
   // screener
   const [cats, setCats] = useState<string[]>([]);
@@ -85,7 +95,7 @@ const MutualFunds: React.FC = () => {
 
       <div className="nd-card" style={{ padding: 0 }}>
         <div style={{ display: 'flex', borderBottom: '1px solid var(--nd-border)', padding: '0 16px' }}>
-          {([['holdings', 'My Funds'], ['screener', 'Screener']] as [Tab, string][]).map(([id, label]) => (
+          {([['holdings', 'My Funds'], ['optimize', 'Optimize'], ['screener', 'Screener']] as [Tab, string][]).map(([id, label]) => (
             <button key={id} onClick={() => setTab(id)} style={{
               padding: '12px 16px', border: 'none', background: 'none', cursor: 'pointer', fontSize: 13,
               fontWeight: tab === id ? 700 : 500, color: tab === id ? 'var(--nd-green)' : 'var(--nd-text-2)',
@@ -179,6 +189,72 @@ const MutualFunds: React.FC = () => {
                   );
                 })}
               </div>
+            )}
+          </div>
+        )}
+
+        {tab === 'optimize' && (
+          <div style={{ padding: '16px 20px' }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 14 }}>
+              <span style={{ fontSize: 12.5, color: 'var(--nd-text-2)' }}>Risk profile:</span>
+              {['conservative', 'moderate', 'aggressive'].map(r => (
+                <button key={r} onClick={() => { setOptRisk(r); runOptimize(r); }} style={{
+                  padding: '5px 11px', fontSize: 12, borderRadius: 7, cursor: 'pointer', textTransform: 'capitalize',
+                  border: `1px solid ${optRisk === r ? 'var(--nd-green)' : 'var(--nd-border)'}`,
+                  background: optRisk === r ? 'var(--nd-green)' : 'transparent', color: optRisk === r ? '#fff' : 'var(--nd-text-2)',
+                }}>{r}</button>
+              ))}
+            </div>
+            {optLoading ? (
+              <div style={{ textAlign: 'center', padding: 40, color: 'var(--nd-text-3)', fontSize: 13 }}>Optimising your MF portfolio…</div>
+            ) : !opt ? null : opt.note ? (
+              <div style={{ textAlign: 'center', padding: 40, color: 'var(--nd-text-3)', fontSize: 13 }}>{opt.note}</div>
+            ) : (
+              <>
+                <div style={{ fontSize: 12.5, color: 'var(--nd-text-2)', background: 'var(--nd-surface)', borderRadius: 8, padding: '10px 12px', marginBottom: 14 }}>
+                  🤖 {opt.aiSummary || opt.summary}
+                </div>
+                <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 14 }}>
+                  {[['Keep', opt.keep, '#22c55e'], ['Replace', opt.replace, '#ef4444'], ['Consolidate', opt.consolidate, '#f59e0b'], ['Avg risk-adj', opt.avgRiskAdjusted, 'var(--nd-text-1)']].map(([l, v, c], i) => (
+                    <div key={i} className="nd-card" style={{ padding: '10px 14px' }}><div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>{l as string}</div><div style={{ fontSize: 16, fontWeight: 700, color: c as string }}>{v as any}</div></div>
+                  ))}
+                </div>
+
+                <div className="nd-card" style={{ padding: '14px 18px', marginBottom: 14 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>Asset allocation vs {opt.risk} target</div>
+                  {opt.allocation.map((a: any) => {
+                    const col = a.status === 'overweight' ? '#ef4444' : a.status === 'underweight' ? '#f59e0b' : '#22c55e';
+                    return (
+                      <div key={a.asset} style={{ marginBottom: 10 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, marginBottom: 3 }}>
+                          <span style={{ fontWeight: 600 }}>{a.asset}</span>
+                          <span style={{ color: 'var(--nd-text-2)' }}>now {a.currentPct}% · target {a.targetPct}% <span style={{ color: col, fontWeight: 700 }}>{a.status}</span></span>
+                        </div>
+                        <div style={{ position: 'relative', height: 8, background: 'var(--nd-border)', borderRadius: 4 }}>
+                          <div style={{ position: 'absolute', height: 8, borderRadius: 4, width: `${Math.min(100, a.currentPct)}%`, background: col, opacity: 0.85 }} />
+                          <div style={{ position: 'absolute', height: 8, width: 2, background: 'var(--nd-text-1)', left: `${Math.min(100, a.targetPct)}%` }} title={`target ${a.targetPct}%`} />
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {(opt.notes ?? []).map((n: string, i: number) => <div key={i} style={{ fontSize: 11.5, color: 'var(--nd-text-3)', marginTop: 4 }}>• {n}</div>)}
+                </div>
+
+                <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>Action plan</div>
+                {opt.actions.map((a: any, i: number) => {
+                  const col = a.verdict === 'REPLACE' ? '#ef4444' : a.verdict === 'CONSOLIDATE' ? '#f59e0b' : '#22c55e';
+                  return (
+                    <div key={i} style={{ border: '1px solid var(--nd-border)', borderLeft: `3px solid ${col}`, borderRadius: 8, padding: '10px 12px', marginBottom: 8 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--nd-text-1)' }}>{a.fund.name}</span>
+                        <span style={{ fontSize: 10.5, fontWeight: 700, color: col }}>{a.verdict} · {a.fund.category} · risk-adj {a.fund.riskAdjusted ?? '—'}</span>
+                      </div>
+                      <div style={{ fontSize: 11.5, color: 'var(--nd-text-2)', marginTop: 4 }}>{a.reason}</div>
+                      {a.suggestion && <div style={{ marginTop: 5, fontSize: 11.5, color: 'var(--nd-text-2)', background: 'var(--nd-surface)', borderRadius: 6, padding: '6px 9px' }}>↪ Switch to <strong style={{ color: 'var(--nd-green)' }}>{a.suggestion.name}</strong> (1Y {a.suggestion['1y']}%, risk-adj {a.suggestion.riskAdjusted})</div>}
+                    </div>
+                  );
+                })}
+              </>
             )}
           </div>
         )}
