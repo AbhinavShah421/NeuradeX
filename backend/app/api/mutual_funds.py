@@ -280,6 +280,42 @@ async def categories():
     return {"status": "success", "data": CATEGORIES}
 
 
+@router.get("/all")
+async def all_funds(q: str = "", page: int = 1, limit: int = 25, direct_only: bool = True):
+    """Browse the full scheme universe (deduped, Direct-Growth by default) with
+    server-side search + pagination; the current page is enriched with live NAV,
+    returns, volatility and risk-adjusted return for sortable display."""
+    page = max(1, page); limit = max(5, min(50, limit))
+    schemes = await _all_schemes()
+    ql = q.strip().lower()
+    seen, uniq = set(), []
+    for s in schemes:
+        code = s["schemeCode"]
+        nm = s["schemeName"]
+        if code in seen:
+            continue
+        if direct_only and not ("direct" in nm.lower() and "growth" in nm.lower() and "idcw" not in nm.lower()):
+            continue
+        if ql and ql not in nm.lower():
+            continue
+        seen.add(code)
+        uniq.append(s)
+    uniq.sort(key=lambda s: s["schemeName"])
+    total = len(uniq)
+    off = (page - 1) * limit
+    page_items = uniq[off:off + limit]
+
+    funds = []
+    for s in page_items:
+        f = await _fund_summary(s["schemeCode"])
+        funds.append(f or {"scheme_code": s["schemeCode"], "name": s["schemeName"],
+                           "category": "—", "nav": None})
+    return {"status": "success", "data": {
+        "funds": funds, "total": total, "page": page, "limit": limit,
+        "pages": max(1, (total + limit - 1) // limit),
+    }}
+
+
 @router.get("/screener")
 async def screener(category: str = "Large Cap", limit: int = 20, sort: str = "return"):
     """Category leaderboard, ranked by 1-year return or risk-adjusted (return ÷
