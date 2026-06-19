@@ -429,7 +429,7 @@ This project is licensed under the MIT License.
 
 For issues, questions, or suggestions:
 - Open an issue on GitHub
-- Contact: support@stockpredictionai.com
+- Contact: abhinavshah421@gmail.com
 
 ---
 
