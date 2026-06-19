@@ -12,6 +12,7 @@ import json
 import uuid
 from datetime import datetime, timezone, timedelta
 
+import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -86,6 +87,47 @@ async def _prices(symbols: list[str]) -> dict:
     return {s: float(qm[s]["ltp"]) for s in symbols if qm.get(s, {}).get("ltp")}
 
 
+async def _daily_candles(symbol: str, rng: str = "8mo") -> list[dict]:
+    """Recent daily candles for one symbol (for the path forecaster). Cheap — only
+    called for the few symbols being opened on a daily tick."""
+    try:
+        async with httpx.AsyncClient(timeout=12) as c:
+            r = await c.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}.NS",
+                            params={"range": rng, "interval": "1d"},
+                            headers={"User-Agent": "Mozilla/5.0"})
+            res = r.json()["chart"]["result"][0]; q = res["indicators"]["quote"][0]
+            return [{"open": o, "high": h, "low": l, "close": cl, "volume": v}
+                    for o, h, l, cl, v in zip(q["open"], q["high"], q["low"], q["close"], q["volume"])
+                    if cl]
+    except Exception as exc:
+        logger.debug("daily candle fetch failed for %s: %s", symbol, exc)
+        return []
+
+
+async def _forecast_levels(symbol: str, price: float, cfg: dict) -> dict:
+    """Per-position target/stop. Defaults to the portfolio's fixed config, but when
+    the Monte-Carlo path forecaster has enough history it adapts them to the
+    symbol's own expected favourable/adverse excursion (clamped to sane bounds)."""
+    tp, sp = float(cfg["target_pct"]), float(cfg["stop_pct"])
+    src, fc = "config", None
+    try:
+        candles = await _daily_candles(symbol)
+        if len(candles) >= 40:
+            from app.agents import get_path_forecaster
+            horizon = max(5, min(int(cfg.get("max_hold_days", 25)), 15))
+            fc = get_path_forecaster().forecast(candles, horizon=horizon)
+            if fc.get("ok"):
+                tp = max(3.0, min(30.0, float(fc["target_pct"])))
+                sp = max(2.0, min(15.0, float(fc["stop_pct"])))
+                src = "forecast"
+    except Exception as exc:
+        logger.debug("forecast levels failed for %s: %s", symbol, exc)
+    return {"target": round(price * (1 + tp / 100), 2),
+            "stop":   round(price * (1 - sp / 100), 2),
+            "target_pct": round(tp, 2), "stop_pct": round(sp, 2),
+            "src": src, "forecast": fc}
+
+
 async def _record_delivery_outcome(date_str: str, symbol: str, pnl_pct: float) -> None:
     """Reflect a closed delivery paper trade on the Delivery accuracy line."""
     try:
@@ -116,11 +158,13 @@ class DeliveryAgent:
     @staticmethod
     def decide_exit(pos: dict, price: float, held_days: int, cfg: dict,
                     still_picked: bool, grade_now: str | None):
-        tp, sp, mh = cfg["target_pct"], cfg["stop_pct"], cfg["max_hold_days"]
+        mh = cfg["max_hold_days"]
+        tp = pos.get("target_pct", cfg["target_pct"])
+        sp = pos.get("stop_pct", cfg["stop_pct"])
         if price >= pos["target"]:
-            return True, f"Target hit (+{tp:.0f}%) — book the gain."
+            return True, f"Target hit (+{tp:.1f}%) — book the gain."
         if price <= pos["stop"]:
-            return True, f"Stop hit (-{sp:.0f}%) — cut the loss."
+            return True, f"Stop hit (-{sp:.1f}%) — cut the loss."
         if held_days >= mh:
             return True, f"Time stop — held {held_days}d without the move playing out."
         if not still_picked or (grade_now not in _GRADE_OK):
@@ -199,13 +243,24 @@ async def tick(reason: str = "manual") -> dict:
                 if qty < 1:
                     continue
                 pf["cash"] = round(pf["cash"] - qty * price, 2)
+                lv = await _forecast_levels(e["symbol"], price, cfg)
+                fc = lv.get("forecast") or {}
+                if lv["src"] == "forecast":
+                    reason = (f"Opened from delivery scan. Forecast target {lv['target_pct']}% / "
+                              f"stop {lv['stop_pct']}% (RR {fc.get('rr')}, "
+                              f"P(target-first) {fc.get('p_target_before_stop')}).")
+                else:
+                    reason = "Opened from delivery scan."
                 pf["positions"].append({
                     "symbol": e["symbol"], "name": e.get("name"), "sector": e.get("sector"),
                     "entry_date": today, "entry_price": round(price, 2), "qty": qty,
-                    "target": round(price * (1 + cfg["target_pct"] / 100), 2),
-                    "stop": round(price * (1 - cfg["stop_pct"] / 100), 2),
+                    "target": lv["target"], "stop": lv["stop"],
+                    "target_pct": lv["target_pct"], "stop_pct": lv["stop_pct"],
+                    "level_src": lv["src"],
+                    "p_target_before_stop": fc.get("p_target_before_stop"),
+                    "rr": fc.get("rr"),
                     "grade": e.get("grade"), "current": round(price, 2), "pnl_pct": 0.0,
-                    "status_reason": "Opened from delivery scan.",
+                    "status_reason": reason,
                 })
                 summary["opened"] += 1
 

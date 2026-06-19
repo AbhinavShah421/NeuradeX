@@ -38,6 +38,12 @@ def get_pattern_engine():
     return _g()
 
 
+def get_path_forecaster():
+    """Monte-Carlo path forecaster (projected path/target/stop + uncertainty)."""
+    from .forecast import get_path_forecaster as _g
+    return _g()
+
+
 def get_engine() -> EnsembleEngine:
     global _engine, _rl_agent
     if _engine is None:
