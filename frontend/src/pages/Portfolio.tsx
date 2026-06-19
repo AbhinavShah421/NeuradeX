@@ -1251,15 +1251,28 @@ const PortfolioPage: React.FC = () => {
                           </div>
                         )}
 
-                        <div style={{ display: 'flex', gap: 8 }}>
+                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                           {open && (
                             <button onClick={() => loadRebalance(t.id)} disabled={themeBusy === t.id + ':rb'}
                               style={{ flex: '0 0 auto', background: 'var(--nd-surface-2)', color: 'var(--nd-text-1)', border: '1px solid var(--nd-border)', borderRadius: 8, padding: '8px 12px', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
                               {themeBusy === t.id + ':rb' ? '…' : 'Rebalance'}
                             </button>
                           )}
+                          <button onClick={async () => {
+                            setThemeBusy(t.id + ':pt');
+                            try {
+                              const r: any = await apiService.paperTestTheme(t.id, 200000);
+                              const n = (r?.data?.positions ?? []).length;
+                              setOrderMsg({ ok: true, text: `Paper-test portfolio created from "${t.name}" (${n} stocks, ₹2L). Track it on Dashboard → Delivery Autopilot.` });
+                            } catch { setOrderMsg({ ok: false, text: 'Could not create the paper-test portfolio.' }); }
+                            finally { setThemeBusy(null); }
+                          }} disabled={themeBusy === t.id + ':pt'}
+                            style={{ flex: '0 0 auto', display: 'flex', alignItems: 'center', gap: 5, background: 'transparent', color: 'var(--nd-blue)', border: '1px solid var(--nd-blue)', borderRadius: 8, padding: '8px 12px', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+                            <span className="material-icons" style={{ fontSize: 15 }}>science</span>
+                            {themeBusy === t.id + ':pt' ? '…' : 'Paper-test'}
+                          </button>
                           <button onClick={() => askInvestBasket(t)} className="nd-btn"
-                            style={{ flex: 1, background: 'var(--nd-green)', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 0', fontSize: 12.5, fontWeight: 700, cursor: 'pointer' }}>
+                            style={{ flex: 1, minWidth: 130, background: 'var(--nd-green)', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 0', fontSize: 12.5, fontWeight: 700, cursor: 'pointer' }}>
                             Invest ₹{Number(basketAmt || 0).toLocaleString('en-IN')}
                           </button>
                         </div>

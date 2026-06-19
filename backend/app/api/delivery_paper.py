@@ -367,6 +367,58 @@ async def from_optimize(req: FromOptimizeRequest):
     return {"status": "success", "data": pf}
 
 
+class FromThemeRequest(BaseModel):
+    theme_id: str
+    capital: float = 200000.0
+    name: str | None = None
+
+
+@router.post("/from-theme")
+async def from_theme(req: FromThemeRequest):
+    """Seed a *tracked* paper portfolio from an AI Theme basket, so you can validate
+    the theme before trading it for real. Buys the theme's holdings at their
+    conviction weights, priced live, then holds and marks-to-market."""
+    from app.api.portfolio import _build_themes
+    theme = next((t for t in (await _build_themes()) if t["id"] == req.theme_id), None)
+    if not theme:
+        raise HTTPException(404, f"theme '{req.theme_id}' not found or empty right now")
+    holdings = theme.get("holdings") or []
+    targets = {(h.get("symbol") or "").upper(): float(h.get("weight_pct") or 0)
+               for h in holdings if h.get("symbol")}
+    targets = {s: w for s, w in targets.items() if w > 0}
+    if not targets:
+        raise HTTPException(400, "Theme has no weighted holdings right now.")
+
+    tot = sum(targets.values()) or 1.0
+    prices = await _prices(sorted(targets))
+    cap = max(10000.0, req.capital)
+    name = req.name or f"{theme['name']} (theme paper test)"
+    pf = _new_portfolio(name, cap, {}, source="theme", managed=False)
+    pf["theme_id"] = req.theme_id
+    pf["positions"] = []
+    stance = {(h.get("symbol") or "").upper(): h.get("stance") for h in holdings}
+    for sym, w in sorted(targets.items(), key=lambda x: -x[1]):
+        price = prices.get(sym)
+        if not price:
+            continue
+        qty = int((cap * (w / tot)) // price)
+        if qty < 1:
+            continue
+        pf["cash"] = round(pf["cash"] - qty * price, 2)
+        pf["positions"].append({"symbol": sym, "entry_date": _today(), "entry_price": round(price, 2),
+                                "qty": qty, "weight_pct": round(w / tot * 100, 1),
+                                "current": round(price, 2), "pnl_pct": 0.0, "stance": stance.get(sym),
+                                "status_reason": f"From AI Theme '{theme['name']}' (tracked)."})
+    if not pf["positions"]:
+        raise HTTPException(400, "Could not price any theme holdings to seed the portfolio.")
+    pf["value"] = round(pf["cash"] + sum(p["qty"] * p["current"] for p in pf["positions"]), 2)
+    pf["return_pct"] = 0.0
+    pfs = await _load_pfs()
+    pfs[pf["id"]] = pf
+    await _save_pfs(pfs)
+    return {"status": "success", "data": pf}
+
+
 @router.delete("/portfolios/{pid}")
 async def delete_portfolio(pid: str):
     pfs = await _load_pfs()
