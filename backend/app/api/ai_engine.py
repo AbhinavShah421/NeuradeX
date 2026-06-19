@@ -1351,11 +1351,29 @@ async def pattern_model_predict(req: AnalyzeRequest):
 @router.post("/pattern-model/grade")
 async def pattern_model_grade(req: AnalyzeRequest):
     """Graded pattern signal (A/B/C/D) from the unified pattern engine — model P(up)
-    blended with the memory bank's win-rate. The same grading used to gate trades."""
+    blended with the memory bank's win-rate, plus a Monte-Carlo path forecast
+    (projected target/stop + uncertainty). The same grading used to gate trades."""
     await _db_once()
     from app.agents import get_pattern_engine
-    sig = await get_pattern_engine().signal(req.candles, (req.symbol or "").upper() or None)
+    sig = await get_pattern_engine().signal(
+        req.candles, (req.symbol or "").upper() or None, with_forecast=True)
     return {"status": "success", "data": sig}
+
+
+@router.post("/pattern-model/forecast")
+async def pattern_model_forecast(req: AnalyzeRequest):
+    """Monte-Carlo path forecast for a candle window — projected return path with an
+    uncertainty band, data-driven target/stop (expected favourable/adverse
+    excursion), P(up) and P(target-before-stop). CPU-only, no GPU/model weights."""
+    from app.agents import get_path_forecaster
+    horizon = None
+    try:
+        if req.context and req.context.get("horizon") is not None:
+            horizon = int(req.context.get("horizon"))
+    except (TypeError, ValueError):
+        horizon = None
+    fc = get_path_forecaster().forecast(req.candles, horizon=horizon)
+    return {"status": "success", "data": fc}
 
 
 @router.post("/memory/seed")

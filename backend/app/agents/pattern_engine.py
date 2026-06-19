@@ -44,12 +44,22 @@ def grade_rank(g: str) -> int:
 
 
 class PatternEngine:
-    async def signal(self, candles: list[dict], symbol: str | None = None) -> dict:
-        """Graded pattern signal for the latest situation in `candles`."""
+    async def signal(self, candles: list[dict], symbol: str | None = None,
+                     with_forecast: bool = False, horizon: int | None = None) -> dict:
+        """Graded pattern signal for the latest situation in `candles`.
+
+        with_forecast=True also attaches a Monte-Carlo path forecast (projected
+        path / target / stop / uncertainty). It is cheap but NOT free, so callers
+        on the full-universe scan leave it off; low-volume decision paths
+        (committed / delivery / a session's single symbol) turn it on.
+        """
         fp = build_fingerprint(candles)
         if not fp:
-            return {"grade": "D", "p_up": None, "memory_winrate": None,
-                    "memory_samples": 0, "score": None, "ok": False}
+            out = {"grade": "D", "p_up": None, "memory_winrate": None,
+                   "memory_samples": 0, "score": None, "ok": False}
+            if with_forecast:
+                out["forecast"] = {"ok": False}
+            return out
         from app.agents import get_pattern_model, get_memory
         model = get_pattern_model()
         await model.init_db()
@@ -71,9 +81,17 @@ class PatternEngine:
             score = 0.5 * p_up + 0.5 * float(mw)
         else:
             score = p_up
-        return {"grade": _grade(score), "p_up": round(p_up, 3),
-                "memory_winrate": (round(float(mw), 3) if mw is not None else None),
-                "memory_samples": ms, "score": round(score, 3), "ok": True}
+        out = {"grade": _grade(score), "p_up": round(p_up, 3),
+               "memory_winrate": (round(float(mw), 3) if mw is not None else None),
+               "memory_samples": ms, "score": round(score, 3), "ok": True}
+        if with_forecast:
+            try:
+                from app.agents import get_path_forecaster
+                out["forecast"] = get_path_forecaster().forecast(candles, horizon=horizon)
+            except Exception as exc:
+                logger.debug("forecast failed: %s", exc)
+                out["forecast"] = {"ok": False}
+        return out
 
 
 _engine: PatternEngine | None = None
