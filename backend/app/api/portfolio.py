@@ -9,6 +9,7 @@ import random
 from datetime import datetime
 
 import httpx
+import numpy as np
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -1169,6 +1170,8 @@ async def fund_basket_invest(basket: str, amount: float):
     await ensure_loaded()
     baskets = await _build_baskets()
     b = next((x for x in baskets if x["id"] == basket), None)
+    if not b:  # also resolve thematic baskets by id
+        b = next((x for x in (await _build_themes()) if x["id"] == basket), None)
     if not b:
         raise HTTPException(status_code=404, detail=f"basket '{basket}' not found")
     try:
@@ -1199,6 +1202,215 @@ async def fund_basket_invest(basket: str, amount: float):
         "basket": b["id"], "basket_name": b["name"], "amount": amount,
         "deployed": round(deployed, 2), "leftover": round(amount - deployed, 2),
         "count": sum(1 for p in picks if p.get("qty")), "picks": picks,
+    }}
+
+
+# ── Thematic baskets (smallcase-style) + backtested analytics + rebalancing ───
+
+async def _basket_analytics(holdings: list[dict]) -> dict:
+    """Backtested risk/return for a weighted basket vs NIFTY 50 — the metrics a
+    smallcase shows (CAGR, annualized volatility, max drawdown, Sharpe, beta,
+    alpha). Built from ~1y daily history of the constituents."""
+    syms = [((h.get("symbol") or "").upper(), float(h.get("weight_pct") or 0) / 100.0)
+            for h in holdings if h.get("symbol")]
+    syms = [(s, w) for s, w in syms if s]
+    if not syms:
+        return {"ok": False, "reason": "no holdings"}
+    from app.data.stocks_master import STOCKS_BY_SYMBOL
+    series: dict[str, list] = {}
+    nd = None
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        for s, _ in syms:
+            ex = _exchange_for(s, STOCKS_BY_SYMBOL)
+            suf = ".BO" if ex == "BSE" else ".NS"
+            d = await _yh_full(client, f"{s}{suf}")
+            if d and len(d["closes"]) >= 60:
+                series[s] = d["closes"]
+        nd = await _yh_full(client, "^NSEI")
+    if not series:
+        return {"ok": False, "reason": "no price history"}
+
+    L = min(len(v) for v in series.values())
+    if nd:
+        L = min(L, len(nd["closes"]))
+    L = int(min(L, 252))
+    wsum = sum(w for s, w in syms if s in series) or 1.0
+    port = np.zeros(L)
+    for s, w in syms:
+        if s not in series:
+            continue
+        c = np.array(series[s][-L:], dtype=float)
+        port += (w / wsum) * (c / c[0])
+    rets = np.diff(np.log(port))
+    yrs = max(L / 252.0, 1e-6)
+    total_ret = float(port[-1] / port[0] - 1) * 100
+    cagr = float((port[-1] / port[0]) ** (1 / yrs) - 1) * 100
+    ann_vol = float(np.std(rets) * np.sqrt(252)) * 100
+    peak = np.maximum.accumulate(port)
+    mdd = float((port / peak - 1).min()) * 100
+    sharpe = float(np.mean(rets) / (np.std(rets) + 1e-9) * np.sqrt(252))
+
+    nifty_ret = beta = None
+    if nd:
+        nc = np.array(nd["closes"][-L:], dtype=float)
+        nidx = nc / nc[0]
+        nifty_ret = float(nidx[-1] / nidx[0] - 1) * 100
+        nrets = np.diff(np.log(nidx))
+        if len(nrets) == len(rets) and np.var(nrets) > 0:
+            beta = float(np.cov(rets, nrets)[0, 1] / np.var(nrets))
+
+    vol_label = "Low" if ann_vol < 18 else ("Moderate" if ann_vol < 28 else "High")
+    return {
+        "ok": True, "window_days": L,
+        "total_return_pct": round(total_ret, 2),
+        "cagr_pct": round(cagr, 2),
+        "ann_volatility_pct": round(ann_vol, 2),
+        "max_drawdown_pct": round(mdd, 2),
+        "sharpe": round(sharpe, 2),
+        "beta": (round(beta, 2) if beta is not None else None),
+        "nifty_return_pct": (round(nifty_ret, 2) if nifty_ret is not None else None),
+        "alpha_pct": (round(total_ret - nifty_ret, 2) if nifty_ret is not None else None),
+        "volatility_label": vol_label,
+        "coverage": f"{len(series)}/{len(syms)}",
+    }
+
+
+async def _theme_board() -> dict:
+    """Board for theme building: the live AI ranked board (which carries grade /
+    conviction / stance), enriched with live prices for any theme seed names that
+    aren't in the top-ranked board so the narrative baskets still populate. Those
+    extra names are 'watch' (priced, but the AI isn't endorsing them right now)."""
+    from app.agents.thematic import THEME_SEEDS
+    board = await _ranked_by_symbol()
+    all_syms = {s for seed in THEME_SEEDS.values() for s in seed["symbols"]}
+    missing = sorted(all_syms - set(board.keys()))
+    if missing:
+        try:
+            qm = await _yahoo_quote_map(missing)
+        except Exception:
+            qm = {}
+        for s in missing:
+            ltp = (qm.get(s) or {}).get("ltp")
+            if ltp:
+                board[s] = {"symbol": s, "name": (qm.get(s) or {}).get("name") or s,
+                            "sector": _sector_of(s), "grade": None, "action": None,
+                            "win_probability": 0.5, "price": float(ltp), "metrics": {}}
+    return board
+
+
+async def _build_themes() -> list[dict]:
+    """All thematic baskets, AI-populated. Cached briefly (price fetches)."""
+    from app.utils.sector_map import ensure_loaded
+    from app.utils.redis_client import cache_get, cache_set
+    from app.agents.thematic import get_thematic_agent, THEME_SEEDS
+    try:
+        cached = await cache_get("portfolio:themes:v1")
+        if cached:
+            return json.loads(cached)
+    except Exception:
+        pass
+    await ensure_loaded()
+    board = await _theme_board()
+    agent = get_thematic_agent()
+    out = []
+    for tid in THEME_SEEDS:
+        b = agent.build(tid, board, _weight)
+        if b:
+            out.append(b)
+    out.sort(key=lambda b: (-b["stats"]["buys"], -b["stats"]["avg_win_probability"]))
+    try:
+        await cache_set("portfolio:themes:v1", json.dumps(out), expire=300)
+    except Exception:
+        pass
+    return out
+
+
+@router.get("/themes")
+async def themes():
+    """smallcase-style AI thematic baskets — narrative themes (EV, green energy,
+    defence, digital, …) populated and conviction-weighted from the live scan.
+    Lightweight (no backtest); call /themes/{id}/analytics for risk/return."""
+    baskets = await _build_themes()
+    return {"status": "success", "data": {
+        "themes": baskets, "count": len(baskets),
+        "updated_at": datetime.now().isoformat(),
+        "note": "Membership and weights track the live AI board; use Rebalance to apply changes.",
+    }}
+
+
+@router.get("/themes/{theme_id}/analytics")
+async def theme_analytics(theme_id: str):
+    """Backtested risk/return (CAGR, volatility, drawdown, Sharpe, vs NIFTY) for a
+    theme's current holdings. Cached briefly — it fetches constituent history."""
+    from app.utils.redis_client import cache_get, cache_set
+    ck = f"portfolio:theme_analytics:{theme_id}"
+    try:
+        cached = await cache_get(ck)
+        if cached:
+            return {"status": "success", "data": json.loads(cached)}
+    except Exception:
+        pass
+    baskets = await _build_themes()
+    b = next((x for x in baskets if x["id"] == theme_id), None)
+    if not b:
+        raise HTTPException(status_code=404, detail=f"theme '{theme_id}' not found or empty right now")
+    analytics = await _basket_analytics(b["holdings"])
+    data = {"id": b["id"], "name": b["name"], "risk": b["risk"],
+            "holdings": b["holdings"], "analytics": analytics}
+    if analytics.get("ok"):
+        data["risk"] = analytics["volatility_label"]  # upgrade label with the backtested one
+    try:
+        await cache_set(ck, json.dumps(data), expire=1800)
+    except Exception:
+        pass
+    return {"status": "success", "data": data}
+
+
+@router.get("/themes/{theme_id}/rebalance")
+async def theme_rebalance(theme_id: str, held: str = ""):
+    """Propose a rebalance update for a theme: adds, drops (with reasons), new
+    target weights and a drift score. `held` = comma-separated symbols you hold
+    (omit to compare against the theme's current full membership)."""
+    from app.utils.sector_map import ensure_loaded
+    from app.agents.thematic import get_thematic_agent, THEME_SEEDS
+    if theme_id not in THEME_SEEDS:
+        raise HTTPException(status_code=404, detail=f"unknown theme '{theme_id}'")
+    await ensure_loaded()
+    board = await _ranked_by_symbol()
+    held_syms = [s.strip().upper() for s in held.split(",") if s.strip()]
+    if not held_syms:
+        cur = get_thematic_agent().build(theme_id, board, _weight)
+        held_syms = [h["symbol"] for h in cur["holdings"]] if cur else []
+    plan = get_thematic_agent().rebalance(theme_id, held_syms, board, _weight)
+    return {"status": "success", "data": plan}
+
+
+@router.get("/discover")
+async def discover():
+    """Discovery collections (smallcase-style): all baskets — thematic + quant —
+    grouped into collections and tagged by risk, for browsing/filtering."""
+    themes_b = await _build_themes()
+    quant_b = await _build_baskets()
+    collections = [
+        {"id": "themes", "title": "Investing Themes",
+         "subtitle": "Narrative baskets, AI-populated from the live scan",
+         "baskets": [{"id": t["id"], "name": t["name"], "emoji": t.get("emoji"),
+                      "risk": t["risk"], "thesis": t.get("thesis"),
+                      "size": t["stats"]["size"], "kind": "thematic"} for t in themes_b]},
+        {"id": "strategies", "title": "Strategy Baskets",
+         "subtitle": "Quant baskets built from AI conviction & momentum",
+         "baskets": [{"id": q["id"], "name": q["name"], "risk": q.get("risk"),
+                      "thesis": q.get("theme"), "size": q["stats"]["size"], "kind": "quant"}
+                     for q in quant_b]},
+    ]
+    # Cross-cut by risk band for filtering.
+    by_risk: dict[str, list] = {}
+    for t in themes_b:
+        by_risk.setdefault(t["risk"], []).append(t["id"])
+    return {"status": "success", "data": {
+        "collections": collections,
+        "by_risk": by_risk,
+        "updated_at": datetime.now().isoformat(),
     }}
 
 
