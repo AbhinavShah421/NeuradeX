@@ -5,7 +5,7 @@ import { Portfolio, Performance, PortfolioStock } from '../types';
 
 type SortKey = keyof Pick<PortfolioStock, 'symbol' | 'quantity' | 'purchasePrice' | 'currentPrice' | 'value' | 'gain' | 'gainPercent'>;
 type SortDir = 'asc' | 'desc';
-type Tab = 'holdings' | 'performance' | 'risk' | 'optimize' | 'invest' | 'sectors' | 'funds' | 'health' | 'planner' | 'tax' | 'advisor' | 'risklab';
+type Tab = 'holdings' | 'performance' | 'risk' | 'optimize' | 'invest' | 'sectors' | 'funds' | 'themes' | 'health' | 'planner' | 'tax' | 'advisor' | 'risklab';
 
 const inr = (v: number) =>
   v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -223,6 +223,13 @@ const PortfolioPage: React.FC = () => {
   const [baskets, setBaskets] = useState<any[]>([]);
   const [basketAmt, setBasketAmt] = useState('25000');
   const [openBasket, setOpenBasket] = useState<string | null>(null);
+  // AI Themes (smallcase-style)
+  const [themes, setThemes] = useState<any[]>([]);
+  const [themesLoading, setThemesLoading] = useState(false);
+  const [openTheme, setOpenTheme] = useState<string | null>(null);
+  const [themeAnalytics, setThemeAnalytics] = useState<Record<string, any>>({});
+  const [themeRebal, setThemeRebal] = useState<Record<string, any>>({});
+  const [themeBusy, setThemeBusy] = useState<string | null>(null);
   // Health / Planner / Tax
   const [health, setHealth] = useState<any>(null);
   const [tax, setTax] = useState<any>(null);
@@ -237,6 +244,11 @@ const PortfolioPage: React.FC = () => {
   useEffect(() => {
     if (activeTab === 'sectors') apiService.sectorExposure().then(r => setSectorData((r as any).data)).catch(() => {});
     if (activeTab === 'funds') apiService.fundBaskets().then(r => setBaskets((r as any).data?.baskets ?? [])).catch(() => {});
+    if (activeTab === 'themes' && themes.length === 0) {
+      setThemesLoading(true);
+      apiService.themes().then(r => setThemes((r as any).data?.themes ?? []))
+        .catch(() => {}).finally(() => setThemesLoading(false));
+    }
     if (activeTab === 'health') apiService.portfolioHealth().then(r => setHealth((r as any).data)).catch(() => {});
     if (activeTab === 'tax') apiService.taxHarvest().then(r => setTax((r as any).data)).catch(() => {});
     if (activeTab === 'advisor') {
@@ -247,6 +259,25 @@ const PortfolioPage: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
   const [riskLab, setRiskLab] = useState<any>(null);
+
+  const toggleTheme = async (id: string) => {
+    if (openTheme === id) { setOpenTheme(null); return; }
+    setOpenTheme(id);
+    if (!themeAnalytics[id]) {
+      setThemeBusy(id);
+      try {
+        const r = await apiService.themeAnalytics(id);
+        setThemeAnalytics(prev => ({ ...prev, [id]: (r as any).data?.analytics ?? { ok: false } }));
+      } catch { /* leave undefined */ } finally { setThemeBusy(null); }
+    }
+  };
+  const loadRebalance = async (id: string) => {
+    setThemeBusy(id + ':rb');
+    try {
+      const r = await apiService.themeRebalance(id);
+      setThemeRebal(prev => ({ ...prev, [id]: (r as any).data }));
+    } catch { /* ignore */ } finally { setThemeBusy(null); }
+  };
 
   const runPlan = async () => {
     setPlanning(true);
@@ -414,6 +445,7 @@ const PortfolioPage: React.FC = () => {
     { id: 'risklab',     label: 'AI Risk Lab', icon: 'science' },
     { id: 'health',      label: 'Health Score', icon: 'health_and_safety' },
     { id: 'sectors',     label: 'Sector Exposure', icon: 'donut_large' },
+    { id: 'themes',      label: 'AI Themes',   icon: 'category' },
     { id: 'funds',       label: 'AI Funds',    icon: 'inventory_2' },
     { id: 'planner',     label: 'Goal Planner', icon: 'savings' },
     { id: 'tax',         label: 'Tax Harvest', icon: 'receipt_long' },
@@ -1130,6 +1162,115 @@ const PortfolioPage: React.FC = () => {
           )}
 
           {/* ── AI Fund Baskets ── */}
+          {activeTab === 'themes' && (
+            <div style={{ padding: '18px 20px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 4 }}>
+                <span style={{ fontSize: 12.5, color: 'var(--nd-text-2)' }}>Invest amount ₹</span>
+                <input value={basketAmt} onChange={e => setBasketAmt(e.target.value.replace(/[^0-9]/g, ''))}
+                  className="nd-input" style={{ width: 140 }} placeholder="25000" />
+              </div>
+              <div style={{ fontSize: 11.5, color: 'var(--nd-text-3)', marginBottom: 14 }}>
+                AI-curated thematic baskets — each tracks a real-world theme, populated & conviction-weighted from the live scan. <strong>Buy</strong> = the AI endorses it now; <strong>Watch</strong> = on the theme's radar. Open one for backtested risk/return vs NIFTY and a rebalance proposal.
+              </div>
+              {themesLoading && themes.length === 0 ? (
+                <div className="nd-card" style={{ textAlign: 'center', padding: 40, color: 'var(--nd-text-3)', fontSize: 13 }}>Building thematic baskets from the live scan…</div>
+              ) : (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 360px), 1fr))', gap: 14 }}>
+                  {themes.map((t: any) => {
+                    const open = openTheme === t.id;
+                    const an = themeAnalytics[t.id];
+                    const rb = themeRebal[t.id];
+                    const shown = open ? t.holdings : t.holdings.slice(0, 4);
+                    return (
+                      <div key={t.id} className="nd-card" style={{ padding: '14px 16px', minWidth: 0 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
+                          <div style={{ fontSize: 14.5, fontWeight: 700, color: 'var(--nd-text-1)' }}>{t.emoji} {t.name}</div>
+                          <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--nd-purple)', border: '1px solid var(--nd-purple)', borderRadius: 5, padding: '1px 6px', whiteSpace: 'nowrap' }}>{t.risk} risk</span>
+                        </div>
+                        <div style={{ fontSize: 11.5, color: 'var(--nd-text-3)', margin: '4px 0 8px' }}>{t.thesis}</div>
+                        <div style={{ fontSize: 11, color: 'var(--nd-text-2)', marginBottom: 8 }}>
+                          {t.stats.size} stocks · <span style={{ color: 'var(--nd-green)' }}>{t.stats.buys} buy</span> · {t.stats.watch} watch · avg win-prob {(t.stats.avgWinProbability * 100).toFixed(0)}%
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 3, marginBottom: 8 }}>
+                          {shown.map((h: any) => (
+                            <div key={h.symbol} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+                              <span style={{ fontFamily: 'monospace', fontWeight: 600, color: 'var(--nd-text-1)', minWidth: 92 }}>{h.symbol}</span>
+                              <span style={{ fontSize: 9.5, fontWeight: 700, borderRadius: 4, padding: '0 5px',
+                                background: h.stance === 'buy' ? 'rgba(34,197,94,0.14)' : 'var(--nd-surface-2)',
+                                color: h.stance === 'buy' ? 'var(--nd-green)' : 'var(--nd-text-3)' }}>{h.stance === 'buy' ? `BUY ${h.grade}` : 'WATCH'}</span>
+                              <span style={{ color: 'var(--nd-text-3)', fontSize: 10.5, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{open ? (h.rationale || h.sector) : h.sector}</span>
+                              <span style={{ color: 'var(--nd-green)', fontWeight: 700 }}>{h.weightPct}%</span>
+                            </div>
+                          ))}
+                          {t.holdings.length > 4 && (
+                            <button onClick={() => toggleTheme(t.id)} style={{ alignSelf: 'flex-start', background: 'none', border: 'none', color: 'var(--nd-blue)', cursor: 'pointer', fontSize: 11, padding: 0 }}>
+                              {open ? 'show less' : `+${t.holdings.length - 4} more · view analytics`}
+                            </button>
+                          )}
+                        </div>
+
+                        {open && (
+                          <div style={{ borderTop: '1px solid var(--nd-border)', paddingTop: 8, marginBottom: 8 }}>
+                            {themeBusy === t.id ? (
+                              <div style={{ fontSize: 11.5, color: 'var(--nd-text-3)' }}>Backtesting the basket vs NIFTY…</div>
+                            ) : an && an.ok ? (
+                              <>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginBottom: 6 }}>
+                                  {[
+                                    { l: 'CAGR (1y)', v: `${an.cagrPct}%`, c: an.cagrPct >= 0 ? 'var(--nd-green)' : 'var(--nd-red)' },
+                                    { l: 'Volatility', v: `${an.annVolatilityPct}%`, c: 'var(--nd-text-1)' },
+                                    { l: 'Max drawdown', v: `${an.maxDrawdownPct}%`, c: 'var(--nd-red)' },
+                                    { l: 'Sharpe', v: `${an.sharpe}`, c: 'var(--nd-text-1)' },
+                                    { l: 'Beta', v: `${an.beta ?? '—'}`, c: 'var(--nd-text-1)' },
+                                    { l: 'Alpha vs NIFTY', v: an.alphaPct != null ? `${an.alphaPct > 0 ? '+' : ''}${an.alphaPct}%` : '—', c: (an.alphaPct ?? 0) >= 0 ? 'var(--nd-green)' : 'var(--nd-red)' },
+                                  ].map(m => (
+                                    <div key={m.l} style={{ background: 'var(--nd-surface-2)', borderRadius: 6, padding: '5px 7px' }}>
+                                      <div style={{ fontSize: 9.5, color: 'var(--nd-text-3)' }}>{m.l}</div>
+                                      <div style={{ fontSize: 13, fontWeight: 700, color: m.c }}>{m.v}</div>
+                                    </div>
+                                  ))}
+                                </div>
+                                <div style={{ fontSize: 10, color: 'var(--nd-text-3)' }}>
+                                  Basket vs NIFTY: {an.totalReturnPct}% vs {an.niftyReturnPct}% over {an.windowDays}d · {an.volatilityLabel} volatility · coverage {an.coverage}
+                                </div>
+                              </>
+                            ) : (
+                              <div style={{ fontSize: 11.5, color: 'var(--nd-text-3)' }}>Backtest unavailable (not enough price history).</div>
+                            )}
+                          </div>
+                        )}
+
+                        {open && rb && (
+                          <div style={{ borderTop: '1px solid var(--nd-border)', paddingTop: 8, marginBottom: 8, fontSize: 11.5 }}>
+                            <div style={{ fontWeight: 700, color: 'var(--nd-text-1)', marginBottom: 3 }}>
+                              Rebalance update · drift {rb.driftPct}% {rb.needsRebalance ? '' : '· already aligned'}
+                            </div>
+                            {rb.add?.length > 0 && <div style={{ color: 'var(--nd-green)' }}>Add: {rb.add.join(', ')}</div>}
+                            {rb.drop?.length > 0 && <div style={{ color: 'var(--nd-red)' }}>Drop: {rb.drop.join(', ')}</div>}
+                            {(!rb.add?.length && !rb.drop?.length) && <div style={{ color: 'var(--nd-text-3)' }}>No changes — the AI still endorses this basket as-is.</div>}
+                          </div>
+                        )}
+
+                        <div style={{ display: 'flex', gap: 8 }}>
+                          {open && (
+                            <button onClick={() => loadRebalance(t.id)} disabled={themeBusy === t.id + ':rb'}
+                              style={{ flex: '0 0 auto', background: 'var(--nd-surface-2)', color: 'var(--nd-text-1)', border: '1px solid var(--nd-border)', borderRadius: 8, padding: '8px 12px', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+                              {themeBusy === t.id + ':rb' ? '…' : 'Rebalance'}
+                            </button>
+                          )}
+                          <button onClick={() => askInvestBasket(t)} className="nd-btn"
+                            style={{ flex: 1, background: 'var(--nd-green)', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 0', fontSize: 12.5, fontWeight: 700, cursor: 'pointer' }}>
+                            Invest ₹{Number(basketAmt || 0).toLocaleString('en-IN')}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
           {activeTab === 'funds' && (
             <div style={{ padding: '18px 20px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 14 }}>

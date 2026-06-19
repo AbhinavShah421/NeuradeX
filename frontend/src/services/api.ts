@@ -293,6 +293,20 @@ class ApiService {
     const response = await this.api.get('/api/portfolio/health', { timeout: 30000 });
     return response.data;
   }
+  async themes(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/portfolio/themes', { timeout: 90000 });
+    return response.data;
+  }
+  async themeAnalytics(id: string): Promise<ApiResponse<any>> {
+    const response = await this.api.get(`/api/portfolio/themes/${id}/analytics`, { timeout: 90000 });
+    return response.data;
+  }
+  async themeRebalance(id: string, held?: string): Promise<ApiResponse<any>> {
+    const response = await this.api.get(`/api/portfolio/themes/${id}/rebalance`, {
+      params: held ? { held } : {}, timeout: 60000,
+    });
+    return response.data;
+  }
   async sipPlanner(p: { goalAmount?: number; years?: number; risk?: string; currentCorpus?: number; monthly?: number }): Promise<ApiResponse<any>> {
     const response = await this.api.get('/api/portfolio/sip-planner', { params: {
       goal_amount: p.goalAmount ?? 0, years: p.years ?? 10, risk: p.risk ?? 'moderate',
