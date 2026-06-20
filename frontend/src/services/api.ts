@@ -293,6 +293,20 @@ class ApiService {
     const response = await this.api.get('/api/portfolio/health', { timeout: 30000 });
     return response.data;
   }
+  async aiModels(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/ai-engine/models', { timeout: 30000 });
+    return response.data;
+  }
+  async setAiModel(name: string, body: { enabled?: boolean; weight?: number; clearWeight?: boolean }): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/ai-engine/models', {
+      name, enabled: body.enabled, weight: body.weight, clear_weight: body.clearWeight ?? false,
+    });
+    return response.data;
+  }
+  async trainGbm(maxSymbols = 250): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/ai-engine/gbm/train', {}, { params: { max_symbols: maxSymbols }, timeout: 300000 });
+    return response.data;
+  }
   async themes(): Promise<ApiResponse<any>> {
     const response = await this.api.get('/api/portfolio/themes', { timeout: 90000 });
     return response.data;

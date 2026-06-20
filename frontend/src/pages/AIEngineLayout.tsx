@@ -18,6 +18,13 @@ const SUB_NAV = [
     description: 'Agent health, weights & performance',
   },
   {
+    to: '/ai-engine/models-control',
+    exact: false,
+    label: 'AI Models',
+    icon: 'tune',
+    description: 'Enable/weight each model & train the GBM',
+  },
+  {
     to: '/ai-engine/backtest',
     exact: false,
     label: 'Backtesting',
