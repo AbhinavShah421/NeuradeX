@@ -67,6 +67,15 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning("Could not schedule memory sweep: %s", exc)
 
+        # Gradient-Boosted P(up) model nightly auto-retrain (rotates the universe)
+        try:
+            from app.agents.pattern_model import gbm_autotrain_loop
+            app.state.gbm_autotrain_task = asyncio.create_task(gbm_autotrain_loop())
+            logger.info("GBM nightly auto-retrain scheduled",
+                        extra={"log_type": "app_lifecycle", "event": "gbm_autotrain_scheduled"})
+        except Exception as exc:
+            logger.warning("Could not schedule GBM auto-retrain: %s", exc)
+
         # Delivery (multi-day) paper-trading autopilot — ticks once a day when enabled
         try:
             from app.api.delivery_paper import delivery_autopilot_loop
@@ -116,7 +125,8 @@ async def lifespan(app: FastAPI):
 
     logger.info("Shutting down application", extra={"log_type": "app_lifecycle", "event": "shutdown"})
     try:
-        for _attr in ("memory_sweep_task", "session_runner_task", "scanner_task", "autopilot_task", "angel_task"):
+        for _attr in ("memory_sweep_task", "gbm_autotrain_task", "delivery_paper_task",
+                      "session_runner_task", "scanner_task", "autopilot_task", "angel_task"):
             task = getattr(app.state, _attr, None)
             if task:
                 task.cancel()

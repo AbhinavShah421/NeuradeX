@@ -148,6 +148,12 @@ class Settings(BaseSettings):
     MEMORY_SWEEP_HOUR_IST: int = 2        # run at ~02:00 IST (after market close)
     MEMORY_SWEEP_LOOKBACK_DAYS: int = 730 # 2 years of daily candles per symbol
 
+    # Gradient-Boosted P(up) model nightly auto-retrain (rotates the universe so it
+    # strengthens over successive runs, like the pattern model)
+    GBM_AUTOTRAIN_ENABLED: bool = True
+    GBM_AUTOTRAIN_HOUR_IST: int = 3       # ~03:00 IST, after the memory sweep
+    GBM_AUTOTRAIN_MAX_SYMBOLS: int = 250  # universe slice per nightly run
+
     @model_validator(mode='after')
     def compute_urls(self) -> 'Settings':
         if not self.POSTGRES_URL:
