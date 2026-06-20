@@ -483,3 +483,35 @@ async def train_gbm_model(symbols: list[str] | None = None, lookback_days: int =
                     "duration_secs": round(time.time() - started, 1)})
         logger.info("gbm training done: %s", res)
         return res
+
+
+def _seconds_until_hour_ist(hour: int) -> float:
+    from datetime import timezone
+    ist = timezone(timedelta(hours=5, minutes=30))
+    now = datetime.now(ist)
+    target = now.replace(hour=hour % 24, minute=0, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return (target - now).total_seconds()
+
+
+async def gbm_autotrain_loop() -> None:
+    """Background task: retrain the GBM once daily, advancing the universe offset so
+    it covers the whole market over successive nights and keeps strengthening."""
+    from app.config import settings
+    if not getattr(settings, "GBM_AUTOTRAIN_ENABLED", True):
+        logger.info("GBM auto-retrain disabled via config")
+        return
+    while True:
+        try:
+            wait = _seconds_until_hour_ist(getattr(settings, "GBM_AUTOTRAIN_HOUR_IST", 3))
+            logger.info("Next GBM auto-retrain in %.0f min", wait / 60)
+            await asyncio.sleep(wait)
+            await train_gbm_model(
+                max_symbols=getattr(settings, "GBM_AUTOTRAIN_MAX_SYMBOLS", 250),
+                trigger="scheduled")
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.error("Scheduled GBM retrain error: %s", exc)
+            await asyncio.sleep(3600)  # back off an hour on failure

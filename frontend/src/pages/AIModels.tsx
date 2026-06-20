@@ -135,7 +135,8 @@ const AIModels: React.FC = () => {
         <div style={{ fontSize: 13.5, fontWeight: 700, color: 'var(--nd-text-1)', marginBottom: 4 }}>Train the Gradient-Boosted P(up) model</div>
         <div style={{ fontSize: 11.5, color: 'var(--nd-text-3)', marginBottom: 12, maxWidth: 700 }}>
           Trains the non-linear classifier on backfill (pattern fingerprint → realised forward return) samples,
-          rotating through a slice of the universe each run. {gbm?.trained ? 'Re-train to refresh and cover more symbols.' : 'It abstains from voting until trained.'}
+          rotating through a slice of the universe each run. It also <strong>auto-retrains nightly (~03:00 IST)</strong>,
+          advancing through the whole universe over successive nights. {gbm?.trained ? 'Train now to refresh on demand.' : 'It abstains from voting until trained.'}
         </div>
         <button onClick={trainGbm} disabled={training}
           style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 16px', borderRadius: 9, border: 'none',
