@@ -5,7 +5,7 @@ import { Portfolio, Performance, PortfolioStock } from '../types';
 
 type SortKey = keyof Pick<PortfolioStock, 'symbol' | 'quantity' | 'purchasePrice' | 'currentPrice' | 'value' | 'gain' | 'gainPercent'>;
 type SortDir = 'asc' | 'desc';
-type Tab = 'holdings' | 'performance' | 'risk' | 'optimize' | 'invest' | 'sectors' | 'funds' | 'themes' | 'health' | 'planner' | 'tax' | 'advisor' | 'risklab';
+type Tab = 'holdings' | 'performance' | 'risk' | 'optimize' | 'invest' | 'sectors' | 'funds' | 'themes' | 'health' | 'planner' | 'tax' | 'advisor';
 
 const inr = (v: number) =>
   v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -255,7 +255,7 @@ const PortfolioPage: React.FC = () => {
       apiService.portfolioBenchmark().then(r => setBench((r as any).data)).catch(() => {});
       apiService.portfolioAdvisor().then(r => setAdvisor((r as any).data)).catch(() => {});
     }
-    if (activeTab === 'risklab') apiService.riskLab().then(r => setRiskLab((r as any).data)).catch(() => {});
+    if (activeTab === 'risk') apiService.riskLab().then(r => setRiskLab((r as any).data)).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
   const [riskLab, setRiskLab] = useState<any>(null);
@@ -438,11 +438,10 @@ const PortfolioPage: React.FC = () => {
   const tabs: { id: Tab; label: string; icon: string }[] = [
     { id: 'holdings',    label: 'Holdings',    icon: 'account_balance_wallet' },
     { id: 'performance', label: 'Performance', icon: 'trending_up' },
-    { id: 'risk',        label: 'Risk',        icon: 'security' },
+    { id: 'risk',        label: 'AI Risk Lab', icon: 'security' },
     { id: 'optimize',    label: 'AI Optimize', icon: 'auto_awesome' },
     { id: 'invest',      label: 'AI Invest',   icon: 'savings' },
     { id: 'advisor',     label: 'AI Advisor',  icon: 'support_agent' },
-    { id: 'risklab',     label: 'AI Risk Lab', icon: 'science' },
     { id: 'health',      label: 'Health Score', icon: 'health_and_safety' },
     { id: 'sectors',     label: 'Sector Exposure', icon: 'donut_large' },
     { id: 'themes',      label: 'AI Themes',   icon: 'category' },
@@ -1371,9 +1370,14 @@ const PortfolioPage: React.FC = () => {
             </div>
           )}
 
-          {/* ── AI Risk Lab ── */}
-          {activeTab === 'risklab' && (
-            <div style={{ padding: '18px 20px' }}>
+          {/* ── AI Risk Lab (merged under the Risk tab) ── */}
+          {activeTab === 'risk' && (
+            <div style={{ padding: '18px 20px 0' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '4px 0 12px' }}>
+                <span className="material-icons" style={{ fontSize: 18, color: 'var(--nd-purple)' }}>science</span>
+                <span style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>AI Risk Lab</span>
+                <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>— correlation, stress tests, smart exits &amp; dividends</span>
+              </div>
               {!riskLab ? <div style={{ textAlign: 'center', padding: 40, color: 'var(--nd-text-3)', fontSize: 13 }}>Running risk analytics on your holdings…</div>
                 : riskLab.note ? <div style={{ textAlign: 'center', padding: 40, color: 'var(--nd-text-3)', fontSize: 13 }}>{riskLab.note}</div>
                 : (
