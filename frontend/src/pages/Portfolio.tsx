@@ -5,7 +5,7 @@ import { Portfolio, Performance, PortfolioStock } from '../types';
 
 type SortKey = keyof Pick<PortfolioStock, 'symbol' | 'quantity' | 'purchasePrice' | 'currentPrice' | 'value' | 'gain' | 'gainPercent'>;
 type SortDir = 'asc' | 'desc';
-type Tab = 'holdings' | 'performance' | 'risk' | 'optimize' | 'invest' | 'sectors' | 'funds' | 'themes' | 'health' | 'planner' | 'tax' | 'advisor';
+type Tab = 'holdings' | 'performance' | 'risk' | 'optimize' | 'invest' | 'sectors' | 'themes' | 'health' | 'planner' | 'tax' | 'advisor';
 
 const inr = (v: number) =>
   v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -243,7 +243,7 @@ const PortfolioPage: React.FC = () => {
 
   useEffect(() => {
     if (activeTab === 'sectors') apiService.sectorExposure().then(r => setSectorData((r as any).data)).catch(() => {});
-    if (activeTab === 'funds') apiService.fundBaskets().then(r => setBaskets((r as any).data?.baskets ?? [])).catch(() => {});
+    if (activeTab === 'invest') apiService.fundBaskets().then(r => setBaskets((r as any).data?.baskets ?? [])).catch(() => {});
     if (activeTab === 'themes' && themes.length === 0) {
       setThemesLoading(true);
       apiService.themes().then(r => setThemes((r as any).data?.themes ?? []))
@@ -440,12 +440,11 @@ const PortfolioPage: React.FC = () => {
     { id: 'performance', label: 'Performance', icon: 'trending_up' },
     { id: 'risk',        label: 'AI Risk Lab', icon: 'security' },
     { id: 'optimize',    label: 'AI Optimize', icon: 'auto_awesome' },
-    { id: 'invest',      label: 'AI Invest',   icon: 'savings' },
+    { id: 'invest',      label: 'AI Invest & Funds', icon: 'savings' },
     { id: 'advisor',     label: 'AI Advisor',  icon: 'support_agent' },
     { id: 'health',      label: 'Health Score', icon: 'health_and_safety' },
     { id: 'sectors',     label: 'Sector Exposure', icon: 'donut_large' },
     { id: 'themes',      label: 'AI Themes',   icon: 'category' },
-    { id: 'funds',       label: 'AI Funds',    icon: 'inventory_2' },
     { id: 'planner',     label: 'Goal Planner', icon: 'savings' },
     { id: 'tax',         label: 'Tax Harvest', icon: 'receipt_long' },
   ];
@@ -1283,8 +1282,14 @@ const PortfolioPage: React.FC = () => {
             </div>
           )}
 
-          {activeTab === 'funds' && (
-            <div style={{ padding: '18px 20px' }}>
+          {/* ── AI Funds (merged under the AI Invest tab) ── */}
+          {activeTab === 'invest' && (
+            <div style={{ padding: '18px 20px 0' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '4px 0 12px' }}>
+                <span className="material-icons" style={{ fontSize: 18, color: 'var(--nd-green)' }}>inventory_2</span>
+                <span style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>AI Funds</span>
+                <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>— mutual-fund-style stock baskets from the live scan</span>
+              </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 14 }}>
                 <span style={{ fontSize: 12.5, color: 'var(--nd-text-2)' }}>Invest amount ₹</span>
                 <input value={basketAmt} onChange={e => setBasketAmt(e.target.value.replace(/[^0-9]/g, ''))}
