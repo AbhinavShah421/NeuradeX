@@ -10,6 +10,10 @@ from .ensemble  import EnsembleEngine
 from .learning  import LearningSystem
 from .memory    import PatternMemory, MemoryAgent
 from .pattern_model import PatternRecognitionModel
+from .meanrev   import MeanReversionAgent
+from .regime    import RegimeFilterAgent
+from .anomaly   import AnomalyDetectorAgent
+from .gbm_agent import GBMAgent
 
 _engine:   EnsembleEngine | None = None
 _learning: LearningSystem | None = None
@@ -56,9 +60,19 @@ def get_engine() -> EnsembleEngine:
             SentimentAgent(),
             _rl_agent,
             MemoryAgent(get_memory()),
+            MeanReversionAgent(),
+            RegimeFilterAgent(),
+            AnomalyDetectorAgent(),
+            GBMAgent(),
         ]
         _engine = EnsembleEngine(agents)
     return _engine
+
+
+def get_gbm_model():
+    """Gradient-Boosted P(up) model (learned non-linear pattern classifier)."""
+    from .gbm_model import get_gbm_model as _g
+    return _g()
 
 
 def get_rl_agent() -> RLAgent:

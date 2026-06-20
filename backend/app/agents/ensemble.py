@@ -4,6 +4,7 @@ import asyncio
 import uuid
 from datetime import datetime
 from .base import AgentSignal, BaseAgent, EnsembleDecision
+from .registry import get_registry, is_enabled, weight_override
 from app.utils.elk_logger import get_logger
 
 logger = get_logger(__name__)
@@ -33,21 +34,45 @@ class EnsembleEngine:
     def update_weights(self, weights: dict[str, float]) -> None:
         self._weights.update(weights)
 
+    @staticmethod
+    def _apply_regime(signals: list[AgentSignal]) -> str:
+        """If the regime model is present, scale momentum vs mean-reversion vote
+        weights by the detected regime. Returns the regime label (or 'unknown')."""
+        rs = next((s for s in signals if s.agent_name == "regime"), None)
+        if rs is None:
+            return "unknown"
+        regime = (rs.indicators or {}).get("regime", "unknown")
+        mult = {
+            "trend":    {"momentum": 1.35, "meanrev": 0.5},
+            "chop":     {"momentum": 0.6,  "meanrev": 1.4},
+            "range":    {"momentum": 0.6,  "meanrev": 1.4},
+            "high_vol": {"momentum": 0.7,  "meanrev": 0.7, "technical": 0.8},
+        }.get(regime, {})
+        if mult:
+            for s in signals:
+                if s.agent_name in mult:
+                    s.weight *= mult[s.agent_name]
+        return regime
+
     async def decide(
         self,
         symbol:  str,
         candles: list[dict],
         context: dict,
     ) -> EnsembleDecision:
-        """Run all agents in parallel, combine with weighted voting."""
+        """Run all agents in parallel, combine with weighted voting. Each model is
+        independently enable/weight-controlled via the model registry."""
+
+        reg = await get_registry()
+        active = [a for a in self.agents if is_enabled(reg, a.name)]
 
         raw = await asyncio.gather(
-            *[a.analyze(symbol, candles, context) for a in self.agents],
+            *[a.analyze(symbol, candles, context) for a in active],
             return_exceptions=True,
         )
 
         signals: list[AgentSignal] = []
-        for result, agent in zip(raw, self.agents):
+        for result, agent in zip(raw, active):
             if isinstance(result, Exception):
                 logger.warning("Agent %s error: %s", agent.name, result)
                 signals.append(AgentSignal(
@@ -55,8 +80,14 @@ class EnsembleEngine:
                     confidence=0.30, reasoning=f"Error: {result}",
                 ))
             else:
-                result.weight = self._weights.get(result.agent_name, 1.0)
+                ov = weight_override(reg, result.agent_name)
+                result.weight = ov if ov is not None else self._weights.get(result.agent_name, 1.0)
                 signals.append(result)
+
+        # ── Regime-aware reweighting ────────────────────────────────────────────
+        # The Market-Regime model tilts the vote: trust momentum in trends and
+        # mean-reversion in chop; damp directional voices in high-vol regimes.
+        regime = self._apply_regime(signals)
 
         # Weighted vote
         vote: dict[str, float] = {"BUY": 0.0, "SELL": 0.0, "HOLD": 0.0}
@@ -108,6 +139,17 @@ class EnsembleEngine:
                     else:
                         memory_note = f"memory ok: {wr:.0%} historical win-rate"
 
+        # ── Anomaly / trap veto ─────────────────────────────────────────────────
+        # The anomaly model flags abnormal bars (news spikes, illiquid traps). On a
+        # flagged bar we refuse to open/flip a directional position.
+        anom = next((s for s in signals if s.agent_name == "anomaly"), None)
+        anomaly_note = ""
+        if anom is not None and (anom.indicators or {}).get("anomaly") and action in ("BUY", "SELL"):
+            score = float((anom.indicators or {}).get("anomaly_score", 0.0))
+            action = "HOLD"
+            confidence = 0.58
+            anomaly_note = f"anomaly veto: abnormal price/volume (score {score:.2f})"
+
         # Override to HOLD in extreme volatility (risk beats everything)
         if risk_score > 0.80 and action != "HOLD":
             action     = "HOLD"
@@ -120,6 +162,10 @@ class EnsembleEngine:
             )
             if memory_note:
                 reasoning = f"{reasoning}  ·  {memory_note}"
+            if anomaly_note:
+                reasoning = f"{reasoning}  ·  {anomaly_note}"
+            if regime and regime != "unknown":
+                reasoning = f"{reasoning}  ·  regime: {regime}"
 
         confidence = round(confidence, 3)
         pred_id = str(uuid.uuid4())

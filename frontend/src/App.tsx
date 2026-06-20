@@ -12,6 +12,7 @@ import Predictions from './pages/Predictions';
 import AIEngineLayout from './pages/AIEngineLayout';
 import AIEngine from './pages/AIEngine';
 import AIAgent from './pages/AIAgent';
+import AIModels from './pages/AIModels';
 import Backtest from './pages/Backtest';
 import PaperTrading from './pages/PaperTrading';
 import PatternMemory from './pages/PatternMemory';
@@ -45,6 +46,7 @@ const App: React.FC = () => {
                   <Route path="/ai-engine" element={<AIEngineLayout />}>
                     <Route index element={<AIEngine />} />
                     <Route path="agents" element={<AIAgent />} />
+                    <Route path="models-control" element={<AIModels />} />
                     <Route path="backtest" element={<Backtest />} />
                     <Route path="paper-trading" element={<PaperTrading />} />
                     <Route path="memory" element={<PatternMemory />} />

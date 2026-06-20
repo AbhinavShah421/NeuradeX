@@ -301,6 +301,7 @@ def is_training() -> bool:
 
 
 _UNIVERSE_OFFSET_KEY = "ai_engine:pattern_train_offset"
+_GBM_OFFSET_KEY = "ai_engine:gbm_train_offset"
 
 
 async def _full_universe() -> list[str]:
@@ -412,3 +413,73 @@ async def train_pattern_model(symbols: list[str] | None = None, lookback_days: i
         }
         logger.info("pattern training done: %s", _last_train)
         return _last_train
+
+
+async def train_gbm_model(symbols: list[str] | None = None, lookback_days: int = 365,
+                          horizon: int = 3, stride: int = 2, max_symbols: int = 250,
+                          trigger: str = "manual") -> dict:
+    """Train the Gradient-Boosted P(up) model on the SAME (fingerprint → realised
+    forward-return) samples the pattern model learns from, so it's a like-for-like
+    non-linear upgrade. Rotates through the universe like train_pattern_model."""
+    if _train_lock.locked():
+        return {"status": "already_running"}
+    async with _train_lock:
+        from app.api.backtest import _fetch_candles
+        from app.agents import get_gbm_model
+        from app.utils.redis_client import cache_get, cache_set
+
+        gbm = get_gbm_model()
+        await gbm.init_db()
+
+        if symbols:
+            syms = [s.upper() for s in symbols]
+            covered = f"{len(syms)} given"
+        else:
+            universe = await _full_universe()
+            total = len(universe)
+            try:
+                offset = int(await cache_get(_GBM_OFFSET_KEY) or 0) % max(1, total)
+            except Exception:
+                offset = 0
+            if max_symbols and max_symbols < total:
+                syms = [universe[(offset + i) % total] for i in range(max_symbols)]
+                new_off = (offset + max_symbols) % total
+            else:
+                syms, new_off = universe, 0
+            try:
+                await cache_set(_GBM_OFFSET_KEY, str(new_off), expire=86400 * 30)
+            except Exception:
+                pass
+            covered = f"{len(syms)}/{total} (offset {offset}→{new_off})"
+
+        end = datetime.now()
+        start = end - timedelta(days=lookback_days)
+        started = time.time()
+        samples: list[tuple[list[float], int]] = []
+        ok = fail = 0
+        for sym in syms:
+            try:
+                candles, _ = await _fetch_candles(sym, start, end)
+            except Exception:
+                fail += 1
+                continue
+            if not candles or len(candles) < 20 + horizon:
+                continue
+            for i in range(15, len(candles) - horizon, max(1, stride)):
+                fp = build_fingerprint(candles[: i + 1])
+                if fp is None:
+                    continue
+                c0 = float(candles[i]["close"]); cf = float(candles[i + horizon]["close"])
+                if c0 <= 0:
+                    continue
+                ret = (cf - c0) / c0 * 100
+                samples.append((fp, 1 if ret >= _LABEL_UP else 0))
+            ok += 1
+
+        if len(samples) < 200:
+            return {"status": "no_data", "samples": len(samples), "symbols": len(syms)}
+        res = await gbm.fit(samples, note=f"{trigger}:{covered}/h{horizon}")
+        res.update({"symbols_ok": ok, "symbols_failed": fail, "universe_slice": covered,
+                    "duration_secs": round(time.time() - started, 1)})
+        logger.info("gbm training done: %s", res)
+        return res
