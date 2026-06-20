@@ -76,12 +76,31 @@ class PatternEngine:
         except Exception as exc:
             logger.debug("pattern memory query failed: %s", exc)
 
-        # Blend model + memory when memory has enough evidence; else model only.
+        # Blend the available learned signals: linear pattern model P(up), the
+        # Gradient-Boosted (non-linear) P(up) when trained & enabled, and the memory
+        # bank's win-rate when it has enough evidence.
+        parts: list[tuple[float, float]] = [(p_up, 1.0)]   # (value, weight)
+        gbm_p = None
+        try:
+            from .registry import get_registry, is_enabled
+            reg = await get_registry()
+            if is_enabled(reg, "gbm"):
+                from app.agents import get_gbm_model
+                gm = get_gbm_model()
+                await gm.init_db()
+                if gm.is_trained:
+                    gp = gm.predict_fp(fp)
+                    if gp:
+                        gbm_p = float(gp["p_up"])
+                        parts.append((gbm_p, 1.0))
+        except Exception as exc:
+            logger.debug("gbm blend skipped: %s", exc)
         if ms >= _MIN_MEM_SAMPLES and mw is not None:
-            score = 0.5 * p_up + 0.5 * float(mw)
-        else:
-            score = p_up
+            parts.append((float(mw), 1.0))
+        wsum = sum(w for _, w in parts) or 1.0
+        score = sum(v * w for v, w in parts) / wsum
         out = {"grade": _grade(score), "p_up": round(p_up, 3),
+               "gbm_p_up": (round(gbm_p, 3) if gbm_p is not None else None),
                "memory_winrate": (round(float(mw), 3) if mw is not None else None),
                "memory_samples": ms, "score": round(score, 3), "ok": True}
         if with_forecast:

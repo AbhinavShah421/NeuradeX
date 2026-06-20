@@ -1376,6 +1376,69 @@ async def pattern_model_forecast(req: AnalyzeRequest):
     return {"status": "success", "data": fc}
 
 
+# ── AI model registry (independent enable/weight per model) ───────────────────
+
+class ModelConfigRequest(BaseModel):
+    name:    str
+    enabled: Optional[bool] = None
+    weight:  Optional[float] = None
+    clear_weight: bool = False     # set weight back to learned/default
+
+
+@router.get("/models")
+async def list_models():
+    """All independent AI models with their enable flag + weight override and
+    human-facing metadata, for the AI Models control panel."""
+    from app.agents.registry import get_registry, META
+    reg = await get_registry(force=True)
+    models = []
+    for name, cfg in reg.items():
+        m = META.get(name, {})
+        entry = {"name": name, "enabled": cfg.get("enabled", True),
+                 "weight": cfg.get("weight"),
+                 "label": m.get("label", name), "kind": m.get("kind", "model"),
+                 "desc": m.get("desc", "")}
+        if name == "gbm":
+            try:
+                from app.agents import get_gbm_model
+                gm = get_gbm_model(); await gm.init_db()
+                entry["trained"] = gm.is_trained
+                entry["meta"] = gm.meta
+            except Exception:
+                entry["trained"] = False
+        models.append(entry)
+    return {"status": "success", "data": {"models": models}}
+
+
+@router.post("/models")
+async def update_model(req: ModelConfigRequest):
+    """Enable/disable a model or pin/clear its vote-weight override at runtime."""
+    from app.agents.registry import set_model, DEFAULTS
+    if req.name not in DEFAULTS:
+        raise HTTPException(404, f"unknown model '{req.name}'")
+    weight_arg = None if req.clear_weight else (req.weight if req.weight is not None else ...)
+    reg = await set_model(req.name, enabled=req.enabled, weight=weight_arg)
+    return {"status": "success", "data": {"name": req.name, "config": reg.get(req.name)}}
+
+
+@router.post("/gbm/train")
+async def gbm_train(max_symbols: int = 250, horizon: int = 3, lookback_days: int = 365):
+    """Train the Gradient-Boosted P(up) model on backfill (fingerprint → realised
+    forward return) samples. Rotates through the universe across runs."""
+    from app.agents.pattern_model import train_gbm_model
+    res = await train_gbm_model(max_symbols=max_symbols, horizon=horizon,
+                                lookback_days=lookback_days, trigger="manual")
+    return {"status": "success", "data": res}
+
+
+@router.get("/gbm/status")
+async def gbm_status():
+    from app.agents import get_gbm_model
+    gm = get_gbm_model()
+    await gm.init_db()
+    return {"status": "success", "data": {"trained": gm.is_trained, "meta": gm.meta}}
+
+
 @router.post("/memory/seed")
 async def memory_seed(req: SeedMemoryRequest):
     """Bulk-seed the memory bank by replaying historical daily candles.
