@@ -26,11 +26,17 @@ class TechnicalAgent(BaseAgent):
         score   = 0.0
         signals = {}
 
-        # RSI
-        if rsi < 30:
-            score += 0.30; signals["rsi"] = "oversold"
+        # RSI — extreme readings carry more weight than any single trend indicator
+        # so that deeply oversold/overbought conditions are never overridden by a
+        # bearish MACD + below-VWAP combination alone.
+        if rsi < 25:
+            score += 0.55; signals["rsi"] = "extreme_oversold"
+        elif rsi < 30:
+            score += 0.45; signals["rsi"] = "oversold"
+        elif rsi > 75:
+            score -= 0.55; signals["rsi"] = "extreme_overbought"
         elif rsi > 70:
-            score -= 0.30; signals["rsi"] = "overbought"
+            score -= 0.45; signals["rsi"] = "overbought"
         elif rsi < 45:
             score += 0.10; signals["rsi"] = "soft_oversold"
         elif rsi > 55:
@@ -75,11 +81,11 @@ class TechnicalAgent(BaseAgent):
         score = max(-1.0, min(1.0, score))
 
         if score > 0.20:
-            action = "BUY";  confidence = min(0.95, 0.50 + score * 0.50)
+            action = "BUY";  confidence = min(0.85, 0.50 + score * 0.45)
         elif score < -0.20:
-            action = "SELL"; confidence = min(0.95, 0.50 + abs(score) * 0.50)
+            action = "SELL"; confidence = min(0.85, 0.50 + abs(score) * 0.45)
         else:
-            action = "HOLD"; confidence = 0.50 + (0.20 - abs(score)) * 0.50
+            action = "HOLD"; confidence = 0.50 + (0.20 - abs(score)) * 0.40
 
         reasons = []
         if "rsi" in signals and signals["rsi"] in ("oversold", "overbought"):
