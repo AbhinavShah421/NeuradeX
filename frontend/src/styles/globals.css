@@ -886,3 +886,62 @@ body.nd-chart-fullscreen-open { overflow: hidden; }
   0%   { transform: scale(1); opacity: 0.7; }
   100% { transform: scale(2.2); opacity: 0; }
 }
+
+/* ── Pattern Memory — responsive section card ───────────────────────────── */
+.nd-pm-card {
+  background: var(--nd-surface);
+  border: 1px solid var(--nd-border);
+  border-radius: 16px;
+  padding: 16px;
+}
+@media (min-width: 540px) {
+  .nd-pm-card { padding: 20px 24px; }
+}
+@media (min-width: 768px) {
+  .nd-pm-card { padding: 28px 32px; }
+}
+
+/* Hide rank # column on very small screens to prevent overflow */
+.nd-pm-rank { display: inline; }
+@media (max-width: 480px) {
+  .nd-pm-rank { display: none; }
+}
+
+/* Correct/total sample column: hidden on small, shown on wider */
+.nd-pm-sample { display: flex; }
+@media (max-width: 540px) {
+  .nd-pm-sample { display: none; }
+}
+
+/* 4-col stat grid collapses to 2-col on mobile */
+.nd-pm-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+}
+@media (max-width: 640px) {
+  .nd-pm-stats-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* 2-col breakdown grid stacks to 1-col on mobile */
+.nd-pm-breakdown {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+@media (max-width: 640px) {
+  .nd-pm-breakdown { grid-template-columns: 1fr; }
+}
+
+/* 3-col headline stats: 2-col on mobile, 1-col on very small */
+.nd-pm-headline {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+@media (max-width: 640px) {
+  .nd-pm-headline { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 380px) {
+  .nd-pm-headline { grid-template-columns: 1fr; }
+}

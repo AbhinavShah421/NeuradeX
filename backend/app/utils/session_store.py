@@ -17,9 +17,10 @@ from app.utils.elk_logger import get_logger
 
 logger = get_logger(__name__)
 
-_KEY      = "live_session:{}"
-_INDEX    = "live_sessions:index"
-_TTL      = 60 * 60 * 36          # keep finished sessions ~36h for review
+_KEY          = "live_session:{}"
+_INDEX        = "live_sessions:index"
+_RUNNING_IDX  = "live_sessions:running"   # only sessions currently in status=running
+_TTL          = 60 * 60 * 36              # keep finished sessions ~36h for review
 
 
 def _k(session_id: str) -> str:
@@ -32,6 +33,13 @@ async def save_session(s: dict) -> None:
         r = get_redis()
         await r.set(_k(s["id"]), json.dumps(s), ex=_TTL)
         await r.sadd(_INDEX, s["id"])
+        # Maintain a separate set of only running session IDs so the background
+        # runner loop can poll cheaply without loading all finished sessions.
+        if s.get("status") == "running":
+            await r.sadd(_RUNNING_IDX, s["id"])
+            await r.expire(_RUNNING_IDX, _TTL)
+        else:
+            await r.srem(_RUNNING_IDX, s["id"])
     except Exception as exc:
         logger.warning("save_session failed: %s", exc)
 
@@ -83,4 +91,47 @@ async def list_sessions() -> list[dict]:
         except Exception:
             pass
     out.sort(key=lambda s: s.get("created_at", ""), reverse=True)
+    return out
+
+
+async def list_running_sessions() -> list[dict]:
+    """Fast path for the background runner — loads only sessions with status=running.
+
+    Uses a separate Redis set (_RUNNING_IDX) that is maintained in sync by
+    save_session(). On first call after deploy (or if the set is missing), falls
+    back to a full scan and rebuilds the running index from what it finds.
+    """
+    from app.utils.redis_client import get_redis
+    try:
+        r = get_redis()
+        ids = list(await r.smembers(_RUNNING_IDX))
+    except Exception:
+        ids = []
+
+    if not ids:
+        # Running index is empty or missing — full scan once to rebuild it.
+        all_sessions = await list_sessions()
+        running = [s for s in all_sessions if s.get("status") == "running"]
+        if running:
+            try:
+                r = get_redis()
+                await r.sadd(_RUNNING_IDX, *[s["id"] for s in running])
+                await r.expire(_RUNNING_IDX, _TTL)
+            except Exception:
+                pass
+        return running
+
+    out: list[dict] = []
+    stale: list[str] = []
+    for sid in ids:
+        s = await get_session(sid)
+        if s is None or s.get("status") != "running":
+            stale.append(sid)
+        else:
+            out.append(s)
+    if stale:
+        try:
+            await get_redis().srem(_RUNNING_IDX, *stale)
+        except Exception:
+            pass
     return out

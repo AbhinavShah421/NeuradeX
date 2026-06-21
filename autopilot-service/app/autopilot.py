@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import time
 from datetime import datetime, timezone, timedelta
 
@@ -53,6 +54,25 @@ BT_SPEED    = int(os.getenv("AUTOPILOT_BACKTEST_SPEED", "1"))      # 1x — dens
 BT_MAX      = int(os.getenv("AUTOPILOT_BACKTEST_MAX", "15"))       # sessions per day queue
 BT_POLL     = int(os.getenv("AUTOPILOT_BACKTEST_POLL", "15"))      # seconds between queue checks
 BT_DAYS_BACK = int(os.getenv("AUTOPILOT_BACKTEST_MAX_DAYS_BACK", "30"))  # how far back, then wrap
+
+# Fixed training universe for the backtest autopilot.
+# Using today's live watchlist to replay historical dates is look-ahead bias —
+# those stocks are "interesting" because they're hot TODAY, not because they were
+# selected on the cursor date. A static, date-independent universe eliminates that.
+# Override via AUTOPILOT_BACKTEST_UNIVERSE env var (comma-separated symbols).
+_BT_UNIVERSE_DEFAULT = (
+    "SBIN,HDFCBANK,ICICIBANK,KOTAKBANK,AXISBANK,"
+    "RELIANCE,TCS,INFY,WIPRO,BAJFINANCE,"
+    "TATAMOTORS,MARUTI,SUNPHARMA,TITAN,ITC,"
+    "HINDUNILVR,NESTLEIND,ULTRACEMCO,ADANIENT,"
+    "FEDERALBNK,PNB,IDBI,INDUSINDBK,"
+    "SUZLON,IREDA,JKTYRE,ZEEL"
+)
+_BT_UNIVERSE: list[str] = [
+    s.strip() for s in
+    os.getenv("AUTOPILOT_BACKTEST_UNIVERSE", _BT_UNIVERSE_DEFAULT).split(",")
+    if s.strip()
+]
 
 MARKET_OPEN_MIN  = 9 * 60 + 15
 MARKET_CLOSE_MIN = 15 * 60 + 30
@@ -123,11 +143,8 @@ async def _flag(key: str) -> bool:
 
 async def set_mode(mode: str, enabled: bool) -> None:
     key = BACKTEST_FLAG if mode == "backtest" else PAPER_FLAG
-    try:
-        r = await _get_redis()
-        await r.set(key, "1" if enabled else "0", ex=86400 * 30)
-    except Exception as exc:
-        logger.warning("set_mode failed: %s", exc)
+    r = await _get_redis()
+    await r.set(key, "1" if enabled else "0", ex=86400 * 30)
 
 
 async def _paper_timing() -> str:
@@ -149,12 +166,33 @@ async def set_paper_timing(mode: str) -> None:
 
 # ── Backend HTTP ──────────────────────────────────────────────────────────────
 
+_WATCHLIST_MAX_AGE_SECONDS = 4 * 3600  # treat watchlist older than 4h as stale
+
+
+def _watchlist_fresh(data: dict) -> bool:
+    """Return False if the watchlist payload has no timestamp or is older than 4h."""
+    updated_at = data.get("updated_at") or data.get("scanned_at")
+    if not updated_at:
+        return True  # no timestamp field — assume fresh (legacy payload)
+    try:
+        from datetime import timezone
+        ts = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+        age = (datetime.now(timezone.utc) - ts).total_seconds()
+        return age < _WATCHLIST_MAX_AGE_SECONDS
+    except Exception:
+        return True
+
+
 async def _watchlist_symbols() -> list[str]:
     try:
         r = await _get_redis()
         raw = await r.get(WATCHLIST_KEY)
         if raw:
-            return [it["symbol"] for it in json.loads(raw).get("items", []) if it.get("symbol")]
+            data = json.loads(raw)
+            if not _watchlist_fresh(data):
+                logger.warning("Watchlist is stale (>4h) — skipping autopilot tick")
+                return []
+            return [it["symbol"] for it in data.get("items", []) if it.get("symbol")]
     except Exception:
         pass
     return []
@@ -168,6 +206,9 @@ async def _committed_symbols() -> list[str]:
         raw = await r.get(WATCHLIST_KEY)
         if raw:
             data = json.loads(raw)
+            if not _watchlist_fresh(data):
+                logger.warning("Watchlist is stale (>4h) — skipping committed symbols read")
+                return []
             comm = data.get("committed") or [it for it in data.get("items", []) if it.get("committed")]
             return [it["symbol"] for it in comm if it.get("symbol")]
     except Exception:
@@ -177,14 +218,28 @@ async def _committed_symbols() -> list[str]:
 
 async def _start_session(payload: dict) -> str | None:
     try:
+        tagged = {**payload, "source": "autopilot"}
         async with httpx.AsyncClient(timeout=30.0) as c:
-            r = await c.post(f"{BACKEND_URL}/api/sessions/start", json=payload)
+            r = await c.post(f"{BACKEND_URL}/api/sessions/start", json=tagged)
             if r.status_code == 200:
                 return (r.json().get("data") or {}).get("id")
             logger.debug("start %s -> %s %s", payload.get("symbol"), r.status_code, r.text[:120])
     except Exception as exc:
         logger.debug("start_session error: %s", exc)
     return None
+
+
+async def _session_owned_by_autopilot(sid: str) -> bool:
+    """Return True only if the session was originally started by this autopilot."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as c:
+            r = await c.get(f"{BACKEND_URL}/api/sessions/{sid}")
+        if r.status_code == 200:
+            data = r.json().get("data") or {}
+            return data.get("source") == "autopilot"
+    except Exception:
+        pass
+    return False
 
 
 async def _list_sessions() -> list[dict]:
@@ -219,6 +274,9 @@ async def _stop_backtest_queue(reason: str = "paper-trading window") -> None:
     if not queue:
         return
     for sid in queue:
+        if not await _session_owned_by_autopilot(sid):
+            logger.warning("Refusing to stop session %s — not owned by autopilot", sid)
+            continue
         await _stop_session(sid)
     st.update({"queue": [], "queue_pending": 0, "queue_date": None})
     await _save_bt_state(st)
@@ -245,9 +303,48 @@ async def reset_cursor() -> dict:
 
 # ── Paper autopilot ───────────────────────────────────────────────────────────
 
+_DAILY_LOSS_LIMIT_PCT = float(os.getenv("AUTOPILOT_DAILY_LOSS_LIMIT_PCT", "5.0"))
+
+
+async def _daily_pnl_pct() -> float:
+    """Return today's total realised P&L across all closed paper sessions as a percentage of capital."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as c:
+            resp = await c.get(f"{BACKEND_URL}/api/sessions")
+        if resp.status_code != 200:
+            return 0.0
+        sessions = resp.json().get("data", [])
+        today = _today()
+        total_pnl = 0.0
+        total_capital = 0.0
+        for s in sessions:
+            if s.get("mode") != "paper":
+                continue
+            if (s.get("created_at") or "")[:10] != today:
+                continue
+            if s.get("status") not in ("done", "stopped"):
+                continue
+            metrics = s.get("metrics") or {}
+            total_pnl += metrics.get("total_pnl", 0.0)
+            total_capital += s.get("capital", CAPITAL) or CAPITAL
+        return (total_pnl / total_capital * 100) if total_capital > 0 else 0.0
+    except Exception:
+        return 0.0
+
+
 async def _do_paper_tick() -> None:
     if not _market_open():
         return
+
+    # Daily loss circuit-breaker: halt if losses exceed limit
+    daily_pnl = await _daily_pnl_pct()
+    if daily_pnl < -_DAILY_LOSS_LIMIT_PCT:
+        logger.warning(
+            "Daily loss circuit-breaker triggered (%.2f%% loss, limit %.2f%%) — autopilot halted for today",
+            daily_pnl, _DAILY_LOSS_LIMIT_PCT,
+        )
+        return
+
     # Paper trading acts ONLY on committed high-conviction picks (precision tier).
     syms = await _committed_symbols()
     if not syms:
@@ -317,13 +414,15 @@ async def _do_backtest_step() -> None:
 
     # No active queue → start one for the cursor day.
     if not queue:
-        syms = await _watchlist_symbols()
-        if not syms:
-            return                         # wait for the scanner's watchlist
+        # Use the fixed training universe (not the live watchlist) so stock
+        # selection doesn't carry look-ahead bias from today's conviction picks.
+        # Shuffle so every run gives different stocks, exposing all universe
+        # members evenly over time.
+        syms = random.sample(_BT_UNIVERSE, min(BT_MAX, len(_BT_UNIVERSE)))
         ids: list[str] = []
-        for sym in syms[:BT_MAX]:
+        for sym in syms:
             sid = await _start_session({
-                "mode": "replay", "symbol": sym, "date": cursor,
+                "mode": "backtest", "symbol": sym, "date": cursor,
                 "start_time": "09:15", "capital": CAPITAL, "speed": BT_SPEED,
                 "max_hold_minutes": MAX_HOLD_MIN,
             })
@@ -416,6 +515,9 @@ async def kick(mode: str) -> None:
         if mode == "backtest" and await _flag(BACKTEST_FLAG):
             await _backtest_step()
         elif mode == "paper" and await _flag(PAPER_FLAG):
+            if not _market_open():
+                logger.info("kick(paper) skipped — market is closed")
+                return
             await _paper_tick()
     except Exception as exc:
         logger.debug("kick %s failed: %s", mode, exc)
@@ -452,7 +554,7 @@ async def backtest_loop() -> None:
 async def status() -> dict:
     sessions = await _list_sessions()
     paper_running = [s for s in sessions if s.get("status") == "running" and s.get("mode") == "paper"]
-    bt_running    = [s for s in sessions if s.get("status") == "running" and s.get("mode") == "replay"]
+    bt_running    = [s for s in sessions if s.get("status") == "running" and s.get("mode") == "backtest"]
     st  = await _load_bt_state()
     syms = await _watchlist_symbols()
     committed = await _committed_symbols()
@@ -474,12 +576,13 @@ async def status() -> dict:
             "active_window": _backtest_allowed(),   # False = paused for paper-trading hours
             "running": len(bt_running),
             "speed": BT_SPEED,
-            "cursor": st.get("cursor"),
+            "cursor": st.get("cursor") or _prev_trading_day(_today()),
             "queue_date": st.get("queue_date"),
             "queue_total": st.get("queue_total", 0),
             "queue_pending": st.get("queue_pending", 0),
             "completed_days": st.get("completed_days", 0),
             "last_completed": st.get("last_completed"),
-            "watchlist_size": len(syms),
+            "universe_size": len(_BT_UNIVERSE),
+            "stock_selection": "fixed_universe",
         },
     }

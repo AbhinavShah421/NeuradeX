@@ -9,18 +9,21 @@ and be reopenable as a live chart.
 """
 from __future__ import annotations
 import asyncio
+import httpx
 import os
 import uuid
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional
+
+from app.api.auth import get_current_user
 
 from app.config import settings
 from app.utils.elk_logger import get_logger
 from app.utils.session_store import (
-    save_session, get_session, delete_session, list_sessions,
+    save_session, get_session, delete_session, list_sessions, list_running_sessions,
 )
 
 # Replay machinery
@@ -34,7 +37,7 @@ from app.api.backtest import (
 logger = get_logger(__name__)
 router = APIRouter()
 
-_TICK_SECONDS = 2          # background loop cadence
+_TICK_SECONDS = 5          # background loop cadence
 SPEEDS        = (1, 2, 5, 10)
 
 # ── Trade gate ────────────────────────────────────────────────────────────────
@@ -58,10 +61,12 @@ _gate_cache = {"mode": "", "ts": 0.0}
 
 
 def _min_pattern_grade(mode: str) -> str:
-    """Required pattern grade to enter, by trading mode. Backtest/replay trade only
-    A-grade patterns (stop the losing churn); paper/live require at least B."""
+    """Required pattern grade to enter, by trading mode.
+    Replay uses B (not A) — the memory bank is still building up clean cases so the
+    composite score (model P(up) + memory WR) is artificially depressed. B lets
+    model-confident setups through while the memory calibrates. Paper/live use B too."""
     if mode in ("replay", "backtest"):
-        return os.getenv("PATTERN_MIN_GRADE_BACKTEST", "A").upper()
+        return os.getenv("PATTERN_MIN_GRADE_BACKTEST", "B").upper()
     return os.getenv("PATTERN_MIN_GRADE_LIVE", "B").upper()
 
 
@@ -189,7 +194,7 @@ def _summary(s: dict) -> dict:
 
 def _detail(s: dict) -> dict:
     """Full view for the live chart — candles up to the current point only."""
-    if s["mode"] == "replay":
+    if s["mode"] in ("replay", "backtest"):
         idx = s.get("current_idx", 0)
         candles = (s.get("all_candles") or [])[: idx + 1]
     else:
@@ -210,7 +215,7 @@ def _detail(s: dict) -> dict:
     }
 
 
-async def _ensemble_decision(symbol: str, candles: list[dict], capital: float, position: str):
+async def _ensemble_decision(symbol: str, candles: list[dict], capital: float, position: str, mode: str = "paper"):
     """Run the 7-agent ensemble (+memory gate) on the candles seen so far."""
     from app.agents import get_engine, get_learning
     engine   = get_engine()
@@ -221,7 +226,7 @@ async def _ensemble_decision(symbol: str, candles: list[dict], capital: float, p
             engine.update_weights(weights)
     except Exception:
         pass
-    context = {"symbol": symbol, "capital": capital, "position": position}
+    context = {"symbol": symbol, "capital": capital, "position": position, "mode": mode}
     decision = await engine.decide(symbol, candles, context)
     agents = [
         {"agent_name": a.agent_name, "action": a.action,
@@ -248,14 +253,13 @@ async def _feed_memory(symbol: str, fp, regime: str, pnl_pct: float, entry: floa
         await get_memory().add_case(
             symbol=symbol, fingerprint=fp, action="BUY", pnl_pct=pnl_pct,
             entry_price=entry, exit_price=exit_, regime=regime,
-            source="PAPER" if mode == "paper" else "REPLAY",
+            source="PAPER" if mode == "paper" else ("BACKTEST" if mode == "backtest" else "REPLAY"),
         )
     except Exception as exc:
         logger.debug("session memory feed skipped: %s", exc)
 
 
-_PAPER_PROFIT_TARGET_PCT = 0.6   # book profit at +0.6% gain
-_PAPER_DROP_CANDLES      = 3     # N consecutive lower closes = drop pattern
+_PAPER_DROP_CANDLES = 6     # N consecutive lower closes = drop pattern (3 was triggering on normal chop)
 
 
 def _timing_block_reason(ind: dict, candle: dict) -> str:
@@ -298,7 +302,7 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
     conf   = 0.6
     reason = ""
     if not (force_close and pos_status == "LONG"):
-        decision, agents = await _ensemble_decision(symbol, window, s["capital"], pos_status)
+        decision, agents = await _ensemble_decision(symbol, window, s["capital"], pos_status, s.get("mode", "paper"))
         conf, reason, ens_action = decision.confidence, decision.reasoning, decision.action
     else:
         ens_action = "SELL"
@@ -331,9 +335,14 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
             try:
                 from app.agents import get_pattern_engine
                 from app.agents.pattern_engine import grade_rank
-                psig = await get_pattern_engine().signal(window, symbol)
+                session_mode = s.get("mode", "paper")
+                # Exclude contaminated REPLAY memory from pattern scoring in replay
+                # mode — same principle as the MemoryAgent fix.
+                excl = {"REPLAY"} if session_mode == "replay" else None
+                psig = await get_pattern_engine().signal(window, symbol,
+                                                         exclude_memory_sources=excl)
                 s["last_pattern"] = psig
-                min_grade = _min_pattern_grade(s.get("mode", "paper"))
+                min_grade = _min_pattern_grade(session_mode)
                 if psig.get("ok") and grade_rank(psig["grade"]) > grade_rank(min_grade):
                     enter = False
                     blocked.append(f"pattern grade {psig['grade']} below required {min_grade} "
@@ -383,15 +392,13 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
             action = "HOLD"
             reason = f"No new entries after {cfg.get('no_entry_after', '14:00')}."
 
-        # Profit booking and drop pattern (only while still in a HOLD — don't override above rules)
+        # Drop pattern (only while still in a HOLD — don't override ATR stop/take above).
+        # Requires _PAPER_DROP_CANDLES consecutive lower closes — filters real trend breaks
+        # from normal intraday chop (3 candles was too sensitive; 6 is the threshold).
+        # Profit booking was removed: the ATR-scaled take-profit in _tech_signal
+        # (+2.5% min) now manages exits so winners can run instead of being capped at 0.6%.
         if pos_status == "LONG" and action == "HOLD":
-            entry_price_now = pos.get("entry_price", 0.0)
-            gain_pct = (candle["close"] - entry_price_now) / entry_price_now * 100 if entry_price_now > 0 else 0.0
-
-            if gain_pct >= _PAPER_PROFIT_TARGET_PCT:
-                action = "SELL"
-                reason = f"Profit booked at +{gain_pct:.2f}% — target reached."
-            elif len(window) >= _PAPER_DROP_CANDLES + 1:
+            if len(window) >= _PAPER_DROP_CANDLES + 1:
                 recent_closes = [c["close"] for c in window[-(_PAPER_DROP_CANDLES + 1):]]
                 if all(recent_closes[i] > recent_closes[i + 1] for i in range(_PAPER_DROP_CANDLES)):
                     action = "SELL"
@@ -474,7 +481,7 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
                 market_context={"regime": "intraday", "vwap": ind.get("vwap"), "rsi": ind.get("rsi"),
                                 "session_mode": s["mode"], "session_id": s["id"]},
                 confidence=conf,
-                trade_source="PAPER" if s["mode"] == "paper" else "REPLAY",
+                trade_source=s.get("trade_source", "PAPER" if s["mode"] == "paper" else "REPLAY"),
             )]))
         except Exception:
             pass
@@ -666,29 +673,91 @@ async def _advance_paper(s: dict) -> None:
         s["status"] = "done"
 
 
+_MAX_SESSION_ERRORS = 3
+
+
 async def _advance(s: dict) -> None:
     try:
-        if s["mode"] == "replay":
+        if s["mode"] in ("replay", "backtest"):
             await _advance_replay(s)
         else:
             await _advance_paper(s)
+        s.pop("error", None)
+        s.pop("error_count", None)
     except Exception as exc:
-        logger.warning("session %s advance error: %s", s.get("id"), exc)
+        error_count = s.get("error_count", 0) + 1
         s["error"] = str(exc)[:200]
+        s["error_count"] = error_count
+        logger.warning("session %s advance error (%d/%d): %s",
+                       s.get("id"), error_count, _MAX_SESSION_ERRORS, exc)
+        if error_count >= _MAX_SESSION_ERRORS:
+            s["status"] = "error"
+            logger.error("session %s halted after %d consecutive errors",
+                         s.get("id"), error_count)
     await save_session(s)
 
 
 # ── Background loop ───────────────────────────────────────────────────────────
 
+# Sessions running longer than this are considered abandoned (browser closed etc.)
+# Replay sessions: one trading day = 6.25h max. Paper sessions: max 8h.
+_SESSION_MAX_AGE_HOURS = 8
+
+
+async def _auto_stop_stale(s: dict) -> bool:
+    """Return True and stop the session if it has been running too long.
+
+    Prevents abandoned sessions (browser-closed, autopilot crashed mid-run)
+    from burning CPU/memory in the background runner indefinitely.
+    """
+    created_at_str = s.get("created_at", "")
+    if not created_at_str:
+        return False
+    try:
+        created_at = datetime.fromisoformat(created_at_str)
+        age_hours = (datetime.now(IST) - created_at).total_seconds() / 3600
+        if age_hours > _SESSION_MAX_AGE_HOURS:
+            s["status"] = "stopped"
+            s["error"] = f"Auto-stopped: session ran for {age_hours:.1f}h (>{_SESSION_MAX_AGE_HOURS}h limit)"
+            s["updated_at"] = datetime.now(IST).isoformat()
+            await save_session(s)
+            logger.info(
+                "Auto-stopped stale session",
+                extra={"log_type": "session_event", "event": "auto_stop",
+                       "session_id": s.get("id"), "age_hours": round(age_hours, 1)},
+            )
+            return True
+    except Exception:
+        pass
+    return False
+
+
 async def session_runner_loop() -> None:
     await asyncio.sleep(8)
     logger.info("Live session runner started",
                 extra={"log_type": "app_lifecycle", "event": "session_runner_started"})
+    _idle_ticks = 0
     while True:
         try:
-            for s in await list_sessions():
-                if s.get("status") == "running":
-                    await _advance(s)
+            # Fast path: only load sessions that are actively running.
+            # list_running_sessions() uses a small Redis set instead of deserialising
+            # all session blobs (which include heavy all_candles arrays for replay).
+            running = await list_running_sessions()
+
+            if not running:
+                _idle_ticks += 1
+                # Back off gradually when nothing is running to avoid hammering Redis.
+                sleep_secs = min(30, _TICK_SECONDS * (1 + _idle_ticks // 3))
+                await asyncio.sleep(sleep_secs)
+                continue
+
+            _idle_ticks = 0
+            for s in running:
+                # Kill sessions that have been running longer than the max age.
+                if await _auto_stop_stale(s):
+                    continue
+                await _advance(s)
+
         except asyncio.CancelledError:
             break
         except Exception as exc:
@@ -696,12 +765,27 @@ async def session_runner_loop() -> None:
         await asyncio.sleep(_TICK_SECONDS)
 
 
+_FEEDBACK_BASE = "http://feedback-service:8012"
+
+
+async def _already_backtested(symbol: str, date: str) -> bool:
+    """Return True if symbol has any recorded BACKTEST or REPLAY trade on `date`."""
+    try:
+        async with httpx.AsyncClient(timeout=4.0) as c:
+            r = await c.get(f"{_FEEDBACK_BASE}/trades/exists", params={"symbol": symbol, "date": date})
+            if r.status_code == 200:
+                return r.json().get("exists", False)
+    except Exception:
+        pass
+    return False
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.post("/start")
 async def start_session(req: StartSessionRequest):
     symbol = req.symbol.upper()
-    mode   = req.mode if req.mode in ("replay", "paper") else "replay"
+    mode   = req.mode if req.mode in ("replay", "paper", "backtest") else "replay"
     speed  = req.speed if req.speed in SPEEDS else 1
     model  = req.model or getattr(settings, "LLM_MODEL", "llama3.2")
     sid    = uuid.uuid4().hex[:12]
@@ -715,12 +799,13 @@ async def start_session(req: StartSessionRequest):
         "max_hold_minutes": req.max_hold_minutes,
         "timing_mode": req.timing_mode if req.timing_mode in ("normal", "aggressive") else "normal",
         "metrics": _compute_metrics(req.capital, req.capital, []),
+        "trade_source": "PAPER" if mode == "paper" else "REPLAY",  # overridden below for backtest/replay
         "created_at": now.isoformat(), "updated_at": now.isoformat(),
     }
 
-    if mode == "replay":
+    if mode in ("replay", "backtest"):
         if not req.date:
-            raise HTTPException(400, "date is required for replay mode")
+            raise HTTPException(400, "date is required for replay/backtest mode")
         try:
             req_date = datetime.strptime(req.date, "%Y-%m-%d").date()
         except ValueError:
@@ -736,14 +821,22 @@ async def start_session(req: StartSessionRequest):
         prev_date = _prev_trading_day(datetime.strptime(req.date, "%Y-%m-%d")).strftime("%Y-%m-%d")
         prev_day  = await _fetch_full_day_candles(symbol, prev_date)
 
+        # Dynamically determine BACKTEST vs REPLAY:
+        # first time trading this symbol on this date → BACKTEST, repeat → REPLAY
+        already_run = await _already_backtested(symbol, req.date)
+        mode = "replay" if already_run else "backtest"
+        trade_source = "REPLAY" if already_run else "BACKTEST"
+        base["mode"] = mode
+        base["trade_source"] = trade_source
+
         start_idx = _idx_for_time(all_candles, req.start_time)
         base.update({
             "date": req.date, "all_candles": all_candles, "current_idx": start_idx,
             "prev_day_candles": prev_day, "prev_day_date": prev_date,
             "current_time": all_candles[start_idx]["time"], "data_source": "groww",
         })
-        # Run the initial candle's decision
-        await _step(base, all_candles[: start_idx + 1], force_close=(start_idx == len(all_candles) - 1))
+        # Initial step is handled by the background session_runner_loop within 2 s.
+        # Running it here would block the HTTP response for 10–30 s (LLM ensemble).
     else:
         from app.api.paper_trading import (
             _market_status_label, _current_candle_time, _today_str, _fetch_candles_for_start,
@@ -761,7 +854,7 @@ async def start_session(req: StartSessionRequest):
             "date": _today_str(), "candles": candles, "prev_day_candles": [],
             "current_time": cur, "data_source": src,
         })
-        await _step(base, candles, force_close=False)
+        # Let the background loop handle the first step to avoid blocking the response.
 
     await save_session(base)
     logger.info("Live session started",
@@ -789,7 +882,7 @@ async def get_paper_trading_config():
 
 
 @router.post("/paper-config")
-async def set_paper_trading_config(req: PaperConfigRequest):
+async def set_paper_trading_config(req: PaperConfigRequest, user: dict = Depends(get_current_user)):
     import re
     hhmm = re.compile(r"^\d{2}:\d{2}$")
     if not hhmm.match(req.no_entry_after) or not hhmm.match(req.squareoff_after):
@@ -819,7 +912,7 @@ async def get_one_session(session_id: str):
 
 
 @router.post("/{session_id}/stop")
-async def stop_session(session_id: str):
+async def stop_session(session_id: str, user: dict = Depends(get_current_user)):
     s = await get_session(session_id)
     if not s:
         raise HTTPException(404, "Session not found.")
@@ -831,7 +924,7 @@ async def stop_session(session_id: str):
 
 
 @router.post("/{session_id}/speed")
-async def set_speed(session_id: str, req: SpeedRequest):
+async def set_speed(session_id: str, req: SpeedRequest, user: dict = Depends(get_current_user)):
     s = await get_session(session_id)
     if not s:
         raise HTTPException(404, "Session not found.")
@@ -841,6 +934,6 @@ async def set_speed(session_id: str, req: SpeedRequest):
 
 
 @router.delete("/{session_id}")
-async def remove_session(session_id: str):
+async def remove_session(session_id: str, user: dict = Depends(get_current_user)):
     await delete_session(session_id)
     return {"status": "success"}
