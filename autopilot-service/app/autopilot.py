@@ -449,7 +449,7 @@ async def _rank_by_historical_sentiment(symbols: list[str], date: str) -> list[s
     replay, giving more meaningful training data.
     """
     try:
-        async with httpx.AsyncClient(timeout=60.0) as c:
+        async with httpx.AsyncClient(timeout=10.0) as c:
             r = await c.post(
                 f"{BACKEND_URL}/api/ai-engine/sentiment/historical/bulk",
                 json={"symbols": symbols, "date": date},

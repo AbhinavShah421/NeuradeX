@@ -2187,9 +2187,8 @@ const LiveSessionsPanel: React.FC = () => {
 
   const load = useCallback(async () => {
     try {
-      const r = await apiService.sessionList();
-      const all: any[] = (r as any).data ?? [];
-      setSessions(all.filter(s => s.status === 'running'));
+      const r = await apiService.sessionList('running');
+      setSessions((r as any).data ?? []);
     } catch { /* keep last */ }
   }, []);
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [load]);

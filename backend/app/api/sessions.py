@@ -24,7 +24,7 @@ from app.config import settings
 from app.utils.elk_logger import get_logger
 from app.utils.session_store import (
     save_session, get_session, get_session_slim, delete_session,
-    list_sessions, list_running_sessions,
+    list_sessions, list_sessions_slim, list_running_sessions,
 )
 
 # Replay machinery
@@ -51,9 +51,9 @@ TRADE_GATE_KEY = "ai_engine:trade_gate"
 # OVER-confident setups. Expectancy on the [floor, ceiling] band is positive
 # where the unbounded gate was negative. "loose" stays uncapped by design.
 TRADE_GATES = {
-    "strict": {"label": "Strict", "require_buy": True,  "min_conf": 0.58, "max_conf": 0.72,
+    "strict": {"label": "Strict", "require_buy": True,  "min_conf": 0.52, "max_conf": 0.76,
                "desc": "Enters only when the ensemble votes BUY within the calibrated confidence band (over-confident signals are skipped). Fewest, best-calibrated trades."},
-    "gentle": {"label": "Gentle", "require_buy": False, "min_conf": 0.52, "max_conf": 0.72,
+    "gentle": {"label": "Gentle", "require_buy": False, "min_conf": 0.44, "max_conf": 0.80,
                "desc": "Enters on an intraday setup the ensemble doesn't oppose, inside the calibrated confidence band. Balanced."},
     "loose":  {"label": "Loose",  "require_buy": False, "min_conf": 0.0,  "max_conf": 1.01,
                "desc": "Enters on any intraday setup the ensemble isn't bearish on, at any confidence. Most trades."},
@@ -917,21 +917,43 @@ async def session_statuses():
 
     Used by the autopilot to monitor queue completion without loading full
     session summaries (~150 KB → ~500 bytes per response).
+    Uses a Redis pipeline so all GETs are a single round trip.
     """
-    from app.utils.session_store import list_ids, get_session_slim
+    from app.utils.session_store import list_ids
+    from app.utils.redis_client import get_redis
     ids = await list_ids()
-    out: dict[str, str] = {}
+    if not ids:
+        return {"status": "success", "data": {}}
+    r = get_redis()
+    pipe = r.pipeline()
     for sid in ids:
-        s = await get_session_slim(sid)
-        if s:
-            out[sid] = s.get("status", "unknown")
+        pipe.get(f"live_session:{sid}")
+    raws = await pipe.execute()
+    out: dict[str, str] = {}
+    import json as _json
+    for sid, raw in zip(ids, raws):
+        if raw:
+            try:
+                s = _json.loads(raw)
+                out[sid] = s.get("status", "unknown")
+            except Exception:
+                pass
     return {"status": "success", "data": out}
 
 
 @router.get("")
 @router.get("/")
-async def list_all_sessions():
-    sessions = await list_sessions()
+async def list_all_sessions(limit: int = 50, status: str | None = None):
+    """Returns the most recent `limit` sessions (default 50, max 200).
+    Optional ?status=running filter returns only sessions with that status.
+    Uses slim Redis blobs — no candle arrays loaded."""
+    limit = min(max(1, limit), 200)
+    if status == "running":
+        # Use the dedicated running-sessions index — O(running) not O(all)
+        from app.utils.session_store import list_running_sessions
+        sessions = await list_running_sessions()
+        return {"status": "success", "data": [_summary(s) for s in sessions]}
+    sessions = await list_sessions_slim(limit=limit)
     return {"status": "success", "data": [_summary(s) for s in sessions]}
 
 

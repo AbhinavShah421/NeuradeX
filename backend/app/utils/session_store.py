@@ -28,7 +28,8 @@ _KEY          = "live_session:{}"
 _CANDLES_KEY  = "live_session_candles:{}"
 _INDEX        = "live_sessions:index"
 _RUNNING_IDX  = "live_sessions:running"
-_TTL          = 60 * 60 * 8   # keep finished sessions ~8h for review
+_TTL          = 60 * 60 * 8   # keep running sessions ~8h
+_TTL_DONE     = 60 * 30        # keep finished sessions only 30 min
 
 # Fields that are immutable after session creation and stored separately.
 _CANDLE_FIELDS = frozenset(["all_candles", "prev_day_candles"])
@@ -58,9 +59,11 @@ async def save_session(s: dict) -> None:
 
         # Slim control blob (no candle arrays).
         slim = {k: v for k, v in s.items() if k not in _CANDLE_FIELDS}
-        await r.set(_k(sid), json.dumps(slim), ex=_TTL)
+        _is_running = s.get("status") == "running"
+        _ttl = _TTL if _is_running else _TTL_DONE
+        await r.set(_k(sid), json.dumps(slim), ex=_ttl)
         await r.sadd(_INDEX, sid)
-        if s.get("status") == "running":
+        if _is_running:
             await r.sadd(_RUNNING_IDX, sid)
             await r.expire(_RUNNING_IDX, _TTL)
         else:
@@ -141,6 +144,36 @@ async def list_sessions() -> list[dict]:
             pass
     out.sort(key=lambda s: s.get("created_at", ""), reverse=True)
     return out
+
+
+async def list_sessions_slim(limit: int = 50) -> list[dict]:
+    """Return up to `limit` sessions using SLIM control blobs only (no candle arrays).
+    Sorted newest-first.  Uses a Redis pipeline so all GETs are a single round trip.
+    Use this for the sessions list API — loading candle arrays for 1000 sessions causes OOM."""
+    from app.utils.redis_client import get_redis
+    ids = await list_ids()
+    if not ids:
+        return []
+    r = get_redis()
+    # Fetch all control blobs in one pipeline round trip.
+    pipe = r.pipeline()
+    for sid in ids:
+        pipe.get(_k(sid))
+    raws = await pipe.execute()
+    out: list[dict] = []
+    stale: list[str] = []
+    for sid, raw in zip(ids, raws):
+        if raw is None:
+            stale.append(sid)
+        else:
+            out.append(json.loads(raw))
+    if stale:
+        try:
+            await r.srem(_INDEX, *stale)
+        except Exception:
+            pass
+    out.sort(key=lambda s: s.get("created_at", ""), reverse=True)
+    return out[:limit]
 
 
 async def list_running_sessions() -> list[dict]:

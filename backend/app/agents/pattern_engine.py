@@ -17,16 +17,23 @@ from .fingerprint import build_fingerprint, classify_regime
 logger = get_logger(__name__)
 
 _MIN_MEM_SAMPLES = int(os.getenv("PATTERN_MIN_MEM_SAMPLES", "8"))
-# Composite-score grade bands (score = blend of model P(up) + memory win-rate).
-# Calibrated to the observed score distribution over real buy-trigger windows
-# (median ~0.36, p70 ~0.41, p90 ~0.47): A ≈ top decile of setups, B ≈ top 30%,
-# C ≈ top half. Env-overridable so the cutoffs can be tuned without a code change.
+
+# Composite-score grade bands.
+# Spread wider than the old 0.36/0.41/0.47 so borderline signals don't oscillate
+# between grades on tiny noise.  The dynamic weighting below (GBM 1.5×, memory
+# floor-scaled) shifts the effective distribution upward vs. equal weights, so
+# the bands are raised accordingly.
 _BANDS = {
-    "A": float(os.getenv("PATTERN_GRADE_A", "0.47")),
-    "B": float(os.getenv("PATTERN_GRADE_B", "0.41")),
-    "C": float(os.getenv("PATTERN_GRADE_C", "0.36")),
+    "A": float(os.getenv("PATTERN_GRADE_A", "0.52")),   # clear bullish consensus
+    "B": float(os.getenv("PATTERN_GRADE_B", "0.44")),   # moderate bullish lean
+    "C": float(os.getenv("PATTERN_GRADE_C", "0.37")),   # weak lean — traded only on loose gate
 }
 _GRADE_RANK = {"A": 0, "B": 1, "C": 2, "D": 3}
+
+# Memory weight multipliers by similarity floor.
+# High-floor retrieval (0.65+) is genuinely similar — trust it strongly.
+# Low-floor (0.45) means we relaxed the bar to find cases; down-weight accordingly.
+_MEM_FLOOR_WEIGHT = {0.65: 1.8, 0.55: 1.0, 0.45: 0.4}
 
 
 def _grade(score: float) -> str:
@@ -69,18 +76,29 @@ class PatternEngine:
 
         mw = None
         ms = 0
+        mem_floor: float | None = None
+        symbol_local = False
         try:
             mem = await get_memory().query(fp, symbol=symbol, regime=classify_regime(candles),
                                            exclude_sources=exclude_memory_sources)
             buy = (mem.get("per_action") or {}).get("BUY") or {}
             mw = buy.get("win_rate")
             ms = int(buy.get("n", 0))
+            mem_floor = mem.get("actual_floor")
+            symbol_local = bool(mem.get("symbol_local", False))
         except Exception as exc:
             logger.debug("pattern memory query failed: %s", exc)
 
-        # Blend the available learned signals: linear pattern model P(up), the
-        # Gradient-Boosted (non-linear) P(up) when trained & enabled, and the memory
-        # bank's win-rate when it has enough evidence.
+        # ── Signal blending with reliability-based weights ─────────────────────
+        # Linear model is the base (weight 1.0).
+        # GBM is non-linear and typically more accurate — give it 1.5× weight when
+        # trained so it has more say than the linear baseline.
+        # Memory win-rate weight scales with retrieval quality:
+        #   - High-similarity floor (0.65): genuinely similar cases → weight 1.8
+        #   - Mid floor (0.55): decent similarity → weight 1.0
+        #   - Low floor (0.45): relaxed bar, noisy neighbours → weight 0.4
+        # Within each floor tier, further scale by sample mass (8→30+ samples)
+        # and give a 20% bonus for symbol-local cases (more directly comparable).
         parts: list[tuple[float, float]] = [(p_up, 1.0)]   # (value, weight)
         gbm_p = None
         try:
@@ -94,17 +112,25 @@ class PatternEngine:
                     gp = gm.predict_fp(fp)
                     if gp:
                         gbm_p = float(gp["p_up"])
-                        parts.append((gbm_p, 1.0))
+                        parts.append((gbm_p, 1.5))   # GBM outperforms linear model
         except Exception as exc:
             logger.debug("gbm blend skipped: %s", exc)
+
         if ms >= _MIN_MEM_SAMPLES and mw is not None:
-            parts.append((float(mw), 1.0))
+            floor_w = _MEM_FLOOR_WEIGHT.get(mem_floor, 0.4) if mem_floor else 0.4
+            sample_scale = min(2.0, ms / 15)        # 0.53 at 8 samples → 2.0 at 30+
+            mem_w = floor_w * sample_scale
+            if symbol_local:
+                mem_w *= 1.2                         # symbol-local cases are more comparable
+            parts.append((float(mw), mem_w))
+
         wsum = sum(w for _, w in parts) or 1.0
         score = sum(v * w for v, w in parts) / wsum
         out = {"grade": _grade(score), "p_up": round(p_up, 3),
                "gbm_p_up": (round(gbm_p, 3) if gbm_p is not None else None),
                "memory_winrate": (round(float(mw), 3) if mw is not None else None),
-               "memory_samples": ms, "score": round(score, 3), "ok": True}
+               "memory_samples": ms, "memory_floor": mem_floor,
+               "score": round(score, 3), "ok": True}
         if with_forecast:
             try:
                 from app.agents import get_path_forecaster

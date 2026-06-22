@@ -971,8 +971,9 @@ class ApiService {
     return response.data;
   }
 
-  async sessionList(): Promise<ApiResponse<any>> {
-    const response = await this.api.get('/api/sessions');
+  async sessionList(statusFilter?: string): Promise<ApiResponse<any>> {
+    const params = statusFilter ? { status: statusFilter } : {};
+    const response = await this.api.get('/api/sessions', { params });
     return response.data;
   }
 

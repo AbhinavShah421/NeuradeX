@@ -32,7 +32,7 @@ export const useScanStore = create<ScanState>((set, get) => ({
     try {
       const [scanRes, sessRes] = await Promise.allSettled([
         apiService.getScanStatus(),
-        apiService.sessionList(),
+        apiService.sessionList('running'),
       ]);
       if (scanRes.status === 'fulfilled') {
         const d: any = scanRes.value.data || {};
@@ -47,7 +47,7 @@ export const useScanStore = create<ScanState>((set, get) => ({
       }
       if (sessRes.status === 'fulfilled') {
         const sessions: any[] = (sessRes.value as any).data ?? [];
-        set({ runningSessions: sessions.filter((s: any) => s.status === 'running').length });
+        set({ runningSessions: sessions.length });
       }
     } catch { /* keep last known */ }
   },

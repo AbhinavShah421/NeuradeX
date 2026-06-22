@@ -78,7 +78,7 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
   const [autoDate, setAutoDate] = useState(true);   // Auto = last trading day
   const [startTime, setStartTime] = useState('09:15');
   const [capital, setCapital] = useState('50000');
-  const [speed, setSpeed] = useState(5);
+  const [speed, setSpeed] = useState(1);
   const [timingMode, setTimingMode] = useState<'normal' | 'aggressive'>('normal');
 
   const effectiveMode = fixedMode ?? mode;
