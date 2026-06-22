@@ -221,6 +221,7 @@ services:
       ANGEL_TOTP_SECRET: ${ANGEL_TOTP_SECRET:-}
       NEWS_MIN_CONFIDENCE: "0.55"
       NEWS_MIN_SCORE: "0.3"
+      BACKEND_ROLE: "api"       # HTTP-only: no session runner / ML sweeps here
     ports:
       - "8000:8000"
     volumes:
@@ -244,7 +245,53 @@ services:
     deploy:
       resources:
         limits:
-          memory: 3G
+          memory: 1G        # was 3G — session runner moved to session-runner container
+          cpus: '1.5'
+
+  # ── Session Runner (CPU-isolated background worker) ───────────────────────────
+  # Advances all live/backtest trading sessions server-side. Separated from the
+  # HTTP backend so heavy ensemble compute (99% CPU spikes) never starves API
+  # responses. Uses the same Docker image; BACKEND_ROLE=runner activates only the
+  # session runner background task (no HTTP routes served under load).
+
+  session-runner:
+    build:
+      context: ./backend
+      dockerfile: ../docker/Dockerfile.backend
+    container_name: stock-prediction-session-runner
+    env_file:
+      - ./backend/.env
+    environment:
+      POSTGRES_HOST: postgres
+      MONGODB_HOST: mongodb
+      REDIS_HOST: redis
+      RABBITMQ_HOST: rabbitmq
+      INFLUXDB_HOST: influxdb
+      LLM_API_URL: http://host.docker.internal:11434
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      LLM_PROVIDER: ollama
+      ANTHROPIC_API_KEY: ""
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-haiku-4-5-20251001}
+      LLM_MODEL: ${OLLAMA_MODEL:-llama3.2}
+      NEWS_MIN_CONFIDENCE: "0.55"
+      NEWS_MIN_SCORE: "0.3"
+      BACKEND_ROLE: "runner"    # session runner + ML sweeps only, no HTTP load
+    volumes:
+      - ./backend/app:/app/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      - stock-prediction-network
+    command: python -m uvicorn app.main:app_sio --host 0.0.0.0 --port 8001 --workers 1
+    deploy:
+      resources:
+        limits:
+          memory: 2G
           cpus: '2.0'
 
   # ── Phase 1: Market Data Service ──────────────────────────────────────────────
@@ -562,7 +609,7 @@ services:
       AUTOPILOT_TICK_SECS: "60"
       AUTOPILOT_MAX_HOLD_MINUTES: "0"
       AUTOPILOT_BACKTEST_SPEED: "10"
-      AUTOPILOT_BACKTEST_MAX: "27"
+      AUTOPILOT_BACKTEST_MAX: "7"
       AUTOPILOT_BACKTEST_POLL: "15"
       AUTOPILOT_BACKTEST_MAX_DAYS_BACK: "90"
       AUTOPILOT_BACKTEST_MORNING_CUTOFF: "540"

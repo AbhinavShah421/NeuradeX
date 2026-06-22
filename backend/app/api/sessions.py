@@ -23,7 +23,8 @@ from app.api.auth import get_current_user
 from app.config import settings
 from app.utils.elk_logger import get_logger
 from app.utils.session_store import (
-    save_session, get_session, delete_session, list_sessions, list_running_sessions,
+    save_session, get_session, get_session_slim, delete_session,
+    list_sessions, list_running_sessions,
 )
 
 # Replay machinery
@@ -37,7 +38,7 @@ from app.api.backtest import (
 logger = get_logger(__name__)
 router = APIRouter()
 
-_TICK_SECONDS = 5          # background loop cadence
+_TICK_SECONDS = 10         # background loop cadence (was 5 — doubled to halve runner CPU)
 SPEEDS        = (1, 2, 5, 10)
 
 # ── Trade gate ────────────────────────────────────────────────────────────────
@@ -551,7 +552,7 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         log[-1] = decision
     else:
         log.append(decision)
-    s["decision_log"] = log[-120:]   # keep the last ~2 hours of minute decisions
+    s["decision_log"] = log[-30:]    # keep last 30 candles (~30 min) — was 120, saves ~60 KB/session
 
 
 # ── Advancement (called by the background loop) ───────────────────────────────
@@ -572,7 +573,7 @@ async def _advance_replay(s: dict) -> None:
         window = allc[: j + 1]
         await _step(s, window, force_close=(j == n - 1))
         s["current_idx"] = j
-        await asyncio.sleep(0)  # yield between replay steps so HTTP requests aren't starved
+        await asyncio.sleep(0.05)  # 50ms yield between replay steps — lets HTTP requests through
     if s["current_idx"] >= n - 1:
         s["status"] = "done"
 
@@ -736,32 +737,74 @@ async def _auto_stop_stale(s: dict) -> bool:
     return False
 
 
+_RUNNER_LOCK_KEY = "live_sessions:runner_lock"
+_RUNNER_LOCK_TTL = 30   # seconds — if the primary process crashes, secondary takes over
+
+
+async def _acquire_runner_lock() -> bool:
+    """Try to become the sole runner process using a Redis SET NX lock.
+    Returns True if this process is now the primary runner."""
+    try:
+        from app.utils.redis_client import get_redis
+        r = get_redis()
+        import os
+        token = f"{os.getpid()}"
+        acquired = await r.set(_RUNNER_LOCK_KEY, token, nx=True, ex=_RUNNER_LOCK_TTL)
+        if acquired:
+            return True
+        # Refresh if we already hold the lock (our PID is stored).
+        current = await r.get(_RUNNER_LOCK_KEY)
+        if current == token:
+            await r.expire(_RUNNER_LOCK_KEY, _RUNNER_LOCK_TTL)
+            return True
+        return False
+    except Exception:
+        return True   # If Redis unavailable, proceed (single-instance assumption).
+
+
 async def session_runner_loop() -> None:
-    await asyncio.sleep(8)
+    import os, random
+    # Stagger startup slightly so two workers don't race for the lock simultaneously.
+    await asyncio.sleep(8 + random.uniform(0, 4))
     logger.info("Live session runner started",
                 extra={"log_type": "app_lifecycle", "event": "session_runner_started"})
     _idle_ticks = 0
     while True:
         try:
-            # Fast path: only load sessions that are actively running.
-            # list_running_sessions() uses a small Redis set instead of deserialising
-            # all session blobs (which include heavy all_candles arrays for replay).
+            # Acquire distributed lock so only one process/worker runs the loop.
+            # In a multi-worker or session-runner-container setup the "losing"
+            # worker backs off quietly — no duplicate advancement.
+            if not await _acquire_runner_lock():
+                await asyncio.sleep(_TICK_SECONDS)
+                continue
+
+            # list_running_sessions() now returns slim control blobs (no candle
+            # arrays) — each ~5 KB instead of ~150 KB — saving several MB of
+            # Redis I/O per tick under heavy backtest load.
             running = await list_running_sessions()
 
             if not running:
                 _idle_ticks += 1
-                # Back off gradually when nothing is running to avoid hammering Redis.
                 sleep_secs = min(30, _TICK_SECONDS * (1 + _idle_ticks // 3))
                 await asyncio.sleep(sleep_secs)
                 continue
 
             _idle_ticks = 0
-            for s in running:
-                # Kill sessions that have been running longer than the max age.
-                if await _auto_stop_stale(s):
+            for s_slim in running:
+                # Stale-check only needs created_at — slim blob has it.
+                if await _auto_stop_stale(s_slim):
                     continue
+                # Replay/backtest sessions need all_candles to advance; load the
+                # full blob (slim + candles) only for the session being processed.
+                # Paper sessions don't use all_candles so the slim blob suffices.
+                if s_slim.get("mode") in ("replay", "backtest"):
+                    s = await get_session(s_slim["id"])
+                    if not s:
+                        continue
+                else:
+                    s = s_slim
                 await _advance(s)
-                await asyncio.sleep(0)  # yield between sessions so HTTP requests can be served
+                await asyncio.sleep(0)  # yield between sessions
 
         except asyncio.CancelledError:
             break
@@ -866,6 +909,23 @@ async def start_session(req: StartSessionRequest):
                 extra={"log_type": "session_event", "event": "session_start",
                        "session_id": sid, "mode": mode, "symbol": symbol, "date": base.get("date")})
     return {"status": "success", "data": _detail(base)}
+
+
+@router.get("/statuses")
+async def session_statuses():
+    """Lightweight endpoint: returns {id → status} for all sessions.
+
+    Used by the autopilot to monitor queue completion without loading full
+    session summaries (~150 KB → ~500 bytes per response).
+    """
+    from app.utils.session_store import list_ids, get_session_slim
+    ids = await list_ids()
+    out: dict[str, str] = {}
+    for sid in ids:
+        s = await get_session_slim(sid)
+        if s:
+            out[sid] = s.get("status", "unknown")
+    return {"status": "success", "data": out}
 
 
 @router.get("")

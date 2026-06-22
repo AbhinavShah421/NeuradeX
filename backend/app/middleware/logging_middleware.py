@@ -98,23 +98,26 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             response: Response = await call_next(request)
             status_code = response.status_code
 
-            # ── Capture response body ─────────────────────────────────────────
-            # StreamingResponse: consume and re-wrap the body chunks
-            raw_chunks = []
-            async for chunk in response.body_iterator:  # type: ignore[attr-defined]
-                raw_chunks.append(chunk if isinstance(chunk, bytes) else chunk.encode())
-            raw_resp = b"".join(raw_chunks)
+            # ── Capture response body ONLY for errors ─────────────────────────
+            # For 2xx/3xx success responses we stream directly without consuming
+            # the body_iterator — this prevents doubling large response payloads
+            # (e.g. /api/sessions returns ~150 KB, which was previously buffered
+            # twice in memory on every poll cycle, contributing to OOM kills).
+            if status_code >= 400:
+                from starlette.responses import Response as PlainResponse
+                raw_chunks = []
+                async for chunk in response.body_iterator:  # type: ignore[attr-defined]
+                    raw_chunks.append(chunk if isinstance(chunk, bytes) else chunk.encode())
+                raw_resp = b"".join(raw_chunks)
+                resp_body = _try_parse(raw_resp[:_BODY_LIMIT])
+                response = PlainResponse(
+                    content=raw_resp,
+                    status_code=status_code,
+                    headers=dict(response.headers),
+                    media_type=response.media_type,
+                )
+            # For success responses: stream through; body not logged (too large).
 
-            resp_body = _try_parse(raw_resp[:_BODY_LIMIT])
-
-            # Re-wrap so the client still receives the full body
-            from starlette.responses import Response as PlainResponse
-            response = PlainResponse(
-                content=raw_resp,
-                status_code=status_code,
-                headers=dict(response.headers),
-                media_type=response.media_type,
-            )
             return response
 
         except Exception as exc:

@@ -253,6 +253,21 @@ async def _list_sessions() -> list[dict]:
     return []
 
 
+async def _session_statuses() -> dict[str, str]:
+    """Lightweight alternative to _list_sessions() — returns {id: status} only.
+    ~500 bytes vs ~150 KB for the full list; used for queue polling and paper-
+    running checks so we never serialize full session summaries just to read status.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            r = await c.get(f"{BACKEND_URL}/api/sessions/statuses")
+            if r.status_code == 200:
+                return r.json().get("data", {}) or {}
+    except Exception as exc:
+        logger.debug("session_statuses error: %s", exc)
+    return {}
+
+
 async def _stop_session(sid: str) -> None:
     try:
         async with httpx.AsyncClient(timeout=10.0) as c:
@@ -262,6 +277,25 @@ async def _stop_session(sid: str) -> None:
 
 
 async def _paper_running() -> bool:
+    """Return True if any paper session is currently running."""
+    statuses = await _session_statuses()
+    # Statuses endpoint gives {id: status}; we need mode too for paper check.
+    # Fall back to full list only if statuses endpoint is unavailable.
+    if statuses:
+        # We can't tell mode from statuses alone — use running index from Redis directly.
+        try:
+            r = await _get_redis()
+            ids = await r.smembers("live_sessions:running")
+            for sid in ids:
+                raw = await r.get(f"live_session:{sid}")
+                if raw:
+                    import json as _json
+                    s = _json.loads(raw)
+                    if s.get("mode") == "paper" and s.get("status") == "running":
+                        return True
+            return False
+        except Exception:
+            pass
     sessions = await _list_sessions()
     return any(s.get("status") == "running" and s.get("mode") == "paper" for s in sessions)
 
@@ -349,13 +383,23 @@ async def _do_paper_tick() -> None:
     syms = await _committed_symbols()
     if not syms:
         return                              # abstain — no high-conviction setup
-    sessions = await _list_sessions()
-    running = {s["symbol"] for s in sessions if s.get("status") == "running" and s.get("mode") == "paper"}
-    today = _today()
+    # Use Redis directly for paper session checks — avoids deserialising all
+    # session summaries just to count running paper sessions.
     r = await _get_redis()
+    running_ids = await r.smembers("live_sessions:running")
+    running = set()
+    paper_running_count = 0
+    for sid in running_ids:
+        raw_s = await r.get(f"live_session:{sid}")
+        if raw_s:
+            sd = json.loads(raw_s)
+            if sd.get("mode") == "paper" and sd.get("status") == "running":
+                running.add(sd.get("symbol", ""))
+                paper_running_count += 1
+    today = _today()
     raw = await r.get(_paper_started_key(today))
     started = set(json.loads(raw)) if raw else set()
-    slots = PAPER_MAX - len([1 for s in sessions if s.get("status") == "running" and s.get("mode") == "paper"])
+    slots = PAPER_MAX - paper_running_count
     timing = await _paper_timing()
 
     for sym in syms:
@@ -490,9 +534,8 @@ async def _do_backtest_step() -> None:
         logger.info("backtest autopilot started queue for %s (%d sessions)", cursor, len(ids))
         return
 
-    # Active queue → poll for completion.
-    sessions = await _list_sessions()
-    status_by_id = {s["id"]: s.get("status") for s in sessions}
+    # Active queue → poll for completion using the lightweight statuses endpoint.
+    status_by_id = await _session_statuses()
     pending = [sid for sid in queue if status_by_id.get(sid, "done") == "running"]
     st["queue_pending"] = len(pending)
     if pending:

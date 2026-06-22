@@ -4,6 +4,7 @@ NeuradeX System
 """
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,7 +28,13 @@ logger = get_logger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Starting NeuradeX System", extra={"log_type": "app_lifecycle", "event": "startup"})
+    # BACKEND_ROLE controls which background tasks start in this process:
+    #   "api"    → HTTP-only; no session runner / ML sweeps (low CPU / memory)
+    #   "runner" → session runner + ML sweeps only; no HTTP routes exposed
+    #   "full"   → everything (default, single-container mode)
+    _role = os.getenv("BACKEND_ROLE", "full").lower()
+    logger.info("Starting NeuradeX System (role=%s)", _role,
+                extra={"log_type": "app_lifecycle", "event": "startup", "role": _role})
 
     try:
         await init_postgres()
@@ -58,41 +65,48 @@ async def lifespan(app: FastAPI):
         logger.info("Loading ML models", extra={"log_type": "app_lifecycle", "event": "ml_init"})
         await initialize_ml_models()
 
-        # Nightly pattern-memory refresh (replays real backtests after market close)
-        try:
-            from app.agents.memory_sweep import scheduled_sweep_loop
-            app.state.memory_sweep_task = asyncio.create_task(scheduled_sweep_loop())
-            logger.info("Pattern-memory nightly sweep scheduled",
-                        extra={"log_type": "app_lifecycle", "event": "memory_sweep_scheduled"})
-        except Exception as exc:
-            logger.warning("Could not schedule memory sweep: %s", exc)
+        # ── Background tasks: only start in the appropriate role ─────────────
+        # "api" role skips CPU/memory-heavy background work so the HTTP server
+        # stays responsive. "runner" role skips routes but runs the compute tasks.
+        # "full" (default) starts everything — single-container mode.
 
-        # Gradient-Boosted P(up) model nightly auto-retrain (rotates the universe)
-        try:
-            from app.agents.pattern_model import gbm_autotrain_loop
-            app.state.gbm_autotrain_task = asyncio.create_task(gbm_autotrain_loop())
-            logger.info("GBM nightly auto-retrain scheduled",
-                        extra={"log_type": "app_lifecycle", "event": "gbm_autotrain_scheduled"})
-        except Exception as exc:
-            logger.warning("Could not schedule GBM auto-retrain: %s", exc)
+        if _role in ("full", "runner"):
+            # Nightly pattern-memory refresh (replays real backtests after market close)
+            try:
+                from app.agents.memory_sweep import scheduled_sweep_loop
+                app.state.memory_sweep_task = asyncio.create_task(scheduled_sweep_loop())
+                logger.info("Pattern-memory nightly sweep scheduled",
+                            extra={"log_type": "app_lifecycle", "event": "memory_sweep_scheduled"})
+            except Exception as exc:
+                logger.warning("Could not schedule memory sweep: %s", exc)
 
-        # Delivery (multi-day) paper-trading autopilot — ticks once a day when enabled
-        try:
-            from app.api.delivery_paper import delivery_autopilot_loop
-            app.state.delivery_paper_task = asyncio.create_task(delivery_autopilot_loop())
-            logger.info("Delivery paper autopilot scheduled",
-                        extra={"log_type": "app_lifecycle", "event": "delivery_paper_scheduled"})
-        except Exception as exc:
-            logger.warning("Could not schedule delivery paper autopilot: %s", exc)
+            # Gradient-Boosted P(up) model nightly auto-retrain
+            try:
+                from app.agents.pattern_model import gbm_autotrain_loop
+                app.state.gbm_autotrain_task = asyncio.create_task(gbm_autotrain_loop())
+                logger.info("GBM nightly auto-retrain scheduled",
+                            extra={"log_type": "app_lifecycle", "event": "gbm_autotrain_scheduled"})
+            except Exception as exc:
+                logger.warning("Could not schedule GBM auto-retrain: %s", exc)
 
-        # Background runner that advances live trading sessions server-side
-        try:
-            from app.api.sessions import session_runner_loop
-            app.state.session_runner_task = asyncio.create_task(session_runner_loop())
-            logger.info("Live session runner scheduled",
-                        extra={"log_type": "app_lifecycle", "event": "session_runner_scheduled"})
-        except Exception as exc:
-            logger.warning("Could not start session runner: %s", exc)
+            # Background runner that advances live trading sessions server-side
+            try:
+                from app.api.sessions import session_runner_loop
+                app.state.session_runner_task = asyncio.create_task(session_runner_loop())
+                logger.info("Live session runner scheduled",
+                            extra={"log_type": "app_lifecycle", "event": "session_runner_scheduled"})
+            except Exception as exc:
+                logger.warning("Could not start session runner: %s", exc)
+
+        if _role in ("full", "api"):
+            # Delivery (multi-day) paper-trading autopilot — ticks once a day
+            try:
+                from app.api.delivery_paper import delivery_autopilot_loop
+                app.state.delivery_paper_task = asyncio.create_task(delivery_autopilot_loop())
+                logger.info("Delivery paper autopilot scheduled",
+                            extra={"log_type": "app_lifecycle", "event": "delivery_paper_scheduled"})
+            except Exception as exc:
+                logger.warning("Could not schedule delivery paper autopilot: %s", exc)
 
         # Auto-squareoff loop — closes all MIS positions at 3:10 PM IST every trading day
         try:
