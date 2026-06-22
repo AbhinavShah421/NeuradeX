@@ -11,6 +11,7 @@ enters when the ensemble actually agrees BUY) — i.e. overtrade and bleed. So
 without a real catalyst the agent stays silent rather than guessing from price.
 """
 from __future__ import annotations
+import asyncio
 import json
 import os
 from .base import AgentSignal, BaseAgent
@@ -44,6 +45,13 @@ class SentimentAgent(BaseAgent):
             from app.utils.redis_client import cache_get
             raw = await cache_get(f"ai_engine:sentiment:{symbol.upper()}")
             if not raw:
+                # No data yet — kick off the pipeline in the background so the
+                # NEXT ensemble call has a real signal to vote on.
+                try:
+                    from app.agents.sentiment_pipeline import run_pipeline
+                    asyncio.create_task(run_pipeline(symbol))
+                except Exception:
+                    pass
                 return abstain
             d = json.loads(raw)
         except Exception as exc:

@@ -276,12 +276,16 @@ class BacktestRequest(BaseModel):
 
 
 async def _fetch_candles(symbol: str, start: datetime, end: datetime) -> tuple[list[dict], str]:
-    # Try every configured data provider (Groww → Yahoo → Alpha Vantage), then simulate
+    # Try every configured data provider (Groww → Yahoo → Alpha Vantage)
     from app.data.providers import fetch_daily
     candles, source = await fetch_daily(symbol, start, end)
     if candles and len(candles) > 10:
         return candles, source
-    return simulate_daily_candles(symbol, start, end, initial_factor=random.uniform(0.60, 0.80)), "simulated"
+    raise HTTPException(
+        422,
+        f"No real historical data available for {symbol} between "
+        f"{start.date()} and {end.date()}. Try a different date range or symbol."
+    )
 
 
 # ── Signal generators ──────────────────────────────────────────────────────────
@@ -771,12 +775,19 @@ def _intraday_indicators(candles: list[dict], idx: int) -> dict:
     sma5  = sum(closes[-5:])  / min(5,  n)
     sma20 = sum(closes[-20:]) / min(20, n)
 
-    # RSI
-    if n >= 15:
-        gains  = [max(0, closes[i] - closes[i-1]) for i in range(n-14, n)]
-        losses = [max(0, closes[i-1] - closes[i]) for i in range(n-14, n)]
-        ag, al = sum(gains)/14, sum(losses)/14
-        rsi = 100 - 100 / (1 + ag / max(al, 1e-9))
+    # RSI — Wilder's EMA (same formula as TechnicalAgent / MeanRevAgent so the
+    # timing signal and ensemble agents agree on whether price is oversold/overbought)
+    period = 14
+    if n >= period + 1:
+        deltas = [closes[i] - closes[i - 1] for i in range(1, n)]
+        g_vals = [d if d > 0 else 0.0 for d in deltas]
+        l_vals = [-d if d < 0 else 0.0 for d in deltas]
+        ag = sum(g_vals[:period]) / period
+        al = sum(l_vals[:period]) / period
+        for i in range(period, len(deltas)):
+            ag = (ag * (period - 1) + g_vals[i]) / period
+            al = (al * (period - 1) + l_vals[i]) / period
+        rsi = 100.0 if al == 0 else 100.0 - 100.0 / (1.0 + ag / al)
     else:
         rsi = 50.0
 
@@ -961,9 +972,12 @@ async def day_autopilot(req: DayAutopilotRequest):
     """AI-powered intraday day trading simulation for a single date."""
     symbol = req.symbol.upper()
     try:
-        datetime.strptime(req.date, "%Y-%m-%d")
+        req_date = datetime.strptime(req.date, "%Y-%m-%d").date()
     except ValueError:
         raise HTTPException(400, "date must be YYYY-MM-DD")
+    today_ist = datetime.now(IST).date()
+    if req_date >= today_ist:
+        raise HTTPException(400, "date must be a past trading day — historical data is not available for today or future dates")
 
     # Fetch real intraday data or simulate
     candles = None
@@ -1419,6 +1433,7 @@ class ProgressiveStepRequest(BaseModel):
     trades:       list[dict] = []
     model:        Optional[str] = None
     real_only:    bool = False
+    session_id:   Optional[str] = None  # if provided, server fetches authoritative state from Redis
 
 
 @router.post("/progressive/start")
@@ -1511,6 +1526,20 @@ async def progressive_start(req: ProgressiveStartRequest):
         },
     )
 
+    prog_session_id = uuid.uuid4().hex[:16]
+    _prog_state = {
+        "capital": req.capital, "cash": round(cash, 2),
+        "position": position, "quantity": quantity,
+        "entry_price": entry_price, "entry_time": entry_time,
+        "trades": trades, "model": model,
+        "symbol": symbol, "date": req.date,
+    }
+    try:
+        from app.utils.redis_client import cache_set
+        await cache_set(f"prog_session:{prog_session_id}", json.dumps(_prog_state), ex=7200)
+    except Exception:
+        pass
+
     return {
         "status": "success",
         "data": {
@@ -1539,6 +1568,7 @@ async def progressive_start(req: ProgressiveStartRequest):
             "model_used":       model,
             "prev_day_candles": prev_day_candles,
             "prev_day_date":    prev_date_str,
+            "session_id":       prog_session_id,
         },
     }
 
@@ -1570,12 +1600,39 @@ async def progressive_step(req: ProgressiveStepRequest):
         raise HTTPException(422, _no_real_intraday_msg(symbol, req.date))
 
     model       = req.model or getattr(settings, "LLM_MODEL", "llama3.2")
-    cash        = req.cash
-    position    = req.position
-    quantity    = req.quantity
-    entry_price = req.entry_price
-    entry_time  = req.entry_time
-    trades      = list(req.trades)
+
+    # Prefer server-side authoritative state over client-supplied values
+    if req.session_id:
+        try:
+            from app.utils.redis_client import cache_get
+            raw = await cache_get(f"prog_session:{req.session_id}")
+            if not raw:
+                raise HTTPException(400, "Progressive session not found or expired — please restart")
+            srv = json.loads(raw)
+            cash        = srv["cash"]
+            position    = srv["position"]
+            quantity    = srv["quantity"]
+            entry_price = srv["entry_price"]
+            entry_time  = srv.get("entry_time")
+            trades      = list(srv.get("trades", []))
+            model       = srv.get("model") or model
+        except HTTPException:
+            raise
+        except Exception:
+            # Redis unavailable — fall back to client state
+            cash        = req.cash
+            position    = req.position
+            quantity    = req.quantity
+            entry_price = req.entry_price
+            entry_time  = req.entry_time
+            trades      = list(req.trades)
+    else:
+        cash        = req.cash
+        position    = req.position
+        quantity    = req.quantity
+        entry_price = req.entry_price
+        entry_time  = req.entry_time
+        trades      = list(req.trades)
 
     idx    = len(candles) - 1
     candle = candles[idx]
@@ -1688,6 +1745,21 @@ async def progressive_step(req: ProgressiveStepRequest):
         },
     )
 
+    # Persist updated server-side state
+    if req.session_id:
+        try:
+            from app.utils.redis_client import cache_set
+            _updated_state = {
+                "capital": req.capital, "cash": round(cash, 2),
+                "position": position, "quantity": quantity,
+                "entry_price": entry_price, "entry_time": entry_time,
+                "trades": trades, "model": model,
+                "symbol": symbol, "date": req.date,
+            }
+            await cache_set(f"prog_session:{req.session_id}", json.dumps(_updated_state), ex=7200)
+        except Exception:
+            pass
+
     return {
         "status": "success",
         "data": {
@@ -1714,5 +1786,6 @@ async def progressive_step(req: ProgressiveStepRequest):
             "next_time":       next_next_time,
             "data_source":     data_source,
             "model_used":      model,
+            "session_id":      req.session_id,
         },
     }

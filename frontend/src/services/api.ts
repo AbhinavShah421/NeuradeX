@@ -1030,12 +1030,12 @@ class ApiService {
 
   // Microservice health — backend proxies checks on the Docker network
   async getServicesHealth(): Promise<ApiResponse<any>> {
-    const response = await this.api.get('/api/agent/services/health');
+    const response = await this.api.get('/api/agent/services/health', { timeout: 6000 });
     return response.data;
   }
 
   async getLlmStatus(): Promise<ApiResponse<any>> {
-    const response = await this.api.get('/api/ai-engine/llm-status');
+    const response = await this.api.get('/api/ai-engine/llm-status', { timeout: 6000 });
     return response.data;
   }
 
@@ -1059,8 +1059,10 @@ class ApiService {
     return response.data;
   }
 
-  async getFeedbackTrades(): Promise<any> {
-    const response = await this.api.get('/api/orders/feedback/trades');
+  async getFeedbackTrades(source?: string, limit = 500): Promise<any> {
+    const params: Record<string, any> = { limit };
+    if (source && source !== 'ALL') params.source = source;
+    const response = await this.api.get('/api/orders/feedback/trades', { params });
     return response.data;
   }
 
@@ -1069,8 +1071,84 @@ class ApiService {
     return response.data;
   }
 
+  async getLearningCurve(source = 'PAPER,LIVE,REPLAY', window = 50): Promise<any> {
+    const response = await this.api.get(`/api/ai-engine/learning-curve?source=${source}&window=${window}`);
+    return response.data;
+  }
+
   async getAgentAccuracy(minTrades = 20): Promise<any> {
     const response = await this.api.get(`/api/orders/feedback/agent-accuracy?min_trades=${minTrades}`);
+    return response.data;
+  }
+
+  // ── Live Intraday Trading (real Groww MIS orders) ─────────────────────────
+
+  async liveStatus(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/live-trading/status');
+    return response.data;
+  }
+
+  async liveEnable(payload: { allocated_capital: number; auto_execute: boolean }): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/live-trading/enable', payload);
+    return response.data;
+  }
+
+  async liveDisable(): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/live-trading/disable');
+    return response.data;
+  }
+
+  async liveUpdateSettings(payload: {
+    conviction_min?: number;
+    agreement_min?: number;
+    max_capital_pct?: number;
+    max_positions?: number;
+    allocated_capital?: number;
+    auto_execute?: boolean;
+  }): Promise<ApiResponse<any>> {
+    const response = await this.api.patch('/api/live-trading/settings', payload);
+    return response.data;
+  }
+
+  async liveEvaluate(payload: {
+    symbol: string;
+    action: string;
+    confidence: number;
+    agent_agreement: number;
+    current_price: number;
+    reasoning?: string;
+    prediction_id?: string;
+    agent_votes?: Record<string, string>;
+  }): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/live-trading/evaluate', payload);
+    return response.data;
+  }
+
+  async livePlaceOrder(payload: {
+    symbol: string;
+    action: string;
+    quantity: number;
+    current_price: number;
+    confidence?: number;
+    prediction_id?: string;
+    reason?: string;
+  }): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/live-trading/place-order', payload);
+    return response.data;
+  }
+
+  async liveSquareoff(payload: { symbol?: string } = {}): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/live-trading/squareoff', payload);
+    return response.data;
+  }
+
+  async livePositions(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/live-trading/positions');
+    return response.data;
+  }
+
+  async liveHistory(date?: string): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/live-trading/history', { params: date ? { date } : {} });
     return response.data;
   }
 }

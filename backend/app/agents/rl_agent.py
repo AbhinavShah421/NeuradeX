@@ -78,8 +78,10 @@ class RLAgent(BaseAgent):
                 e26 = c * k26 + e26 * (1 - k26)
             macd_s = 1 if e12 >= e26 else 0
 
-        # VWAP position
-        vwap  = sum((c["high"] + c["low"] + c["close"]) / 3 for c in candles) / len(candles)
+        # VWAP position — volume-weighted to match TechnicalAgent's VWAP
+        tv = sum((c["high"] + c["low"] + c["close"]) / 3 * c.get("volume", 1) for c in candles)
+        v  = sum(c.get("volume", 1) for c in candles)
+        vwap = tv / v if v > 0 else sum(c["close"] for c in candles) / len(candles)
         vwap_p = 1 if closes[-1] >= vwap else 0
 
         # Momentum (5-bar ROC)
@@ -113,7 +115,11 @@ class RLAgent(BaseAgent):
         state = self.extract_state(candles)
         qv    = q[state]
 
-        if random.random() < EPSILON:
+        # Only explore (random action) during historical replay training runs.
+        # In paper/live modes the RL agent always exploits its learned Q-table —
+        # random trades in a real account are noise, not learning.
+        eff_epsilon = EPSILON if context.get("mode") == "replay" else 0.0
+        if random.random() < eff_epsilon:
             ai = random.randint(0, N_ACTIONS - 1)
             src = "explore"
         else:

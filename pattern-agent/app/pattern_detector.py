@@ -100,7 +100,9 @@ def classify_regime_hmm(df: pd.DataFrame) -> str:
         if len(returns) < 10:
             return _simple_regime(df)
 
-        model.fit(returns)
+        # Fit on all bars except the last so the current bar is not used in training.
+        # Then predict on all bars; the final state is the current bar's regime.
+        model.fit(returns[:-1])
         states = model.predict(returns)
         state_means = {}
         for s in range(model.n_components):

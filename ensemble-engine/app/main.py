@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -8,7 +9,7 @@ from datetime import datetime, timezone
 import aio_pika
 import redis.asyncio as redis_async
 import asyncpg
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic_settings import BaseSettings
 from pydantic import model_validator
@@ -18,8 +19,9 @@ from app.agent_collector import AgentSignalCollector
 from app.meta_model import predict_win_probability, load_meta_model
 from app.calibrator import calibrate_confidence, load_calibrator
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-logger = logging.getLogger(__name__)
+from app.elk_logger import setup_logging, get_logger
+setup_logging()
+logger = get_logger(__name__)
 
 
 class Settings(BaseSettings):
@@ -63,10 +65,18 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+_INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "")
+
+
+def _require_internal(x_api_key: str = Header(None)) -> None:
+    if _INTERNAL_API_KEY and x_api_key != _INTERNAL_API_KEY:
+        raise HTTPException(403, "Invalid or missing X-Api-Key")
+
+
 _pool: asyncpg.Pool | None = None
 _redis: redis_async.Redis | None = None
 _publisher: aio_pika.RobustConnection | None = None
-_pub_channel: aio_pika.Channel | None = None
 _tasks: list[asyncio.Task] = []
 _recent_decisions: list[dict] = []
 
@@ -176,9 +186,12 @@ async def on_all_signals_received(symbol: str, agent_signals: dict) -> None:
             logger.error("Redis decision store failed: %s", exc)
 
     # Publish to ensemble.decision exchange
-    if _pub_channel:
+    # Always acquire a fresh channel from the robust connection so a RabbitMQ restart
+    # doesn't leave us with a permanently stale _pub_channel.
+    if _publisher:
         try:
-            exchange = await _pub_channel.get_exchange("ensemble.decision")
+            ch = await _publisher.channel()
+            exchange = await ch.get_exchange("ensemble.decision")
             await exchange.publish(
                 aio_pika.Message(
                     body=json.dumps(decision, default=str).encode(),
@@ -187,6 +200,7 @@ async def on_all_signals_received(symbol: str, agent_signals: dict) -> None:
                 ),
                 routing_key="decision",
             )
+            await ch.close()
         except Exception as exc:
             logger.error("Ensemble publish failed: %s", exc)
 
@@ -197,7 +211,7 @@ async def on_all_signals_received(symbol: str, agent_signals: dict) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _pool, _redis, _publisher, _pub_channel
+    global _pool, _redis, _publisher
 
     for attempt in range(1, 11):
         try:
@@ -216,8 +230,6 @@ async def lifespan(app: FastAPI):
             if attempt == 10:
                 raise
             await asyncio.sleep(min(2 ** attempt, 30))
-
-    _pub_channel = await _publisher.channel()
 
     collector = AgentSignalCollector(timeout_seconds=settings.AGENT_SIGNAL_TIMEOUT_SECONDS)
     collector.on_decision_ready(on_all_signals_received)
@@ -264,7 +276,7 @@ async def get_decision(symbol: str):
 
 
 @app.get("/decisions/recent")
-async def get_recent_decisions(limit: int = 20):
+async def get_recent_decisions(limit: int = 20, _: None = Depends(_require_internal)):
     return {"decisions": _recent_decisions[:limit]}
 
 

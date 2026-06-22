@@ -21,6 +21,11 @@ services:
       retries: 5
     networks:
       - stock-prediction-network
+    deploy:
+      resources:
+        limits:
+          memory: 256M   # 101MB actual; halved — postgres rarely spikes here
+          cpus: '0.5'
 
   mongodb:
     image: mongo:6
@@ -40,6 +45,11 @@ services:
       retries: 5
     networks:
       - stock-prediction-network
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
 
   redis:
     image: redis:7-alpine
@@ -55,6 +65,11 @@ services:
       retries: 5
     networks:
       - stock-prediction-network
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.3'
 
   rabbitmq:
     image: rabbitmq:3.12-management-alpine
@@ -74,6 +89,11 @@ services:
       retries: 10
     networks:
       - stock-prediction-network
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.3'
 
   influxdb:
     image: influxdb:2-alpine
@@ -96,6 +116,11 @@ services:
       retries: 5
     networks:
       - stock-prediction-network
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.3'
 
   elasticsearch:
     image: elasticsearch:8.11.0
@@ -104,7 +129,7 @@ services:
       - discovery.type=single-node
       - xpack.security.enabled=false
       - xpack.security.http.ssl.enabled=false
-      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - "ES_JAVA_OPTS=-Xms512m -Xmx768m"
     ports:
       - "9200:9200"
     volumes:
@@ -116,6 +141,11 @@ services:
       retries: 12
     networks:
       - stock-prediction-network
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+          cpus: '0.5'
 
   kibana:
     image: kibana:8.11.0
@@ -132,6 +162,11 @@ services:
         condition: service_healthy
     networks:
       - stock-prediction-network
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+          cpus: '0.3'
 
   mlflow:
     image: ghcr.io/mlflow/mlflow:v2.10.0
@@ -153,6 +188,11 @@ services:
       retries: 6
     networks:
       - stock-prediction-network
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+          cpus: '0.3'
 
   # ── Existing Backend (monolith, remains during transition) ────────────────────
 
@@ -171,17 +211,16 @@ services:
       INFLUXDB_HOST: influxdb
       LLM_API_URL: http://host.docker.internal:11434
       ELASTICSEARCH_URL: http://elasticsearch:9200
-      # LLM provider — "auto" uses Anthropic when ANTHROPIC_API_KEY is set on the
-      # host (or in backend/.env), otherwise falls back to Ollama.
-      LLM_PROVIDER: ${LLM_PROVIDER:-auto}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      LLM_PROVIDER: ollama
+      ANTHROPIC_API_KEY: ""
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-haiku-4-5-20251001}
       LLM_MODEL: ${OLLAMA_MODEL:-llama3.2}
-      # Angel One (SmartAPI) real-time NSE data — optional; Yahoo is used if unset.
       ANGEL_API_KEY: ${ANGEL_API_KEY:-}
       ANGEL_CLIENT_CODE: ${ANGEL_CLIENT_CODE:-}
       ANGEL_PIN: ${ANGEL_PIN:-}
       ANGEL_TOTP_SECRET: ${ANGEL_TOTP_SECRET:-}
+      NEWS_MIN_CONFIDENCE: "0.55"
+      NEWS_MIN_SCORE: "0.3"
     ports:
       - "8000:8000"
     volumes:
@@ -201,7 +240,12 @@ services:
         condition: service_healthy
     networks:
       - stock-prediction-network
-    command: python -m uvicorn app.main:app_sio --host 0.0.0.0 --port 8000 --reload --root-path /neuradex/backend
+    command: python -m uvicorn app.main:app_sio --host 0.0.0.0 --port 8000 --workers 1 --root-path /neuradex/backend
+    deploy:
+      resources:
+        limits:
+          memory: 3G
+          cpus: '2.0'
 
   # ── Phase 1: Market Data Service ──────────────────────────────────────────────
 
@@ -217,6 +261,8 @@ services:
       MONGODB_HOST: mongodb
       REDIS_HOST: redis
       RABBITMQ_HOST: rabbitmq
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      SERVICE_NAME: market-data-service
       SERVICE_PORT: "8001"
       WATCHLIST: "RELIANCE,TCS,INFY,HDFCBANK,ICICIBANK,KOTAKBANK,BAJFINANCE,SBIN,WIPRO,AXISBANK,HINDUNILVR,MARUTI,NESTLEIND,TITAN,TECHM"
       TICK_INTERVAL_SECONDS: "60"
@@ -235,6 +281,11 @@ services:
         condition: service_healthy
     networks:
       - stock-prediction-network
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.3'
 
   # ── Phase 2: Agent Services ───────────────────────────────────────────────────
 
@@ -249,6 +300,8 @@ services:
       POSTGRES_HOST: postgres
       REDIS_HOST: redis
       RABBITMQ_HOST: rabbitmq
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      SERVICE_NAME: technical-agent
       SERVICE_PORT: "8002"
       MLFLOW_TRACKING_URI: http://mlflow:5000
       CANDLE_HISTORY_LIMIT: "200"
@@ -261,6 +314,11 @@ services:
         condition: service_healthy
     networks:
       - stock-prediction-network
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.3'
 
   sentiment-agent:
     build:
@@ -272,6 +330,8 @@ services:
     environment:
       MONGODB_HOST: mongodb
       RABBITMQ_HOST: rabbitmq
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      SERVICE_NAME: sentiment-agent
       SERVICE_PORT: "8003"
       MLFLOW_TRACKING_URI: http://mlflow:5000
       FINBERT_MODEL: "ProsusAI/finbert"
@@ -287,6 +347,11 @@ services:
         condition: service_healthy
     networks:
       - stock-prediction-network
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+          cpus: '0.5'
 
   macro-agent:
     build:
@@ -298,6 +363,8 @@ services:
     environment:
       REDIS_HOST: redis
       RABBITMQ_HOST: rabbitmq
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      SERVICE_NAME: macro-agent
       SERVICE_PORT: "8004"
       MACRO_REFRESH_SECONDS: "3600"
     ports:
@@ -309,6 +376,11 @@ services:
         condition: service_healthy
     networks:
       - stock-prediction-network
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.2'
 
   pattern-agent:
     build:
@@ -320,6 +392,8 @@ services:
     environment:
       POSTGRES_HOST: postgres
       RABBITMQ_HOST: rabbitmq
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      SERVICE_NAME: pattern-agent
       SERVICE_PORT: "8005"
       CANDLE_HISTORY_LIMIT: "100"
     ports:
@@ -331,6 +405,11 @@ services:
         condition: service_healthy
     networks:
       - stock-prediction-network
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.3'
 
   rl-agent:
     build:
@@ -343,6 +422,8 @@ services:
       POSTGRES_HOST: postgres
       RABBITMQ_HOST: rabbitmq
       REDIS_HOST: redis
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      SERVICE_NAME: rl-agent
       SERVICE_PORT: "8006"
       MLFLOW_TRACKING_URI: http://mlflow:5000
       POLICY_MODEL_NAME: "rl-trading-policy"
@@ -357,6 +438,11 @@ services:
         condition: service_healthy
     networks:
       - stock-prediction-network
+    deploy:
+      resources:
+        limits:
+          memory: 384M   # 139MB actual; 384M gives headroom for PPO training bursts
+          cpus: '0.5'
 
   # ── Phase 3: Ensemble Decision Engine ────────────────────────────────────────
 
@@ -371,6 +457,8 @@ services:
       POSTGRES_HOST: postgres
       REDIS_HOST: redis
       RABBITMQ_HOST: rabbitmq
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      SERVICE_NAME: ensemble-engine
       SERVICE_PORT: "8007"
       AGENT_SIGNAL_TIMEOUT_SECONDS: "5"
       MIN_CONFIDENCE_TO_TRADE: "0.60"
@@ -383,6 +471,11 @@ services:
         condition: service_healthy
     networks:
       - stock-prediction-network
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.3'
 
   # ── Phase 4: Feedback Learning Service ───────────────────────────────────────
 
@@ -397,6 +490,8 @@ services:
       POSTGRES_HOST: postgres
       RABBITMQ_HOST: rabbitmq
       REDIS_HOST: redis
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      SERVICE_NAME: feedback-service
       SERVICE_PORT: "8012"
       RETRAIN_THRESHOLD: "500"
       WEIGHT_LEARNING_RATE: "0.05"
@@ -409,8 +504,13 @@ services:
         condition: service_healthy
     networks:
       - stock-prediction-network
+    deploy:
+      resources:
+        limits:
+          memory: 128M   # 47MB actual; lightweight weight-update consumer
+          cpus: '0.3'
 
-  # ── Stock Scanner: continuous intraday market sweep → AI watchlist ───────────
+  # ── Stock Scanner ─────────────────────────────────────────────────────────────
 
   stock-scanner:
     build:
@@ -421,14 +521,16 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       BACKEND_URL: "http://backend:8000"
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      SERVICE_NAME: stock-scanner
       SCAN_INTERVAL: "1200"
       SCAN_MIN_VOLUME: "300000"
       SCAN_MIN_ATR_PCT: "1.2"
       SCAN_TOP_N: "15"
-      SCAN_PREMARKET_MIN: "540"     # 09:00 IST pre-open scan
-      SCAN_MARKET_OPEN_MIN: "555"   # 09:15 IST open
-      SCAN_MARKET_CLOSE_MIN: "930"  # 15:30 IST close
-      SCAN_POSTMARKET_MIN: "940"    # 15:40 IST post-close grade
+      SCAN_PREMARKET_MIN: "540"
+      SCAN_MARKET_OPEN_MIN: "555"
+      SCAN_MARKET_CLOSE_MIN: "930"
+      SCAN_POSTMARKET_MIN: "940"
     ports:
       - "8014:8014"
     depends_on:
@@ -436,8 +538,13 @@ services:
         condition: service_healthy
     networks:
       - stock-prediction-network
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.3'
 
-  # ── Autopilot Service (independent paper + backtest training loops) ──────────
+  # ── Autopilot Service ─────────────────────────────────────────────────────────
 
   autopilot-service:
     build:
@@ -448,16 +555,18 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       BACKEND_URL: "http://backend:8000"
-      AUTOPILOT_MAX_SESSIONS: "15"          # paper: cover the whole watchlist
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      SERVICE_NAME: autopilot-service
+      AUTOPILOT_MAX_SESSIONS: "15"
       AUTOPILOT_CAPITAL: "50000"
-      AUTOPILOT_TICK_SECS: "60"             # paper check cadence
-      AUTOPILOT_MAX_HOLD_MINUTES: "0"       # per-trade hold cap, minutes (0 = off)
-      AUTOPILOT_BACKTEST_SPEED: "1"         # 1x — dense, real-like training
-      AUTOPILOT_BACKTEST_MAX: "15"          # sessions per day queue
-      AUTOPILOT_BACKTEST_POLL: "15"         # queue completion poll
-      AUTOPILOT_BACKTEST_MAX_DAYS_BACK: "30"  # walk back N trading days, then wrap
-      AUTOPILOT_BACKTEST_MORNING_CUTOFF: "540"  # 09:00 IST — stop backtest before market
-      AUTOPILOT_BACKTEST_EVENING_RESUME: "940"  # 15:40 IST — resume after paper closes
+      AUTOPILOT_TICK_SECS: "60"
+      AUTOPILOT_MAX_HOLD_MINUTES: "0"
+      AUTOPILOT_BACKTEST_SPEED: "10"
+      AUTOPILOT_BACKTEST_MAX: "27"
+      AUTOPILOT_BACKTEST_POLL: "15"
+      AUTOPILOT_BACKTEST_MAX_DAYS_BACK: "90"
+      AUTOPILOT_BACKTEST_MORNING_CUTOFF: "540"
+      AUTOPILOT_BACKTEST_EVENING_RESUME: "940"
     ports:
       - "8015:8015"
     depends_on:
@@ -465,8 +574,13 @@ services:
         condition: service_healthy
     networks:
       - stock-prediction-network
+    deploy:
+      resources:
+        limits:
+          memory: 128M   # 44MB actual; simple polling loop
+          cpus: '0.3'
 
-  # ── Sentiment Service (LLM news sentiment → independent ensemble signal) ─────
+  # ── Sentiment Service ─────────────────────────────────────────────────────────
 
   sentiment-service:
     build:
@@ -476,14 +590,15 @@ services:
     environment:
       REDIS_HOST: redis
       REDIS_PORT: "6379"
-      # LLM provider (same auto-selection as the backend)
-      LLM_PROVIDER: ${LLM_PROVIDER:-auto}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      SERVICE_NAME: sentiment-service
+      LLM_PROVIDER: ollama
+      ANTHROPIC_API_KEY: ""
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-haiku-4-5-20251001}
       LLM_MODEL: ${OLLAMA_MODEL:-llama3.2}
       LLM_API_URL: http://host.docker.internal:11434
-      SENTIMENT_INTERVAL: "1800"     # refresh watchlist news every 30 min
-      SENTIMENT_TTL: "5400"          # a signal stays valid 90 min
+      SENTIMENT_INTERVAL: "900"
+      SENTIMENT_TTL: "5400"
     ports:
       - "8016:8016"
     depends_on:
@@ -491,8 +606,13 @@ services:
         condition: service_healthy
     networks:
       - stock-prediction-network
+    deploy:
+      resources:
+        limits:
+          memory: 256M   # 55MB actual; LLM calls are external, no local model
+          cpus: '0.5'
 
-  # ── Phase 2 (cont): Model Trainer ────────────────────────────────────────────
+  # ── Model Trainer ─────────────────────────────────────────────────────────────
 
   model-trainer:
     build:
@@ -505,6 +625,8 @@ services:
       POSTGRES_HOST: postgres
       RABBITMQ_HOST: rabbitmq
       MLFLOW_TRACKING_URI: http://mlflow:5000
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      SERVICE_NAME: model-trainer
       SERVICE_PORT: "8013"
       TRAIN_DAYS: "365"
       RL_TIMESTEPS: "200000"
@@ -520,8 +642,13 @@ services:
         condition: service_started
     networks:
       - stock-prediction-network
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+          cpus: '1.0'
 
-  # ── Phase 3: Risk Engine (Java Spring Boot) ───────────────────────────────────
+  # ── Risk Engine ───────────────────────────────────────────────────────────────
 
   risk-engine:
     build:
@@ -546,8 +673,13 @@ services:
         condition: service_healthy
     networks:
       - stock-prediction-network
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.2'
 
-  # ── Phase 4: Trade Executor (Java Spring Boot) ────────────────────────────────
+  # ── Trade Executor ────────────────────────────────────────────────────────────
 
   trade-executor:
     build:
@@ -569,6 +701,11 @@ services:
         condition: service_healthy
     networks:
       - stock-prediction-network
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.3'
 
   # ── Frontend & Proxy ──────────────────────────────────────────────────────────
 
@@ -586,6 +723,11 @@ services:
       - backend
     networks:
       - stock-prediction-network
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.2'
 
   docs:
     build:
@@ -596,6 +738,11 @@ services:
       - "3001:3001"
     networks:
       - stock-prediction-network
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.2'
 
   ngrok:
     image: ngrok/ngrok:latest
@@ -610,6 +757,11 @@ services:
       - nginx
     networks:
       - stock-prediction-network
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: '0.1'
 
   nginx:
     image: nginx:alpine
@@ -625,6 +777,11 @@ services:
       - frontend
     networks:
       - stock-prediction-network
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: '0.1'
 
 volumes:
   postgres_data:

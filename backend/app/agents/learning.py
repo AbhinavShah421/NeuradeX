@@ -48,9 +48,12 @@ _DDL_STATEMENTS = [
     total_reward        FLOAT DEFAULT 0.0,
     updated_at          TIMESTAMPTZ DEFAULT NOW()
 )""",
+    # All agents — original 7 + the 4 newer models.  ON CONFLICT DO NOTHING so
+    # existing learned weights are never clobbered on restart.
     """INSERT INTO ai_engine_agent_weights (agent_name, weight)
 VALUES ('technical',1.0),('pattern',1.0),('momentum',1.0),
-       ('volatility',1.0),('sentiment',1.0),('rl',0.8),('memory',1.3)
+       ('volatility',1.0),('sentiment',1.0),('rl',0.8),('memory',1.3),
+       ('meanrev',0.9),('regime',0.6),('anomaly',0.7),('gbm',1.1)
 ON CONFLICT DO NOTHING""",
 ]
 
@@ -167,22 +170,49 @@ class LearningSystem:
                     signals = json.loads(row[0])
                     mem_fp, mem_action = row[1], row[2]
                     rl_state = row[3]
-                    # Find the winning action (highest conf*weight)
-                    best = max(signals, key=lambda s: s["confidence"] * s["weight"])
-                    best_action = best["action"]
 
+                    # ── Outcome-driven weight update ──────────────────────────
+                    # reward > 0 → the BUY was right; reward < 0 → it was wrong.
+                    # Each agent is judged by whether its own signal matched that
+                    # outcome, NOT by whether it agreed with the top-confidence agent.
+                    #
+                    # The system only trades BUY→SELL, so:
+                    #   Agent said BUY  → correct when trade won  (reward > 0)
+                    #   Agent said SELL → correct when trade lost (reward < 0)
+                    #   Agent said HOLD → abstained; receives a soft signal
+                    #
+                    # Delta is scaled by |reward| so a 5% winner updates weights
+                    # more than a 0.1% winner — magnitude matters.
+                    _LR = 0.06   # per-trade learning rate; weight bounds [0.3, 3.0]
                     for sig in signals:
-                        # Agent is correct if it agreed with the best agent AND trade was good,
-                        # OR it recommended opposite AND trade was bad
-                        agent_agreed_best = sig["action"] == best_action
-                        correct = (agent_agreed_best and reward > 0) or (not agent_agreed_best and reward < 0)
-                        delta   = 0.05 if correct else -0.05
+                        act = sig["action"]
+                        if act == "BUY":
+                            # BUY was the correct call if the trade won
+                            delta   = _LR * reward
+                            correct = reward > 0
+                        elif act == "SELL":
+                            # SELL was the correct call if the trade lost
+                            delta   = _LR * -reward
+                            correct = reward < 0
+                        else:
+                            # HOLD = "I wouldn't enter this trade."
+                            # When the trade loses, HOLD was correct — reward the
+                            # agent so defensive agents (Memory cold-start, Anomaly
+                            # veto, Sentiment no-signal) don't get demoted for being
+                            # right. When the trade wins, HOLD missed a good entry —
+                            # apply a small miss penalty.
+                            if reward < 0:
+                                delta   = _LR * abs(reward) * 0.5   # correct abstention
+                                correct = True
+                            else:
+                                delta   = -_LR * reward * 0.15      # missed winning trade
+                                correct = False
 
                         await conn.execute(text("""
                             UPDATE ai_engine_agent_weights
                             SET correct_predictions = correct_predictions + :corr,
                                 total_reward        = total_reward + :rw,
-                                weight              = GREATEST(0.3, LEAST(2.5, weight + :delta)),
+                                weight              = GREATEST(0.3, LEAST(3.0, weight + :delta)),
                                 updated_at          = NOW()
                             WHERE agent_name = :name
                         """), {

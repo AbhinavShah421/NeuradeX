@@ -316,7 +316,7 @@ const Orders: React.FC = () => {
   const [portfolio, setPortfolio] = useState<PortfolioMetrics | null>(null);
   const [agentAcc,  setAgentAcc]  = useState<Record<string, AgentMetric> | null>(null);
   const [selected, setSelected] = useState<TradeRecord | null>(null);
-  const [filter,   setFilter]   = useState<'ALL' | 'LIVE' | 'PAPER' | 'BACKTEST'>('ALL');
+  const [filter,   setFilter]   = useState<'ALL' | 'LIVE' | 'PAPER' | 'BACKTEST' | 'REPLAY'>('ALL');
   const [sortKey,  setSortKey]  = useState<string>('created');
   const [sortDir,  setSortDir]  = useState<'asc' | 'desc'>('desc');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -346,44 +346,35 @@ const Orders: React.FC = () => {
   const [fCreatedFrom, setFCreatedFrom] = useState('');
   const [fCreatedTo,   setFCreatedTo]   = useState('');
 
+  // Load stats/portfolio/agents once; reload trades whenever the source filter changes.
   useEffect(() => {
-    const load = async () => {
-      try {
-        const [statsRes, tradesRes, pmRes, aaRes, lessRes, pmortemRes] = await Promise.allSettled([
-          apiService.getFeedbackStats(),
-          apiService.getFeedbackTrades(),
-          apiService.getPortfolioMetrics(),
-          apiService.getAgentAccuracy(20),
-          apiService.getLossLessons(),
-          apiService.getLossPostmortems(50),
-        ]);
-        if (statsRes.status === 'fulfilled') setStats(statsRes.value);
-        if (tradesRes.status === 'fulfilled') {
-          const data = tradesRes.value;
-          setTrades(Array.isArray(data) ? data : data.trades ?? []);
-        }
-        if (pmRes.status === 'fulfilled' && pmRes.value && !pmRes.value.error) {
-          setPortfolio(pmRes.value as PortfolioMetrics);
-        }
-        if (aaRes.status === 'fulfilled' && aaRes.value?.agentAccuracy) {
-          setAgentAcc(aaRes.value.agentAccuracy as Record<string, AgentMetric>);
-        }
-        if (lessRes.status === 'fulfilled') setLessons(lessRes.value?.data?.lessons ?? []);
-        if (pmortemRes.status === 'fulfilled') setPostmortems(pmortemRes.value?.data?.items ?? []);
-      } catch (e: any) {
-        setError(e.message);
-      } finally {
-        setLoading(false);
-      }
+    const loadOnce = async () => {
+      const [statsRes, pmRes, aaRes, lessRes, pmortemRes] = await Promise.allSettled([
+        apiService.getFeedbackStats(),
+        apiService.getPortfolioMetrics(),
+        apiService.getAgentAccuracy(20),
+        apiService.getLossLessons(),
+        apiService.getLossPostmortems(50),
+      ]);
+      if (statsRes.status === 'fulfilled') setStats(statsRes.value);
+      if (pmRes.status === 'fulfilled' && pmRes.value && !pmRes.value.error) setPortfolio(pmRes.value as PortfolioMetrics);
+      if (aaRes.status === 'fulfilled' && aaRes.value?.agentAccuracy) setAgentAcc(aaRes.value.agentAccuracy as Record<string, AgentMetric>);
+      if (lessRes.status === 'fulfilled') setLessons(lessRes.value?.data?.lessons ?? []);
+      if (pmortemRes.status === 'fulfilled') setPostmortems(pmortemRes.value?.data?.items ?? []);
+      setLoading(false);
     };
-    load();
+    loadOnce().catch(e => { setError(e.message); setLoading(false); });
   }, []);
 
-  const filteredTrades = trades.filter(t => {
-    if (filter === 'ALL') return true;
-    const src = t.tradeSource ?? (t.paperTrade ? 'PAPER' : 'LIVE');
-    return src === filter;
-  });
+  useEffect(() => {
+    setLoading(true);
+    apiService.getFeedbackTrades(filter === 'ALL' ? undefined : filter).then(data => {
+      setTrades(Array.isArray(data) ? data : data.trades ?? []);
+    }).catch(() => {}).finally(() => setLoading(false));
+  }, [filter]);
+
+  // Server already filters by source — trades array is already the right subset.
+  const filteredTrades = trades;
 
   // ── Group trades into sessions ────────────────────────────────────────────
   // Trades sharing a session id collapse into one row; trades without a session
@@ -460,7 +451,7 @@ const Orders: React.FC = () => {
   const pnlColor = (v: number) => v >= 0 ? 'var(--nd-green)' : 'var(--nd-red)';
 
   const modeColor: Record<string, string> = {
-    LIVE: '#22c55e', PAPER: '#f59e0b', BACKTEST: '#3b82f6',
+    LIVE: '#22c55e', PAPER: '#f59e0b', BACKTEST: '#3b82f6', REPLAY: '#a855f7',
   };
 
   if (loading) return <div style={{ padding: 40, textAlign: 'center', color: 'var(--nd-text-3)' }}>Loading trade history...</div>;
@@ -644,7 +635,7 @@ const Orders: React.FC = () => {
 
       {/* Filter pills */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap', alignItems: 'center' }}>
-        {(['ALL', 'LIVE', 'PAPER', 'BACKTEST'] as const).map(f => (
+        {(['ALL', 'LIVE', 'PAPER', 'BACKTEST', 'REPLAY'] as const).map(f => (
           <button key={f} onClick={() => setFilter(f)}
             style={{ padding: '5px 14px', borderRadius: 20, border: '1px solid var(--nd-border)', cursor: 'pointer', fontSize: 12, fontWeight: 500, transition: 'all 0.15s',
               background: filter === f ? (modeColor[f] ?? 'var(--nd-accent)') : 'var(--nd-surface)',

@@ -18,8 +18,9 @@ from app.services.redis_writer import RedisWriter
 from app.services.timescale_writer import TimescaleWriter
 from app.services.ingestion_loop import run_tick_loop, run_news_loop, run_historical_backfill
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-logger = logging.getLogger(__name__)
+from app.elk_logger import setup_logging, get_logger
+setup_logging()
+logger = get_logger(__name__)
 
 _groww = GrowwSource(settings.GROWW_API_KEY, settings.GROWW_API_SECRET)
 _yahoo = YahooSource()

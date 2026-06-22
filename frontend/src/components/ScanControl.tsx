@@ -2,10 +2,24 @@ import React from 'react';
 import { useScanStore } from '../stores/scanStore';
 
 // Shared AI-scan status + Rescan button. Identical state on every page: the
-// Rescan button is disabled whenever a sweep is running (started from any page).
+// Rescan button is disabled whenever a sweep is running or any trading session
+// is live (sessions use the same market data pipeline).
 const ScanControl: React.FC<{ align?: 'left' | 'right' }> = ({ align = 'right' }) => {
-  const { scanning, scanned, universe, lastScan, rescan } = useScanStore();
+  const { scanning, scanned, universe, lastScan, runningSessions, rescan } = useScanStore();
   const pct = universe ? Math.round((scanned / universe) * 100) : 0;
+  const blocked = scanning || runningSessions > 0;
+
+  const lastScanLabel = lastScan
+    ? new Date(lastScan).toLocaleString('en-IN', {
+        day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: true,
+      })
+    : null;
+
+  const tooltip = scanning
+    ? 'A scan is already running'
+    : runningSessions > 0
+      ? `Cannot scan while ${runningSessions} session${runningSessions > 1 ? 's are' : ' is'} running`
+      : 'Run a fresh full-market AI scan';
 
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginLeft: align === 'right' ? 'auto' : undefined }}>
@@ -13,23 +27,27 @@ const ScanControl: React.FC<{ align?: 'left' | 'right' }> = ({ align = 'right' }
         AI scan {scanned}/{universe}
         {scanning
           ? <span style={{ color: 'var(--nd-accent)', fontWeight: 600 }}> · scanning… {pct}%</span>
-          : (lastScan ? ` · ${new Date(lastScan).toLocaleTimeString('en-IN')}` : '')}
+          : runningSessions > 0
+            ? <span style={{ color: '#f59e0b', fontWeight: 600 }}> · {runningSessions} session{runningSessions > 1 ? 's' : ''} running</span>
+            : lastScanLabel
+              ? <span> · {lastScanLabel}</span>
+              : null}
       </span>
       <button
         onClick={rescan}
-        disabled={scanning}
-        title={scanning ? 'A scan is already running' : 'Run a fresh full-market AI scan'}
+        disabled={blocked}
+        title={tooltip}
         style={{
           display: 'flex', alignItems: 'center', gap: 5, padding: '6px 14px', borderRadius: 8,
           border: '1px solid var(--nd-border)', background: 'var(--nd-surface)',
-          color: scanning ? 'var(--nd-text-3)' : 'var(--nd-text-2)',
-          cursor: scanning ? 'not-allowed' : 'pointer', opacity: scanning ? 0.6 : 1,
+          color: blocked ? 'var(--nd-text-3)' : 'var(--nd-text-2)',
+          cursor: blocked ? 'not-allowed' : 'pointer', opacity: blocked ? 0.6 : 1,
           fontSize: 12, fontWeight: 600,
         }}>
         <span className={`material-icons${scanning ? ' nd-spin' : ''}`} style={{ fontSize: 15 }}>
-          {scanning ? 'autorenew' : 'refresh'}
+          {scanning ? 'autorenew' : runningSessions > 0 ? 'block' : 'refresh'}
         </span>
-        {scanning ? 'Scanning…' : 'Rescan'}
+        {scanning ? 'Scanning…' : runningSessions > 0 ? 'Session active' : 'Rescan'}
       </button>
     </div>
   );

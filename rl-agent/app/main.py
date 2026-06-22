@@ -15,8 +15,9 @@ from pydantic import model_validator
 
 from app.policy import get_policy, predict_action
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-logger = logging.getLogger(__name__)
+from app.elk_logger import setup_logging, get_logger
+setup_logging()
+logger = get_logger(__name__)
 
 
 class Settings(BaseSettings):
@@ -115,6 +116,9 @@ async def _consumer_loop() -> None:
                                 if not symbol:
                                     continue
                                 indicators = await _get_indicators(symbol)
+                                if not indicators:
+                                    logger.warning("RL: no indicators for %s (DB unavailable) — skipping signal", symbol)
+                                    continue
                                 obs = _build_obs(indicators)
                                 policy = get_policy(settings.MLFLOW_TRACKING_URI, settings.POLICY_MODEL_NAME)
                                 signal, confidence = predict_action(policy, obs, indicators)

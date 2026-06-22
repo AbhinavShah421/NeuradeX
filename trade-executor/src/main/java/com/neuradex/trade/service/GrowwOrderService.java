@@ -38,6 +38,11 @@ public class GrowwOrderService {
 
         String orderType = "BUY".equals(validated.getAction()) ? "BUY" : "SELL";
         int qty = (int) Math.floor(validated.getPositionSize());
+        if (qty <= 0) {
+            throw new IllegalArgumentException(
+                "Order quantity must be ≥ 1 for " + validated.getSymbol() +
+                " (positionSize=" + validated.getPositionSize() + ")");
+        }
 
         Map<String, Object> body = Map.of(
                 "trading_symbol", validated.getSymbol(),
@@ -45,7 +50,7 @@ public class GrowwOrderService {
                 "transaction_type", orderType,
                 "order_type", "MARKET",
                 "quantity", qty,
-                "product", "CNC"
+                "product", "MIS"   // intraday margin — all live trades are squared off same day
         );
 
         HttpEntity<Map<String, Object>> request = new HttpEntity<>(body, headers);

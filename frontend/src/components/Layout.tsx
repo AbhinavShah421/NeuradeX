@@ -31,10 +31,12 @@ const NAV_LEFT = [
 
 // AI Engine sub-menu items
 const AI_ENGINE_ITEMS = [
-  { to: '/ai-engine',              label: 'Live Analysis',  icon: 'psychology' },
-  { to: '/ai-engine/agents',       label: 'AI Agents',      icon: 'smart_toy' },
-  { to: '/ai-engine/backtest',     label: 'Backtesting',    icon: 'history_edu' },
-  { to: '/ai-engine/paper-trading',label: 'Paper Trading',  icon: 'receipt_long' },
+  { to: '/ai-engine',               label: 'Live Analysis',  icon: 'psychology' },
+  { to: '/ai-engine/agents',        label: 'AI Agents',      icon: 'smart_toy' },
+  { to: '/ai-engine/models-control', label: 'AI Models',      icon: 'model_training' },
+  { to: '/ai-engine/backtest',      label: 'Backtesting',    icon: 'history_edu' },
+  { to: '/ai-engine/paper-trading', label: 'Paper Trading',  icon: 'receipt_long' },
+  { to: '/ai-engine/memory',        label: 'Pattern Memory', icon: 'memory' },
 ];
 
 // Main nav items (right of AI Engine)

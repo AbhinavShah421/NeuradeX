@@ -1,0 +1,93 @@
+# ── MARKET HOURS MODE (9:15–15:30 IST) ───────────────────────────────────────
+# Boosts trading infrastructure; throttles ML training to free CPU during market.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.market.yml up -d
+# Switch back: docker compose -f docker-compose.yml up -d
+
+services:
+
+  # Trading-critical — more CPU headroom during live market
+  backend:
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'    # ↑ from 0.75 — handles concurrent API + analyze calls
+
+  stock-scanner:
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'    # ↑ from 0.3 — faster scan refresh during market
+
+  trade-executor:
+    deploy:
+      resources:
+        limits:
+          memory: 320M
+          cpus: '0.5'    # ↑ from 0.3 — order execution has priority
+
+  risk-engine:
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.4'    # ↑ from 0.2 — more checks during active trading
+
+  ensemble-engine:
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.4'    # ↑ from 0.3 — signal aggregation for live orders
+
+  sentiment-agent:
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+          cpus: '0.75'   # ↑ from 0.5 — news matters most during market hours
+
+  market-data-service:
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.4'    # ↑ from 0.3 — tick data ingestion
+
+  # ML training — throttled during market to avoid competing with order flow
+  model-trainer:
+    deploy:
+      resources:
+        limits:
+          memory: 512M   # ↓ from 1024M — training can wait
+          cpus: '0.2'    # ↓ from 1.0  — don't steal CPU from trading
+
+  rl-agent:
+    deploy:
+      resources:
+        limits:
+          memory: 256M   # ↓ from 384M — policy inference only, no training
+          cpus: '0.1'    # ↓ from 0.5  — minimal
+
+  # Observability — low priority during market
+  elasticsearch:
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+          cpus: '0.3'    # ↓ from 0.5 — less indexing during live trading
+
+  kibana:
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+          cpus: '0.1'    # ↓ from 0.3 — nobody watches Kibana during trading
+
+  mlflow:
+    deploy:
+      resources:
+        limits:
+          memory: 512M   # ↓ from 768M — no runs logged during market
+          cpus: '0.1'    # ↓ from 0.3

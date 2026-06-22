@@ -219,10 +219,10 @@ async def cancel_order(req: CancelRequest):
 
 _FEEDBACK_BASE = "http://feedback-service:8012"
 
-async def _feedback_get(path: str):
+async def _feedback_get(path: str, params: dict | None = None):
     try:
         async with httpx.AsyncClient() as client:
-            r = await client.get(f"{_FEEDBACK_BASE}{path}", timeout=5.0)
+            r = await client.get(f"{_FEEDBACK_BASE}{path}", params=params, timeout=5.0)
             r.raise_for_status()
             return r.json()
     except httpx.HTTPStatusError as e:
@@ -237,8 +237,11 @@ async def feedback_stats():
 
 
 @router.get("/feedback/trades")
-async def feedback_trades():
-    return await _feedback_get("/trades")
+async def feedback_trades(source: str = None, limit: int = 500):
+    params: dict = {"limit": limit}
+    if source:
+        params["source"] = source
+    return await _feedback_get("/trades", params=params)
 
 
 @router.get("/feedback/agent-accuracy")

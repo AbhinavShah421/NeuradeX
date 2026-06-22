@@ -332,6 +332,7 @@ _state = {
     "last_premarket_date": None, "last_eval_date": None,
     "last_eval": None, "calibration": None, "market_regime": "neutral",
 }
+_scan_lock = asyncio.Lock()
 
 
 async def _get_redis() -> redis.Redis:
@@ -778,10 +779,11 @@ async def scan_once(phase: str = "intraday") -> dict:
     """
     # Don't start a second sweep on top of a running one (the full-universe scan
     # takes minutes); a stale 'running' flag (e.g. after a crash) is overridden.
-    if _state.get("running") and (time.time() - _state.get("run_started", 0)) < STALE_RUN_SECS:
-        logger.info("scan(%s) skipped — a sweep is already running", phase)
-        return {}
-    _state.update({"running": True, "run_started": time.time(), "scanning": True})
+    async with _scan_lock:
+        if _state.get("running") and (time.time() - _state.get("run_started", 0)) < STALE_RUN_SECS:
+            logger.info("scan(%s) skipped — a sweep is already running", phase)
+            return {}
+        _state.update({"running": True, "run_started": time.time(), "scanning": True})
 
     # Preserve the last *completed* ranked board as the diff baseline before the
     # progressive checkpoints below start overwriting the live board.
@@ -1448,17 +1450,20 @@ async def backfill_intraday(days: int = 14, limit: int = 400) -> dict:
             await asyncio.sleep(FETCH_DELAY)
             if len(candles) < 40:
                 continue
-            for i in range(35, len(candles)):
+            for i in range(35, len(candles) - 1):  # -1 so candles[i+1] always exists
                 bd = _bar_date(candles[i])
                 if not bd or bd < cutoff:
                     continue
                 res = _analyze(candles[: i + 1], regime=0, calib=calib)
                 if not res or res.get("action") != "BUY" or res.get("grade") not in ("A", "B"):
                     continue
-                o, c = candles[i]["o"], candles[i]["c"]
-                if o <= 0:
+                # Grade on next bar's open→close: simulates entering at bar i's close
+                # and exiting at bar i+1's close, which is what live trading would do.
+                entry = candles[i]["c"]
+                next_bar = candles[i + 1]
+                if entry <= 0:
                     continue
-                move = (c - o) / o * 100
+                move = (next_bar["c"] - entry) / entry * 100
                 by_date.setdefault(bd, []).append({
                     "symbol": sym, "action": "BUY", "grade": res.get("grade"),
                     "win_probability": res.get("win_probability"),

@@ -6,7 +6,9 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+import os
+
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from .scanner import (
@@ -16,10 +18,19 @@ from .scanner import (
 )
 from .universe import UNIVERSE
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-logger = logging.getLogger("stock-scanner")
+from app.elk_logger import setup_logging, get_logger
+setup_logging()
+logger = get_logger("stock-scanner")
 
 _tasks: list[asyncio.Task] = []
+_INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "")
+
+
+def _require_internal(x_api_key: str = Header(None)) -> None:
+    """Lightweight internal-API-key guard for mutation endpoints.
+    Disabled when INTERNAL_API_KEY is not set (dev mode)."""
+    if _INTERNAL_API_KEY and x_api_key != _INTERNAL_API_KEY:
+        raise HTTPException(403, "Invalid or missing X-Api-Key")
 
 
 @asynccontextmanager
@@ -51,14 +62,16 @@ async def status():
 
 
 @app.post("/scan")
-async def scan():
+async def scan(_: None = Depends(_require_internal)):
     """Trigger an immediate full sweep (manual refresh; also runs continuously)."""
+    if get_state().get("running"):
+        raise HTTPException(409, "A scan is already running — please wait for it to complete")
     asyncio.create_task(scan_once(phase="manual"))
     return {"status": "started"}
 
 
 @app.post("/evaluate")
-async def evaluate(date: str | None = None):
+async def evaluate(date: str | None = None, _: None = Depends(_require_internal)):
     """Grade a day's morning watchlist against the actual move (post-market signal score)."""
     asyncio.create_task(evaluate_day(date))
     return {"status": "started"}
@@ -71,7 +84,7 @@ async def evaluation():
 
 
 @app.post("/evaluate-delivery")
-async def evaluate_delivery_ep(date: str | None = None):
+async def evaluate_delivery_ep(date: str | None = None, _: None = Depends(_require_internal)):
     """Grade delivery picks on their multi-day forward return. With a `date` grades
     that entry-date's snapshot; without, grades any whose horizon has elapsed."""
     if date:
@@ -81,7 +94,7 @@ async def evaluate_delivery_ep(date: str | None = None):
 
 
 @app.post("/backfill-delivery")
-async def backfill_delivery_ep(days: int = 14, limit: int = 250):
+async def backfill_delivery_ep(days: int = 14, limit: int = 250, _: None = Depends(_require_internal)):
     """Reconstruct delivery-pick accuracy for the last `days` days so the accuracy
     graph has delivery history immediately. Runs in the background."""
     asyncio.create_task(backfill_delivery(days=days, limit=limit))
@@ -89,14 +102,14 @@ async def backfill_delivery_ep(days: int = 14, limit: int = 250):
 
 
 @app.post("/backfill-committed")
-async def backfill_committed_ep(days: int = 20, limit: int = 400):
+async def backfill_committed_ep(days: int = 20, limit: int = 400, _: None = Depends(_require_internal)):
     """Reconstruct the high-conviction tier's accuracy history. Runs in background."""
     asyncio.create_task(backfill_committed(days=days, limit=limit))
     return {"status": "started", "days": days, "limit": limit}
 
 
 @app.post("/backfill-intraday")
-async def backfill_intraday_ep(days: int = 14, limit: int = 400):
+async def backfill_intraday_ep(days: int = 14, limit: int = 400, _: None = Depends(_require_internal)):
     """Reconstruct the intraday signal score so the accuracy graph reaches the
     latest completed day. Runs in background."""
     asyncio.create_task(backfill_intraday(days=days, limit=limit))

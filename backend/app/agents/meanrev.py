@@ -1,17 +1,83 @@
-"""Mean-Reversion Agent — the ensemble's counter-trend voice.
+"""Mean-Reversion Agent — adaptive thresholds via Ornstein-Uhlenbeck half-life.
 
-Most existing voices (momentum, technical trend, RL) are trend-following. In
-range-bound / choppy markets that herd is wrong together. This agent fades
-over-extension: when price stretches far from its mean (Bollinger %b, z-score)
-and the move looks exhausted (RSI extreme), it leans the OTHER way — BUY into
-washed-out dips, SELL into blow-off tops. The Market-Regime model up-weights it
-in chop and down-weights it in strong trends.
+v2 changes from the hardcoded version:
+  • OU half-life: OLS regression ΔP ~ P_{t-1} estimates how fast THIS symbol
+    reverts to its mean, in bars. κ = -slope;  HL = ln(2) / κ.
+  • Thresholds adapt per half-life:
+      HL ≤ 8  bars  → z_entry 0.7,  z_strong 1.2   (fast reverter, enter early)
+      HL 9-15 bars  → z_entry 1.0,  z_strong 1.6
+      HL 16-25 bars → z_entry 1.2,  z_strong 2.0   (old hardcoded default)
+      HL 26-40 bars → z_entry 1.6,  z_strong 2.5
+      HL > 40 bars  → z_entry 2.0,  z_strong 3.0   (near-trending — very cautious)
+      HL > 60 bars  → abstain entirely (stock is trending, not reverting)
+  • RSI thresholds adapt symmetrically — fast reverters don't need RSI extremes.
+  • Velocity damping: if price is still accelerating away from the mean when
+    z looks attractive, halve the score — avoids falling-knife entries.
+  • Half-life exposed in indicators so the UI can show the estimated reversion speed.
 """
 from __future__ import annotations
 import math
 
 from .base import AgentSignal, BaseAgent
 
+
+# ── Ornstein-Uhlenbeck half-life ──────────────────────────────────────────────
+
+def _ou_half_life(closes: list[float]) -> float:
+    """Estimate mean-reversion half-life (in bars) via OLS.
+
+    Regresses ΔP_t on P_{t-1}:  ΔP = a + b·P_{t-1}
+    κ = -b  (mean-reversion speed).
+    HL = ln(2) / κ
+
+    Returns 200 (effectively ∞) if the series is trending (b ≥ 0).
+    Clamped to [2, 200] to keep thresholds sensible.
+    """
+    n = len(closes)
+    if n < 20:
+        return 20.0
+    prices  = closes[-min(n, 60):]   # use last 60 bars max for recency
+    T       = len(prices)
+    delta_p = [prices[i] - prices[i - 1] for i in range(1, T)]
+    lagged  = prices[:-1]
+
+    m_l  = sum(lagged)  / (T - 1)
+    m_d  = sum(delta_p) / (T - 1)
+    cov  = sum((lagged[i] - m_l) * (delta_p[i] - m_d) for i in range(T - 1)) / (T - 1)
+    var  = sum((lagged[i] - m_l) ** 2 for i in range(T - 1)) / (T - 1)
+
+    if var < 1e-12:
+        return 20.0
+    b = cov / var     # OLS slope;  κ = -b  should be > 0 for mean-reverting
+
+    if b >= 0.0:
+        return 200.0  # trending series — mean reversion won't work here
+
+    kappa     = -b
+    half_life = math.log(2) / kappa
+    return max(2.0, min(200.0, half_life))
+
+
+def _z_thresholds(hl: float) -> tuple[float, float]:
+    """(z_mild, z_strong) based on half-life in bars."""
+    if   hl <=  8: return 0.7, 1.2
+    elif hl <= 15: return 1.0, 1.6
+    elif hl <= 25: return 1.2, 2.0
+    elif hl <= 40: return 1.6, 2.5
+    else:          return 2.0, 3.0
+
+
+def _rsi_thresholds(hl: float) -> tuple[float, float]:
+    """(rsi_strong_oversold, rsi_mild_oversold) for BUY side.
+    SELL side mirrors: 100 - value.
+    Fast reverters don't need extreme RSI to trigger; slow reverters do.
+    """
+    if   hl <= 15: return 32, 40
+    elif hl <= 30: return 27, 36
+    else:          return 22, 30
+
+
+# ── Agent ─────────────────────────────────────────────────────────────────────
 
 class MeanReversionAgent(BaseAgent):
     name = "meanrev"
@@ -22,45 +88,72 @@ class MeanReversionAgent(BaseAgent):
             return AgentSignal(agent_name=self.name, action="HOLD", confidence=0.3,
                                reasoning="Insufficient data for mean-reversion")
 
-        idx = len(closes) - 1
+        idx   = len(closes) - 1
         price = closes[idx]
-        win = closes[-20:]
-        mean = sum(win) / len(win)
-        var = sum((x - mean) ** 2 for x in win) / len(win)
-        sd = math.sqrt(var)
+        win   = closes[-20:]
+        mean  = sum(win) / len(win)
+        var   = sum((x - mean) ** 2 for x in win) / len(win)
+        sd    = math.sqrt(var)
         if sd <= 1e-9:
             return AgentSignal(agent_name=self.name, action="HOLD", confidence=0.3,
                                reasoning="Flat series — no dispersion to revert to")
 
-        z = (price - mean) / sd                       # standardized distance from mean
-        bb_pct = (price - (mean - 2 * sd)) / (4 * sd)  # Bollinger %b (0=lower, 1=upper)
-        rsi = self._rsi(closes, 14)
+        z      = (price - mean) / sd
+        bb_pct = (price - (mean - 2 * sd)) / (4 * sd)
+        rsi    = self._rsi(closes, 14)
+
+        # ── Adaptive thresholds ───────────────────────────────────────────────
+        hl               = _ou_half_life(closes)
+        z_mild, z_strong = _z_thresholds(hl)
+        rsi_s,  rsi_m    = _rsi_thresholds(hl)   # s=strong, m=mild (for oversold BUY)
+
+        # If half-life > 60 the stock behaves like a trending instrument this
+        # window — mean-reversion is unlikely to work; abstain cleanly.
+        if hl > 60:
+            return AgentSignal(
+                agent_name=self.name, action="HOLD", confidence=0.35,
+                reasoning=f"Trending (OU half-life {hl:.0f} bars) — mean-reversion edge absent.",
+                indicators={"z_score": round(z, 2), "bb_pct": round(bb_pct, 2),
+                            "rsi": round(rsi, 1), "half_life_bars": round(hl, 1)},
+            )
 
         score = 0.0
-        sig: dict = {"z_score": round(z, 2), "bb_pct": round(bb_pct, 2), "rsi": round(rsi, 1)}
 
-        # Stretched BELOW the mean → fade short / lean long (mean-revert up)
-        if z <= -2.0:
+        # ── Z-score signal (adaptive thresholds) ─────────────────────────────
+        if z <= -z_strong:
             score += 0.45
-        elif z <= -1.2:
+        elif z <= -z_mild:
             score += 0.22
-        # Stretched ABOVE the mean → fade long / lean short (mean-revert down)
-        if z >= 2.0:
+        if z >= z_strong:
             score -= 0.45
-        elif z >= 1.2:
+        elif z >= z_mild:
             score -= 0.22
 
-        if rsi <= 25:
+        # ── RSI confirmation (adaptive thresholds) ────────────────────────────
+        if rsi <= rsi_s:
             score += 0.25
-        elif rsi <= 35:
+        elif rsi <= rsi_m:
             score += 0.12
-        if rsi >= 75:
+        if rsi >= (100 - rsi_s):
             score -= 0.25
-        elif rsi >= 65:
+        elif rsi >= (100 - rsi_m):
             score -= 0.12
 
-        # Require a flicker of stabilisation before buying the dip (last bar up),
-        # and of rollover before fading the top (last bar down).
+        # ── Velocity damping — avoid falling-knife entries ────────────────────
+        # If the move is still accelerating (|d1| > |d2|) in the same direction
+        # as the z-score extreme, the reversal hasn't started yet — halve the
+        # score rather than wait for a full bar flip.
+        if idx >= 2:
+            d1 = closes[idx]     - closes[idx - 1]   # most recent change
+            d2 = closes[idx - 1] - closes[idx - 2]   # prior change
+            still_accelerating = abs(d1) > abs(d2)
+            if score > 0 and d1 < 0 and still_accelerating:
+                score *= 0.5   # still falling fast — wait for deceleration
+            elif score < 0 and d1 > 0 and still_accelerating:
+                score *= 0.5   # still rising fast — wait
+
+        # ── Stabilisation filter (bar-level) ─────────────────────────────────
+        # Require at least one bar moving in the expected direction before acting.
         if idx >= 1:
             last_up = closes[idx] >= closes[idx - 1]
             if score > 0 and not last_up:
@@ -68,33 +161,48 @@ class MeanReversionAgent(BaseAgent):
             if score < 0 and last_up:
                 score *= 0.6
 
+        # ── Decision ─────────────────────────────────────────────────────────
         if score >= 0.30:
-            action, conf = "BUY", min(0.9, 0.5 + score)
-            reason = f"Mean-reversion: oversold (z {z:.1f}, RSI {rsi:.0f}) — fade the drop."
+            action = "BUY"
+            conf   = min(0.9, 0.5 + score)
+            reason = (f"Mean-reversion BUY: z {z:.1f} (thresh ±{z_mild:.1f}/{z_strong:.1f}), "
+                      f"RSI {rsi:.0f}, HL {hl:.0f}b — fade the drop.")
         elif score <= -0.30:
-            action, conf = "SELL", min(0.9, 0.5 + abs(score))
-            reason = f"Mean-reversion: overbought (z {z:.1f}, RSI {rsi:.0f}) — fade the spike."
+            action = "SELL"
+            conf   = min(0.9, 0.5 + abs(score))
+            reason = (f"Mean-reversion SELL: z {z:.1f} (thresh ±{z_mild:.1f}/{z_strong:.1f}), "
+                      f"RSI {rsi:.0f}, HL {hl:.0f}b — fade the spike.")
         else:
-            action, conf = "HOLD", 0.4
-            reason = f"Near the mean (z {z:.1f}) — no reversion edge."
+            action = "HOLD"
+            conf   = 0.4
+            reason = (f"No reversion edge: z {z:.1f}, HL {hl:.0f}b "
+                      f"(need |z| > {z_mild:.1f}).")
 
-        return AgentSignal(agent_name=self.name, action=action, confidence=round(conf, 3),
-                           reasoning=reason, indicators=sig)
+        return AgentSignal(
+            agent_name=self.name, action=action,
+            confidence=round(conf, 3), reasoning=reason,
+            indicators={
+                "z_score":        round(z, 2),
+                "bb_pct":         round(bb_pct, 2),
+                "rsi":            round(rsi, 1),
+                "half_life_bars": round(hl, 1),
+                "z_thresh_mild":  round(z_mild, 1),
+                "z_thresh_strong":round(z_strong, 1),
+                "rsi_thresh":     rsi_m,
+            },
+        )
 
     @staticmethod
     def _rsi(closes: list[float], period: int = 14) -> float:
-        if len(closes) <= period:
+        """Wilder's EMA-based RSI — same formula as TechnicalAgent."""
+        if len(closes) < period + 1:
             return 50.0
-        gains = losses = 0.0
-        for i in range(len(closes) - period, len(closes)):
-            ch = closes[i] - closes[i - 1]
-            if ch >= 0:
-                gains += ch
-            else:
-                losses -= ch
-        avg_gain = gains / period
-        avg_loss = losses / period
-        if avg_loss == 0:
-            return 100.0
-        rs = avg_gain / avg_loss
-        return 100.0 - (100.0 / (1.0 + rs))
+        deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+        gains  = [d if d > 0 else 0.0 for d in deltas]
+        losses = [-d if d < 0 else 0.0 for d in deltas]
+        avg_g  = sum(gains[:period])  / period
+        avg_l  = sum(losses[:period]) / period
+        for i in range(period, len(deltas)):
+            avg_g = (avg_g * (period - 1) + gains[i])  / period
+            avg_l = (avg_l * (period - 1) + losses[i]) / period
+        return 100.0 if avg_l == 0 else 100.0 - (100.0 / (1.0 + avg_g / avg_l))

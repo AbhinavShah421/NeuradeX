@@ -1247,6 +1247,40 @@ async def memory_stats():
     return await get_memory().stats()
 
 
+@router.delete("/memory/purge")
+async def memory_purge(sources: str = "REPLAY"):
+    """Delete memory cases by source label so the bank can rebuild from clean data.
+
+    sources: comma-separated, e.g. 'REPLAY' or 'REPLAY,BACKTEST'.
+    Intended for resetting after a bug-fix that invalidated old training runs.
+    LIVE cases are never affected regardless of what is passed.
+    """
+    await _db_once()
+    from sqlalchemy import text
+    from app.database.postgres import engine as pg_engine
+    from app.agents import get_memory
+
+    allowed   = {"REPLAY", "BACKTEST", "PAPER"}
+    protected = {"LIVE"}
+    to_delete = [s.strip().upper() for s in sources.split(",")
+                 if s.strip().upper() in allowed and s.strip().upper() not in protected]
+    if not to_delete:
+        return {"status": "error", "detail": "No valid purgeable sources specified (allowed: REPLAY, BACKTEST, PAPER)"}
+
+    deleted_per_source: dict[str, int] = {}
+    async with pg_engine.begin() as conn:
+        for src in to_delete:
+            cnt = (await conn.execute(text("SELECT COUNT(*) FROM pattern_memory WHERE source=:s"), {"s": src})).scalar() or 0
+            await conn.execute(text("DELETE FROM pattern_memory WHERE source=:s"), {"s": src})
+            deleted_per_source[src] = int(cnt)
+
+    # Force cache refresh so the in-process k-NN matrix reflects the deletions immediately.
+    get_memory()._loaded_at = 0.0
+
+    total = sum(deleted_per_source.values())
+    return {"status": "success", "data": {"deleted": deleted_per_source, "total": total}}
+
+
 @router.post("/memory/query")
 async def memory_query(req: AnalyzeRequest):
     """Inspect what the memory bank recalls for the situation in `candles`."""
@@ -1525,6 +1559,51 @@ async def memory_seed(req: SeedMemoryRequest):
             "per_symbol": per_symbol,
         },
     }
+
+
+# ── Sentiment pipeline ────────────────────────────────────────────────────────
+
+@router.post("/sentiment/refresh")
+async def sentiment_refresh(symbol: str, force: bool = False):
+    """Fetch fresh news headlines for a symbol, analyse with LLM, write to Redis.
+
+    The SentimentAgent reads `ai_engine:sentiment:{SYMBOL}` on every analyze call.
+    This endpoint lets the UI (or a scheduler) pre-warm that key so the agent
+    has a real signal to vote on.
+
+    force=true skips the 15-minute cache TTL and re-fetches unconditionally.
+    """
+    from app.agents.sentiment_pipeline import run_pipeline
+    result = await run_pipeline(symbol.upper(), force=force)
+    return {
+        "status": "success",
+        "data": {
+            "symbol":          symbol.upper(),
+            "sentiment":       result.get("sentiment"),
+            "score":           result.get("score"),
+            "confidence":      result.get("confidence"),
+            "catalyst":        result.get("catalyst"),
+            "summary":         result.get("summary"),
+            "headlines_count": result.get("headlines_count", 0),
+            "headlines":       result.get("headlines", []),
+            "provider":        result.get("provider"),
+            "cached":          not force,
+        },
+    }
+
+
+@router.get("/sentiment/{symbol}")
+async def sentiment_read(symbol: str):
+    """Read the current cached sentiment for a symbol (no re-fetch)."""
+    import json
+    from app.utils.redis_client import cache_get
+    try:
+        raw = await cache_get(f"ai_engine:sentiment:{symbol.upper()}")
+        if raw:
+            return {"status": "success", "data": json.loads(raw)}
+    except Exception as exc:
+        logger.debug("sentiment read failed for %s: %s", symbol, exc)
+    return {"status": "success", "data": {"sentiment": None, "headlines_count": 0}}
 
 
 # ── Helper ────────────────────────────────────────────────────────────────────

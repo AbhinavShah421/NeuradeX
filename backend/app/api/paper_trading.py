@@ -16,8 +16,8 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field, field_validator
 
 from app.api.backtest import (
     IST,
@@ -33,6 +33,7 @@ from app.api.backtest import (
 from app.config import settings
 from app.utils.groww_client import get_groww_client
 from app.utils.elk_logger import get_logger
+from app.api.auth import get_current_user
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -784,6 +785,7 @@ async def paper_trading_tick(
     position:    str   = Query("NONE"),
     entry_price: float = Query(0.0),
     quantity:    int   = Query(0),
+    user: dict = Depends(get_current_user),
 ):
     """Live LTP + technical signal — called every N seconds (configurable).
 
@@ -956,10 +958,12 @@ async def paper_trading_tick(
 
 # ── Place order ───────────────────────────────────────────────────────────────
 
+_MAX_ORDER_QTY = 10_000
+
 class PlaceOrderRequest(BaseModel):
     symbol:     str
     action:     str        # BUY or SELL
-    quantity:   int
+    quantity:   int = Field(..., gt=0, le=_MAX_ORDER_QTY)
     order_type: str = "MARKET"
     price:      float = 0.0
     product:    str = "MIS"  # intraday
@@ -967,8 +971,11 @@ class PlaceOrderRequest(BaseModel):
 
 
 @router.post("/place-order")
-async def place_order(req: PlaceOrderRequest):
+async def place_order(req: PlaceOrderRequest, user: dict = Depends(get_current_user)):
     """Place a real Groww order after user confirms the AI signal."""
+    if not _is_market_open():
+        raise HTTPException(400, "Market is currently closed — orders can only be placed during NSE trading hours (09:15–15:30 IST, Mon–Fri)")
+
     symbol = req.symbol.upper()
     groww  = get_groww_client()
 
@@ -976,8 +983,6 @@ async def place_order(req: PlaceOrderRequest):
         raise HTTPException(503, "Groww client not initialised.")
     if req.action.upper() not in ("BUY", "SELL"):
         raise HTTPException(400, "action must be BUY or SELL")
-    if req.quantity <= 0:
-        raise HTTPException(400, "quantity must be > 0")
 
     try:
         result = await groww.place_order(

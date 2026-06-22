@@ -91,7 +91,13 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
     try {
       const r = await apiService.sessionList();
       setSessions((r as any).data ?? []);
-    } catch { /* keep last */ }
+    } catch (e: any) {
+      const status = e?.response?.status;
+      if (status === 401 || status === 403) {
+        setError('Session expired — please log in again.');
+      }
+      /* on other errors keep last known list */
+    }
   }, []);
   const loadDetail = useCallback(async (id: string) => {
     try {

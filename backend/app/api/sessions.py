@@ -569,6 +569,7 @@ async def _advance_replay(s: dict) -> None:
         window = allc[: j + 1]
         await _step(s, window, force_close=(j == n - 1))
         s["current_idx"] = j
+        await asyncio.sleep(0)  # yield between replay steps so HTTP requests aren't starved
     if s["current_idx"] >= n - 1:
         s["status"] = "done"
 
@@ -757,6 +758,7 @@ async def session_runner_loop() -> None:
                 if await _auto_stop_stale(s):
                     continue
                 await _advance(s)
+                await asyncio.sleep(0)  # yield between sessions so HTTP requests can be served
 
         except asyncio.CancelledError:
             break

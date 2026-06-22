@@ -567,11 +567,17 @@ _SERVICES = [
     {"name": "Model Trainer",    "host": "model-trainer",       "port": 8013},
 ]
 
+# Cache: only run the actual health probe every 30s; all other callers get the
+# last result instantly. A single asyncio.Lock ensures we never run two probes
+# concurrently (which is what caused worker exhaustion under frequent polling).
+_health_cache: dict = {"ts": 0.0, "data": None}
+_health_lock = asyncio.Lock()
+
 
 async def _check_service(client: httpx.AsyncClient, svc: dict) -> dict:
     url = f"http://{svc['host']}:{svc['port']}/health"
     try:
-        r = await client.get(url, timeout=3.0)
+        r = await client.get(url, timeout=httpx.Timeout(connect=2.0, read=2.0, write=2.0, pool=2.0))
         status = "ok" if r.status_code < 400 else "error"
     except Exception:
         status = "error"
@@ -585,6 +591,28 @@ async def _check_service(client: httpx.AsyncClient, svc: dict) -> dict:
 
 @router.get("/services/health")
 async def services_health():
-    async with httpx.AsyncClient() as client:
-        results = await asyncio.gather(*[_check_service(client, s) for s in _SERVICES])
-    return {"status": "success", "data": list(results)}
+    import time
+    now = time.monotonic()
+    if _health_cache["data"] is not None and now - _health_cache["ts"] < 30.0:
+        return {"status": "success", "data": _health_cache["data"]}
+
+    async with _health_lock:
+        # Re-check after acquiring lock — another waiter may have just refreshed it
+        now = time.monotonic()
+        if _health_cache["data"] is not None and now - _health_cache["ts"] < 30.0:
+            return {"status": "success", "data": _health_cache["data"]}
+
+        timeout = httpx.Timeout(connect=2.0, read=2.0, write=2.0, pool=2.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            results = await asyncio.gather(
+                *[_check_service(client, s) for s in _SERVICES],
+                return_exceptions=True,
+            )
+        data = [
+            r if isinstance(r, dict) else {"name": "unknown", "status": "error", "checkedAt": datetime.now().isoformat()}
+            for r in results
+        ]
+        _health_cache["data"] = data
+        _health_cache["ts"] = time.monotonic()
+
+    return {"status": "success", "data": _health_cache["data"]}

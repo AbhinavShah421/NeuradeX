@@ -5,7 +5,7 @@ import json
 import logging
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date as date_type
 
 import aio_pika
 import asyncpg
@@ -16,8 +16,9 @@ from pydantic import model_validator
 
 from app.weight_updater import compute_weight_updates, determine_outcome
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-logger = logging.getLogger(__name__)
+from app.elk_logger import setup_logging, get_logger
+setup_logging()
+logger = get_logger(__name__)
 
 
 class Settings(BaseSettings):
@@ -287,22 +288,37 @@ async def post_trades(payload: list[dict]):
 
 
 @app.get("/trades")
-async def get_trades(limit: int = 200, offset: int = 0):
+async def get_trades(limit: int = 500, offset: int = 0, source: str = None):
     if not _pool:
         return []
     try:
-        rows = await _pool.fetch(
-            """
-            SELECT trade_id, symbol, exchange, action, entry_price, exit_price,
-                   pnl_pct, pnl_abs, duration_minutes, ensemble_confidence,
-                   agent_signals, market_context, outcome, timestamp_open, timestamp_close,
-                   trade_source, created_at
-            FROM trade_records
-            ORDER BY created_at DESC
-            LIMIT $1 OFFSET $2
-            """,
-            limit, offset,
-        )
+        if source and source.upper() != "ALL":
+            rows = await _pool.fetch(
+                """
+                SELECT trade_id, symbol, exchange, action, entry_price, exit_price,
+                       pnl_pct, pnl_abs, duration_minutes, ensemble_confidence,
+                       agent_signals, market_context, outcome, timestamp_open, timestamp_close,
+                       trade_source, created_at
+                FROM trade_records
+                WHERE COALESCE(trade_source, 'LIVE') = $3
+                ORDER BY created_at DESC
+                LIMIT $1 OFFSET $2
+                """,
+                limit, offset, source.upper(),
+            )
+        else:
+            rows = await _pool.fetch(
+                """
+                SELECT trade_id, symbol, exchange, action, entry_price, exit_price,
+                       pnl_pct, pnl_abs, duration_minutes, ensemble_confidence,
+                       agent_signals, market_context, outcome, timestamp_open, timestamp_close,
+                       trade_source, created_at
+                FROM trade_records
+                ORDER BY created_at DESC
+                LIMIT $1 OFFSET $2
+                """,
+                limit, offset,
+            )
         result = []
         for r in rows:
             d = dict(r)
@@ -317,6 +333,29 @@ async def get_trades(limit: int = 200, offset: int = 0):
     except Exception as exc:
         logger.error("GET /trades error: %s", exc)
         return []
+
+
+@app.get("/trades/exists")
+async def trade_exists(symbol: str, date: str):
+    """Return {exists: bool} — true if symbol has any historical trades on the given date (YYYY-MM-DD)."""
+    if not _pool:
+        return {"exists": False}
+    try:
+        trade_date = datetime.strptime(date, "%Y-%m-%d").date()
+        row = await _pool.fetchrow(
+            """
+            SELECT 1 FROM trade_records
+            WHERE symbol = $1
+              AND DATE(timestamp_open AT TIME ZONE 'Asia/Kolkata') = $2
+              AND trade_source IN ('BACKTEST', 'REPLAY')
+            LIMIT 1
+            """,
+            symbol.upper(), trade_date,
+        )
+        return {"exists": row is not None}
+    except Exception as exc:
+        logger.error("GET /trades/exists error: %s", exc)
+        return {"exists": False}
 
 
 @app.get("/agent-accuracy")

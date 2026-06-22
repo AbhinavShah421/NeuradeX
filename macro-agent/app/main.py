@@ -15,8 +15,9 @@ from pydantic import model_validator
 from app.data_fetcher import fetch_macro_indicators
 from app.regime_classifier import generate_macro_signal
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-logger = logging.getLogger(__name__)
+from app.elk_logger import setup_logging, get_logger
+setup_logging()
+logger = get_logger(__name__)
 
 
 class Settings(BaseSettings):

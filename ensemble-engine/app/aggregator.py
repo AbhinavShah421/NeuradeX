@@ -115,6 +115,11 @@ def aggregate_signals(
     if total_weight == 0:
         return _no_decision(agent_votes, reason="no agents responded")
 
+    # Coverage factor: fraction of expected total weight that actually responded.
+    # w is normalized so all 5 agents sum to 1.0; total_weight < 1.0 when agents are missing.
+    # This prevents a single agent from projecting full-confidence decisions.
+    coverage_factor = total_weight  # = total_weight / sum(w.values()) where sum=1.0
+
     buy_score /= total_weight
     sell_score /= total_weight
     hold_score /= total_weight
@@ -148,6 +153,14 @@ def aggregate_signals(
         final_action = "HOLD"
         weighted_confidence = 0.50
         logger.info("All agents disagree — forcing HOLD")
+
+    # Scale down confidence by how many agents actually responded
+    weighted_confidence *= coverage_factor
+    if coverage_factor < 1.0:
+        logger.info(
+            "Partial ensemble: %d/%d agents responded (coverage=%.2f) — confidence scaled to %.3f",
+            len(agent_signals), len(DEFAULT_WEIGHTS), coverage_factor, weighted_confidence,
+        )
 
     uncertainty = round(1.0 - agreement_score, 3)
 

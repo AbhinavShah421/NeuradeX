@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 import bcrypt
 import jwt
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from pydantic import BaseModel, EmailStr, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +18,7 @@ from app.database.postgres import get_db
 from app.models.user import User
 from app.utils.groww_client import get_groww_client, init_groww_client
 from app.utils.elk_logger import get_logger
+from app.utils.redis_client import get_redis
 from app.utils.otp_service import (
     clear_signup_state,
     generate_and_send_otp,
@@ -35,13 +36,12 @@ ALGORITHM = "HS256"
 
 # ── JWT helpers ───────────────────────────────────────────────────────────────
 
-def _create_jwt(user_id: int, email: str, broker: str, groww_token: str) -> tuple[str, str]:
+def _create_jwt(user_id: int, email: str, broker: str) -> tuple[str, str]:
     expires = datetime.now(timezone.utc) + timedelta(hours=settings.JWT_EXPIRE_HOURS)
     payload = {
         "sub": str(user_id),
         "email": email,
         "broker": broker,
-        "groww_token": groww_token,
         "exp": expires,
         "iat": datetime.now(timezone.utc),
     }
@@ -58,11 +58,53 @@ def _decode_jwt(token: str) -> dict:
         raise HTTPException(401, "Invalid session token")
 
 
-def get_current_user(authorization: str = Header(None)) -> dict:
+_LOGIN_RATE_LIMIT = 5
+_LOGIN_RATE_WINDOW = 60  # seconds
+
+
+async def _check_login_rate_limit(ip: str) -> None:
+    """Raise 429 if the IP has exceeded _LOGIN_RATE_LIMIT attempts in the last minute."""
+    try:
+        r = get_redis()
+        key = f"login_attempts:{ip}"
+        count = await r.incr(key)
+        if count == 1:
+            await r.expire(key, _LOGIN_RATE_WINDOW)
+        if count > _LOGIN_RATE_LIMIT:
+            ttl = await r.ttl(key)
+            raise HTTPException(429, f"Too many login attempts — try again in {ttl}s")
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # Redis unavailable: allow the request through
+
+
+async def _blocklist_token(token: str) -> None:
+    """Add the token to the Redis blocklist until its natural expiry."""
+    try:
+        payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[ALGORITHM],
+                             options={"verify_exp": False})
+        exp = payload.get("exp", 0)
+        ttl = max(0, exp - int(datetime.now(timezone.utc).timestamp()))
+        if ttl > 0:
+            await get_redis().setex(f"jwt_blocklist:{token}", ttl, "1")
+    except Exception:
+        pass
+
+
+async def get_current_user(authorization: str = Header(None)) -> dict:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, "Authentication required")
     token = authorization.split(" ", 1)[1]
-    return _decode_jwt(token)
+    payload = _decode_jwt(token)
+    try:
+        if await get_redis().exists(f"jwt_blocklist:{token}"):
+            raise HTTPException(401, "Session has been invalidated — please log in again")
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # Redis unavailable: allow through
+    return payload
 
 
 # ── Password helpers ──────────────────────────────────────────────────────────
@@ -204,7 +246,7 @@ async def signup_complete(req: SignupCompleteRequest, db: AsyncSession = Depends
     await clear_signup_state(req.email)
 
     # Issue JWT
-    token, expires_at = _create_jwt(user.id, user.email, req.broker, req.api_key.strip())
+    token, expires_at = _create_jwt(user.id, user.email, req.broker)
     logger.info(
         "New user registered",
         extra={"log_type": "auth_event", "event": "signup_complete", "user_id": user.id, "email": user.email},
@@ -226,7 +268,9 @@ async def signup_complete(req: SignupCompleteRequest, db: AsyncSession = Depends
 # ── Login ─────────────────────────────────────────────────────────────────────
 
 @router.post("/login")
-async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
+async def login(req: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    client_ip = request.client.host if request.client else "unknown"
+    await _check_login_rate_limit(client_ip)
     identifier = req.identifier.strip()
 
     # Try email first, then phone
@@ -243,8 +287,7 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
     if not user.is_verified:
         raise HTTPException(403, "Account not verified — please complete signup")
 
-    groww_token = user.broker_api_key or ""
-    token, expires_at = _create_jwt(user.id, user.email, user.broker or "groww", groww_token)
+    token, expires_at = _create_jwt(user.id, user.email, user.broker or "groww")
     logger.info(
         "User logged in",
         extra={"log_type": "auth_event", "event": "login_success", "user_id": user.id, "email": user.email},
@@ -318,19 +361,8 @@ async def profile(user: dict = Depends(get_current_user), db: AsyncSession = Dep
             },
         }
 
-    # Fallback: decode from JWT payload (legacy tokens without DB user)
-    groww_token = user.get("groww_token", "")
+    # Fallback: JWT no longer carries groww_token (removed for security); account_id unavailable here
     account_id = ""
-    try:
-        parts = groww_token.split(".")
-        if len(parts) == 3:
-            padding = (4 - len(parts[1]) % 4) % 4
-            payload_bytes = base64.urlsafe_b64decode(parts[1] + "=" * padding)
-            sub_raw = json.loads(payload_bytes).get("sub", "{}")
-            sub = json.loads(sub_raw) if isinstance(sub_raw, str) else sub_raw
-            account_id = sub.get("userAccountId", "")
-    except Exception as exc:
-        logger.debug("Could not decode legacy Groww JWT for account_id: %s", exc)
 
     name = "Groww User"
     groww = get_groww_client()
@@ -366,7 +398,10 @@ async def profile(user: dict = Depends(get_current_user), db: AsyncSession = Dep
 
 
 @router.post("/logout")
-async def logout():
+async def logout(authorization: str = Header(None)):
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split(" ", 1)[1]
+        await _blocklist_token(token)
     return {"status": "success", "message": "Logged out"}
 
 

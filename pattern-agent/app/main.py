@@ -14,8 +14,9 @@ from pydantic import model_validator
 
 from app.pattern_detector import generate_pattern_signal
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-logger = logging.getLogger(__name__)
+from app.elk_logger import setup_logging, get_logger
+setup_logging()
+logger = get_logger(__name__)
 
 
 class Settings(BaseSettings):
@@ -108,9 +109,16 @@ async def lifespan(app: FastAPI):
     for attempt in range(1, 11):
         try:
             _pool = await asyncpg.create_pool(settings.POSTGRES_URL, min_size=2, max_size=6)
+            logger.info("DB pool created on attempt %d", attempt)
             break
         except Exception as exc:
+            logger.warning("DB pool attempt %d/10 failed: %s — retrying in %ds", attempt, exc, min(2 ** attempt, 30))
             await asyncio.sleep(min(2 ** attempt, 30))
+    else:
+        # All 10 attempts exhausted — crash so the container restarts rather than
+        # silently running in a state where every message is dropped.
+        raise RuntimeError("pattern-agent: could not connect to Postgres after 10 attempts — crashing for container restart")
+
     _tasks.append(asyncio.create_task(_consumer_loop(), name="pattern-consumer"))
     logger.info("pattern-agent ready")
     yield
@@ -127,4 +135,5 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "pattern-agent"}
+    db_ok = _pool is not None and not _pool._closed
+    return {"status": "ok" if db_ok else "degraded", "service": "pattern-agent", "db_pool": db_ok}

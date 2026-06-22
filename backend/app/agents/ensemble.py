@@ -1,6 +1,8 @@
 """Ensemble Decision Engine — runs all agents in parallel, weighted voting."""
 from __future__ import annotations
 import asyncio
+import json
+import time
 import uuid
 from datetime import datetime
 from .base import AgentSignal, BaseAgent, EnsembleDecision
@@ -8,6 +10,29 @@ from .registry import get_registry, is_enabled, weight_override
 from app.utils.elk_logger import get_logger
 
 logger = get_logger(__name__)
+
+# ── Learned-weight cache ──────────────────────────────────────────────────────
+# LearningSystem syncs per-agent weights to Redis after every closed trade.
+# The ensemble reads them here and uses them as the live decision weights,
+# so the system genuinely gets better with each trade outcome.
+_LEARNED_WEIGHTS_KEY = "ai_engine:agent_weights"
+_lw_cache: dict = {"data": {}, "ts": 0.0}
+_LW_TTL = 30.0   # seconds between Redis refreshes
+
+
+async def _get_learned_weights() -> dict[str, float]:
+    now = time.time()
+    if _lw_cache["data"] and (now - _lw_cache["ts"]) < _LW_TTL:
+        return _lw_cache["data"]
+    try:
+        from app.utils.redis_client import cache_get
+        raw = await cache_get(_LEARNED_WEIGHTS_KEY)
+        if raw:
+            _lw_cache.update({"data": json.loads(raw), "ts": now})
+            return _lw_cache["data"]
+    except Exception:
+        pass
+    return {}
 
 DEFAULT_WEIGHTS: dict[str, float] = {
     "technical":  1.0,
@@ -19,11 +44,24 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "memory":     1.3,  # historical precedent carries extra weight in the vote
 }
 
+# Agents that use real-time external data (live news, current macro) — meaningless
+# when replaying a historical day, so excluded entirely in replay mode.
+_REPLAY_SKIP_AGENTS: frozenset[str] = frozenset({"sentiment"})
+
+# In replay, emphasise price-pattern agents; their signals are derived purely
+# from the same OHLCV data the replay session is stepping through.
+_REPLAY_WEIGHT_BOOST: dict[str, float] = {
+    "pattern":   1.5,
+    "technical": 1.2,
+    "momentum":  1.1,
+    "gbm":       1.2,
+}
+
 # Evidence gate: a non-HOLD decision is only allowed to fire if the Pattern
 # Memory bank has enough similar past cases AND they won often enough.
-_MEM_MIN_SAMPLES   = 8
-_MEM_GATE_WINRATE  = 0.50   # below this, veto the trade → HOLD (abstain)
-_MEM_STRONG_WINRATE = 0.65  # above this, actively boost confidence
+_MEM_MIN_SAMPLES    = 8      # need at least this many per-action cases to gate
+_MEM_GATE_WINRATE   = 0.50   # below this, veto the trade → HOLD (abstain)
+_MEM_STRONG_WINRATE = 0.65   # above this, actively boost confidence
 
 
 class EnsembleEngine:
@@ -64,7 +102,11 @@ class EnsembleEngine:
         independently enable/weight-controlled via the model registry."""
 
         reg = await get_registry()
+        learned = await _get_learned_weights()   # weights updated after every trade
+        mode = context.get("mode", "paper")
         active = [a for a in self.agents if is_enabled(reg, a.name)]
+        if mode in ("replay", "backtest"):
+            active = [a for a in active if a.name not in _REPLAY_SKIP_AGENTS]
 
         raw = await asyncio.gather(
             *[a.analyze(symbol, candles, context) for a in active],
@@ -80,9 +122,24 @@ class EnsembleEngine:
                     confidence=0.30, reasoning=f"Error: {result}",
                 ))
             else:
+                # Weight priority: manual registry override > learned from outcomes > hardcoded default.
+                # This means every closed trade nudges the weights, and the next decision
+                # immediately reflects that learning — without any restart.
                 ov = weight_override(reg, result.agent_name)
-                result.weight = ov if ov is not None else self._weights.get(result.agent_name, 1.0)
+                if ov is not None:
+                    result.weight = ov
+                else:
+                    result.weight = learned.get(result.agent_name) or self._weights.get(result.agent_name, 1.0)
                 signals.append(result)
+
+        # ── Replay mode: boost price-pattern agents ─────────────────────────────
+        # In historical replay, only OHLCV-derived agents have valid signals.
+        # Up-weight the ones that were kept so they dominate the vote.
+        if mode in ("replay", "backtest"):
+            for s in signals:
+                boost = _REPLAY_WEIGHT_BOOST.get(s.agent_name)
+                if boost:
+                    s.weight = (s.weight or 1.0) * boost
 
         # ── Regime-aware reweighting ────────────────────────────────────────────
         # The Market-Regime model tilts the vote: trust momentum in trends and
@@ -118,26 +175,36 @@ class EnsembleEngine:
         memory_note = ""
         if mem is not None:
             mi = mem.indicators or {}
-            samples = int(mi.get("sample_count", 0))
-            if samples >= _MEM_MIN_SAMPLES and action in ("BUY", "SELL"):
-                wr = mi.get(f"wr_{action}")
-                if wr is None:
-                    # The bank has cases but none for this action nearby → weak edge
-                    action = "HOLD"
-                    confidence = 0.55
-                    memory_note = f"memory veto: no similar {action} precedent"
-                elif wr < _MEM_GATE_WINRATE:
-                    action = "HOLD"
-                    confidence = 0.55
-                    memory_note = f"memory veto: similar setups won only {wr:.0%}"
-                else:
-                    # Scale confidence by how well this action did historically
-                    boost = 0.85 + 0.45 * max(0.0, wr - 0.5)
-                    confidence = min(0.95, confidence * boost)
-                    if wr >= _MEM_STRONG_WINRATE:
-                        memory_note = f"memory confirms: {wr:.0%} historical win-rate"
+            if action in ("BUY", "SELL"):
+                # Gate fires only when we have at least _MEM_MIN_SAMPLES cases of
+                # this SPECIFIC action — not just total similarity matches. This
+                # prevents the bank from vetoing BUY when it only has 2 BUY precedents
+                # and 25 SELL/HOLD ones. Cold-start (< _MEM_MIN_SAMPLES action cases)
+                # lets the other agents decide unimpeded.
+                n_action = int(mi.get(f"n_{action}", 0))
+                intended_action = action
+                if n_action >= _MEM_MIN_SAMPLES:
+                    wr = mi.get(f"wr_{action}")
+                    if wr is None:
+                        action = "HOLD"
+                        confidence = 0.55
+                        memory_note = f"memory veto: no similar {intended_action} precedent"
+                    elif wr < _MEM_GATE_WINRATE:
+                        action = "HOLD"
+                        confidence = 0.55
+                        memory_note = f"memory veto: similar {intended_action} setups won only {wr:.0%}"
                     else:
-                        memory_note = f"memory ok: {wr:.0%} historical win-rate"
+                        # Scale confidence by how well this action did historically
+                        boost = 0.85 + 0.45 * max(0.0, wr - 0.5)
+                        confidence = min(0.95, confidence * boost)
+                        if wr >= _MEM_STRONG_WINRATE:
+                            memory_note = f"memory confirms: {wr:.0%} {intended_action} win-rate ({n_action} cases)"
+                        else:
+                            memory_note = f"memory ok: {wr:.0%} {intended_action} win-rate ({n_action} cases)"
+                else:
+                    samples = int(mi.get("sample_count", 0))
+                    if samples > 0:
+                        memory_note = f"memory cold-start: only {n_action} {action} cases — gate inactive"
 
         # ── Anomaly / trap veto ─────────────────────────────────────────────────
         # The anomaly model flags abnormal bars (news spikes, illiquid traps). On a

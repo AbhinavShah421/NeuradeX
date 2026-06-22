@@ -9,8 +9,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.consumer import start_consuming
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-logger = logging.getLogger(__name__)
+from app.elk_logger import setup_logging, get_logger
+setup_logging()
+logger = get_logger(__name__)
 
 _pool: asyncpg.Pool | None = None
 _consumer_task: asyncio.Task | None = None

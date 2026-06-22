@@ -11,8 +11,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from .sentiment import sentiment_loop, refresh_all, get_sentiment, get_state
 from . import llm
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-logger = logging.getLogger("sentiment-service")
+from app.elk_logger import setup_logging, get_logger
+setup_logging()
+logger = get_logger("sentiment-service")
 
 _tasks: list[asyncio.Task] = []
 

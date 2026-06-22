@@ -49,7 +49,7 @@ async def _anthropic(prompt: str, temperature: float, max_tokens: int, timeout: 
 
 async def _ollama(prompt: str, temperature: float, timeout: float) -> str | None:
     body = {"model": OLLAMA_MODEL, "messages": [{"role": "user", "content": prompt}],
-            "stream": False, "options": {"temperature": temperature}}
+            "stream": False, "keep_alive": "10m", "options": {"temperature": temperature}}
     async with httpx.AsyncClient(timeout=timeout) as c:
         r = await c.post(f"{OLLAMA_HOST.rstrip('/')}/api/chat", json=body)
         r.raise_for_status()

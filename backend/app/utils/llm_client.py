@@ -75,6 +75,7 @@ async def _ollama_chat(prompt: str, system: str | None, temperature: float,
         "model": settings.LLM_MODEL,
         "messages": messages,
         "stream": False,
+        "keep_alive": "10m",
         "options": {"temperature": temperature},
     }
     async with httpx.AsyncClient(timeout=timeout) as c:
@@ -114,10 +115,27 @@ async def llm_chat(prompt: str, system: str | None = None, *,
         return None
 
 
+import asyncio as _asyncio
+import time as _time
+
+_llm_status_cache: dict = {"ts": 0.0, "data": None}
+_llm_status_lock = _asyncio.Lock()
+_LLM_STATUS_TTL = 300.0  # seconds between actual probes (5 min)
+
+
 async def llm_status(probe: bool = True) -> dict:
-    """Report which provider is active and whether it actually responds."""
+    """Report which provider is active and whether it actually responds.
+
+    Results are cached for 60 s so that frequent polling from the dashboard
+    never causes more than one live probe to run at a time — each Anthropic
+    probe can take up to 8–30 s and was previously exhausting uvicorn workers.
+    """
+    now = _time.monotonic()
+    if probe and _llm_status_cache["data"] is not None and now - _llm_status_cache["ts"] < _LLM_STATUS_TTL:
+        return _llm_status_cache["data"]
+
     provider = resolve_provider()
-    info = {
+    info: dict = {
         "configured_provider": settings.LLM_PROVIDER,
         "active_provider": provider,
         "anthropic_key_present": bool(settings.ANTHROPIC_API_KEY),
@@ -125,12 +143,19 @@ async def llm_status(probe: bool = True) -> dict:
         "ollama_host": settings.LLM_API_URL,
         "available": False,
     }
-    if probe and provider != "off":
-        # When Anthropic is selected, probe it directly so the status tells the
-        # truth about Anthropic itself (vs. the Ollama fallback that llm_chat uses).
+
+    if not probe or provider == "off":
+        return info
+
+    async with _llm_status_lock:
+        # Re-check inside lock — a concurrent waiter may have just refreshed it
+        now = _time.monotonic()
+        if _llm_status_cache["data"] is not None and now - _llm_status_cache["ts"] < _LLM_STATUS_TTL:
+            return _llm_status_cache["data"]
+
         if provider == "anthropic":
             try:
-                a = await _anthropic_chat("Reply with: ok", None, 0.0, 10, 8.0)
+                a = await _anthropic_chat("Reply with: ok", None, 0.0, 10, 3.0)
                 info["anthropic_ok"] = bool(a)
             except Exception as exc:
                 info["anthropic_ok"] = False
@@ -138,9 +163,13 @@ async def llm_status(probe: bool = True) -> dict:
                 info["effective_provider"] = "ollama (fallback)"
         try:
             out = await llm_chat("Reply with exactly: ok", temperature=0.0,
-                                 max_tokens=10, timeout=8.0)
+                                 max_tokens=10, timeout=30.0)
             info["available"] = bool(out)
             info["probe_response"] = (out or "")[:60]
         except Exception as exc:
             info["probe_error"] = str(exc)[:120]
+
+        _llm_status_cache["data"] = info
+        _llm_status_cache["ts"] = _time.monotonic()
+
     return info

@@ -20,7 +20,7 @@ logger = get_logger(__name__)
 _KEY          = "live_session:{}"
 _INDEX        = "live_sessions:index"
 _RUNNING_IDX  = "live_sessions:running"   # only sessions currently in status=running
-_TTL          = 60 * 60 * 36              # keep finished sessions ~36h for review
+_TTL          = 60 * 60 * 8               # keep finished sessions ~8h for review
 
 
 def _k(session_id: str) -> str:
@@ -109,17 +109,10 @@ async def list_running_sessions() -> list[dict]:
         ids = []
 
     if not ids:
-        # Running index is empty or missing — full scan once to rebuild it.
-        all_sessions = await list_sessions()
-        running = [s for s in all_sessions if s.get("status") == "running"]
-        if running:
-            try:
-                r = get_redis()
-                await r.sadd(_RUNNING_IDX, *[s["id"] for s in running])
-                await r.expire(_RUNNING_IDX, _TTL)
-            except Exception:
-                pass
-        return running
+        # Running index is empty — return nothing instead of loading all sessions.
+        # The autopilot will create new sessions when needed; avoiding a full scan
+        # here prevents OOM when thousands of stale sessions accumulate in the index.
+        return []
 
     out: list[dict] = []
     stale: list[str] = []

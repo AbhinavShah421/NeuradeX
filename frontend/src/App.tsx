@@ -15,6 +15,7 @@ import AIAgent from './pages/AIAgent';
 import AIModels from './pages/AIModels';
 import Backtest from './pages/Backtest';
 import PaperTrading from './pages/PaperTrading';
+import LiveTrading from './pages/LiveTrading';
 import PatternMemory from './pages/PatternMemory';
 import ModelRegistry from './pages/ModelRegistry';
 import Orders from './pages/Orders';
@@ -23,7 +24,7 @@ import './styles/globals.css';
 
 const App: React.FC = () => {
   return (
-    <Router basename="/neuradex">
+    <Router basename="/neuradex" future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       <Routes>
         {/* Public routes — no Layout */}
         <Route path="/login" element={<Login />} />
@@ -49,6 +50,7 @@ const App: React.FC = () => {
                     <Route path="models-control" element={<AIModels />} />
                     <Route path="backtest" element={<Backtest />} />
                     <Route path="paper-trading" element={<PaperTrading />} />
+                    <Route path="live-trading" element={<LiveTrading />} />
                     <Route path="memory" element={<PatternMemory />} />
                   </Route>
 

@@ -45,7 +45,8 @@ def grade_rank(g: str) -> int:
 
 class PatternEngine:
     async def signal(self, candles: list[dict], symbol: str | None = None,
-                     with_forecast: bool = False, horizon: int | None = None) -> dict:
+                     with_forecast: bool = False, horizon: int | None = None,
+                     exclude_memory_sources: set | None = None) -> dict:
         """Graded pattern signal for the latest situation in `candles`.
 
         with_forecast=True also attaches a Monte-Carlo path forecast (projected
@@ -69,7 +70,8 @@ class PatternEngine:
         mw = None
         ms = 0
         try:
-            mem = await get_memory().query(fp, symbol=symbol, regime=classify_regime(candles))
+            mem = await get_memory().query(fp, symbol=symbol, regime=classify_regime(candles),
+                                           exclude_sources=exclude_memory_sources)
             buy = (mem.get("per_action") or {}).get("BUY") or {}
             mw = buy.get("win_rate")
             ms = int(buy.get("n", 0))

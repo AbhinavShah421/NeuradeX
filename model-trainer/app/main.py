@@ -16,8 +16,9 @@ from .trainers.rl_trainer import train_rl
 from .trainers.meta_trainer import train_meta_model
 from .trainers.calibration_trainer import train_calibrator
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-logger = logging.getLogger(__name__)
+from app.elk_logger import setup_logging, get_logger
+setup_logging()
+logger = get_logger(__name__)
 
 _background_tasks: list[asyncio.Task] = []
 _last_train_time: datetime | None = None

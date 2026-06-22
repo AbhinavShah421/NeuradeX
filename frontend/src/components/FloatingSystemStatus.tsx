@@ -94,7 +94,7 @@ const FloatingSystemStatus: React.FC = () => {
 
   useEffect(() => {
     refresh();
-    const t = setInterval(refresh, 8_000);
+    const t = setInterval(refresh, 60_000);
     return () => clearInterval(t);
   }, [refresh]);
 

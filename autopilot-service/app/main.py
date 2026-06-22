@@ -4,14 +4,15 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .autopilot import paper_loop, backtest_loop, status, set_mode, kick, reset_cursor
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-logger = logging.getLogger("autopilot")
+from app.elk_logger import setup_logging, get_logger
+setup_logging()
+logger = get_logger("autopilot")
 
 _tasks: list[asyncio.Task] = []
 
@@ -49,7 +50,10 @@ async def get_status():
 @app.post("/control")
 async def control(req: ControlRequest):
     mode = req.mode if req.mode in ("paper", "backtest") else "paper"
-    await set_mode(mode, req.enabled)
+    try:
+        await set_mode(mode, req.enabled)
+    except Exception as exc:
+        raise HTTPException(503, f"Failed to persist mode change to Redis: {exc}")
     if req.enabled:
         # Start the first queue/tick immediately so the toggle feels instant.
         asyncio.create_task(kick(mode))

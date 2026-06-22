@@ -45,6 +45,13 @@ const SUB_NAV = [
     icon: 'memory',
     description: 'What the system has learned from past patterns',
   },
+  {
+    to: '/ai-engine/live-trading',
+    exact: false,
+    label: 'Live Trading',
+    icon: 'bolt',
+    description: 'Real Groww MIS orders — conviction-gated by full AI ensemble',
+  },
 ];
 
 const AIEngineLayout: React.FC = () => {
@@ -125,7 +132,7 @@ const AIEngineLayout: React.FC = () => {
           whiteSpace: 'nowrap',
         }}>
           <span className="material-icons" style={{ fontSize: 13, color: 'var(--nd-green)', flexShrink: 0 }}>fiber_manual_record</span>
-          All modes (Paper · Backtest) feed into the same training pipeline →
+          All modes (Paper · Backtest · Live) feed into the same training pipeline →
           <span style={{ color: 'var(--nd-accent)', fontWeight: 500, flexShrink: 0 }}>model-trainer</span>
           <span style={{ flexShrink: 0 }}>→</span>
           <span style={{ color: 'var(--nd-accent)', fontWeight: 500, flexShrink: 0 }}>MLflow</span>

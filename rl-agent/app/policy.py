@@ -1,6 +1,7 @@
 """Load RL policy from MLflow or use momentum heuristic as fallback."""
 
 import logging
+import time
 from typing import Optional
 import numpy as np
 
@@ -8,10 +9,12 @@ logger = logging.getLogger(__name__)
 
 _model = None
 _model_loaded = False
+_model_loaded_at: float = 0.0
+_MODEL_TTL = 3600.0  # reload from MLflow at most once per hour
 
 
 def _try_load_mlflow(tracking_uri: str, model_name: str) -> bool:
-    global _model, _model_loaded
+    global _model, _model_loaded, _model_loaded_at
     try:
         import mlflow
         mlflow.set_tracking_uri(tracking_uri)
@@ -24,6 +27,7 @@ def _try_load_mlflow(tracking_uri: str, model_name: str) -> bool:
         model_uri = f"models:/{model_name}/{versions[0].version}"
         _model = mlflow.pyfunc.load_model(model_uri)
         _model_loaded = True
+        _model_loaded_at = time.monotonic()
         logger.info("RL policy loaded from MLflow: %s v%s", model_name, versions[0].version)
         return True
     except Exception as exc:
@@ -32,8 +36,12 @@ def _try_load_mlflow(tracking_uri: str, model_name: str) -> bool:
 
 
 def get_policy(tracking_uri: str, model_name: str):
-    global _model, _model_loaded
-    if not _model_loaded:
+    global _model, _model_loaded, _model_loaded_at
+    stale = (time.monotonic() - _model_loaded_at) > _MODEL_TTL
+    if not _model_loaded or stale:
+        if stale and _model_loaded:
+            logger.info("RL policy TTL expired — refreshing from MLflow")
+            _model_loaded = False
         _try_load_mlflow(tracking_uri, model_name)
     return _model
 

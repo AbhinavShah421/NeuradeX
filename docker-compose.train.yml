@@ -1,0 +1,72 @@
+# ── TRAINING MODE (nights / weekends) ─────────────────────────────────────────
+# Maximises ML throughput for off-hours model improvement.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.train.yml up -d
+# Switch back: docker compose -f docker-compose.yml up -d
+
+services:
+
+  # ML — maximum resources for overnight learning
+  model-trainer:
+    deploy:
+      resources:
+        limits:
+          memory: 2048M  # ↑ from 1024M — fit larger batch + pandas frames
+          cpus: '2.0'    # ↑ from 1.0  — full training speed
+
+  rl-agent:
+    deploy:
+      resources:
+        limits:
+          memory: 768M   # ↑ from 384M — hold replay buffer + policy network
+          cpus: '1.0'    # ↑ from 0.5  — faster PPO rollouts
+
+  sentiment-agent:
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+          cpus: '0.75'   # ↑ from 0.5 — FinBERT batch inference for training data
+
+  pattern-agent:
+    deploy:
+      resources:
+        limits:
+          memory: 384M   # ↑ from 256M — pattern extraction across universe
+          cpus: '0.5'    # ↑ from 0.3
+
+  mlflow:
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+          cpus: '0.5'    # ↑ from 0.3 — active experiment tracking
+
+  # Reduced during training — keep data fresh but minimal
+  stock-scanner:
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.1'    # ↓ from 0.3 — just maintain Redis state
+
+  market-data-service:
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.1'    # ↓ from 0.3 — slow tick collection is fine off-hours
+
+  # Observability — reduced (UI not needed during training)
+  kibana:
+    deploy:
+      resources:
+        limits:
+          memory: 512M   # ↓ from 768M
+          cpus: '0.1'    # ↓ from 0.3
+
+  elasticsearch:
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+          cpus: '0.2'    # ↓ from 0.5 — less log traffic off-hours
