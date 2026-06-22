@@ -1,12 +1,15 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from typing import Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 from app.config import settings
 from app.consumer import start_consuming
+from app.finbert_scorer import score_text, aggregate_scores
 
 from app.elk_logger import setup_logging, get_logger
 setup_logging()
@@ -35,6 +38,28 @@ app = FastAPI(title="NeuradeX — Sentiment Agent", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
+class ScoreRequest(BaseModel):
+    headlines: list[str]
+    published_ats: Optional[list[Optional[str]]] = None
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": settings.SERVICE_NAME, "agent": "sentiment"}
+
+
+@app.post("/score")
+async def score_headlines(req: ScoreRequest):
+    """Score a list of headlines with FinBERT. Returns aggregated net_sentiment and per-label scores.
+    Used by the LLM sentiment pipeline for signal blending."""
+    articles = []
+    pub_ats = req.published_ats or [None] * len(req.headlines)
+    for headline, pub_at in zip(req.headlines, pub_ats):
+        try:
+            sc = score_text(headline, settings.FINBERT_MODEL)
+        except Exception:
+            sc = {"positive": 0.33, "negative": 0.33, "neutral": 0.34}
+        articles.append({"raw_text": headline, "source": "headline",
+                         "published_at": pub_at, "scores": sc})
+    agg = aggregate_scores(articles)
+    return {"status": "ok", "data": agg}

@@ -29,6 +29,7 @@ Output schema (written to Redis ai_engine:sentiment:{SYMBOL}):
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -45,6 +46,9 @@ _CACHE_TTL          = 900    # 15 min: don't re-fetch unless stale
 _MIN_REFRESH        = 120    # hard minimum between fetches per symbol (avoid hammering)
 _MAX_HEADLINES      = 6
 _HIST_CACHE_TTL     = 86400  # historical results are immutable — cache 24 h
+
+# FinBERT service URL — blends transformer scores with LLM catalyst analysis.
+_FINBERT_URL = os.getenv("SENTIMENT_AGENT_URL", "http://sentiment-agent:8003")
 
 _HEADERS = {
     "User-Agent": (
@@ -82,6 +86,59 @@ Rules:
 - confidence > 0.7 ONLY for specific, recent, unambiguous company-level events
 - catalyst: the exact event in plain English; empty string "" if no specific catalyst found
 """
+
+
+# ── FinBERT fusion ────────────────────────────────────────────────────────────
+
+async def _finbert_blend(headlines: list[str]) -> float | None:
+    """Call the FinBERT microservice to get a net_sentiment score for headlines.
+
+    Returns net_sentiment in [-1, 1] or None if the service is unreachable.
+    The caller uses this to boost/discount LLM confidence based on whether
+    both models agree on direction — cross-model agreement is a strong signal.
+    """
+    if not headlines:
+        return None
+    try:
+        async with aiohttp.ClientSession() as sess:
+            async with sess.post(
+                f"{_FINBERT_URL}/score",
+                json={"headlines": headlines},
+                timeout=aiohttp.ClientTimeout(total=4),
+            ) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    net = d.get("data", {}).get("net_sentiment")
+                    return float(net) if net is not None else None
+    except Exception as exc:
+        logger.debug("finbert_blend unavailable: %s", exc)
+    return None
+
+
+def _apply_finbert(result: dict, finbert_net: float | None) -> dict:
+    """Adjust LLM result confidence based on FinBERT agreement/disagreement.
+
+    Agreement (+same direction, |net| > 0.1): confidence × 1.15 — two independent
+    models agreeing is a stronger signal than either alone.
+    Disagreement (opposing direction, |net| > 0.15): confidence × 0.80 — models
+    disagree on the fundamental direction, so trust the composite signal less.
+    """
+    if finbert_net is None:
+        return result
+    result = dict(result)
+    llm_pos = result.get("sentiment") == "positive"
+    llm_neg = result.get("sentiment") == "negative"
+    finbert_pos = finbert_net > 0.10
+    finbert_neg = finbert_net < -0.10
+    result["finbert_net"] = round(finbert_net, 3)
+    if (llm_pos and finbert_pos) or (llm_neg and finbert_neg):
+        result["confidence"] = round(min(0.95, result.get("confidence", 0) * 1.15), 3)
+        result["provider"] = result.get("provider", "") + "+finbert_agree"
+    elif (llm_pos and finbert_neg and finbert_net < -0.15) or \
+         (llm_neg and finbert_pos and finbert_net > 0.15):
+        result["confidence"] = round(result.get("confidence", 0) * 0.80, 3)
+        result["provider"] = result.get("provider", "") + "+finbert_disagree"
+    return result
 
 
 # ── News fetchers ─────────────────────────────────────────────────────────────
@@ -231,7 +288,17 @@ async def run_pipeline_for_date(symbol: str, date: str, force: bool = False) -> 
             pass
         return result
 
-    analysis = await analyze_with_llm(sym, headlines)
+    # Run LLM and FinBERT in parallel — both score the same headlines independently.
+    analysis, finbert_net = await asyncio.gather(
+        analyze_with_llm(sym, headlines),
+        _finbert_blend(headlines),
+        return_exceptions=True,
+    )
+    if isinstance(analysis, Exception):
+        analysis = None
+    if isinstance(finbert_net, Exception):
+        finbert_net = None
+
     top3 = headlines[:3]
     if analysis:
         result = {
@@ -247,6 +314,7 @@ async def run_pipeline_for_date(symbol: str, date: str, force: bool = False) -> 
             "date":            date,
             "fetched_at":      time.time(),
         }
+        result = _apply_finbert(result, finbert_net)
     else:
         result = {
             "sentiment": "neutral", "score": 0.0, "confidence": 0.0,
@@ -359,8 +427,16 @@ async def run_pipeline(symbol: str, force: bool = False) -> dict:
             pass
         return result
 
-    # LLM analysis
-    analysis = await analyze_with_llm(sym, headlines)
+    # Run LLM and FinBERT in parallel — both score the same headlines independently.
+    analysis, finbert_net = await asyncio.gather(
+        analyze_with_llm(sym, headlines),
+        _finbert_blend(headlines),
+        return_exceptions=True,
+    )
+    if isinstance(analysis, Exception):
+        analysis = None
+    if isinstance(finbert_net, Exception):
+        finbert_net = None
 
     top3 = headlines[:3]
     if analysis:
@@ -372,10 +448,11 @@ async def run_pipeline(symbol: str, force: bool = False) -> dict:
             "summary":        str(analysis.get("summary",     "") or "").strip(),
             "headlines_count": len(headlines),
             "headlines":      top3,
-            "top_headlines":  top3,   # alias for watchlist/ranked endpoints
+            "top_headlines":  top3,
             "provider":       f"{provider}+llm",
             "fetched_at":     time.time(),
         }
+        result = _apply_finbert(result, finbert_net)
     else:
         result = {
             "sentiment":      "neutral",
@@ -385,7 +462,7 @@ async def run_pipeline(symbol: str, force: bool = False) -> dict:
             "summary":        "LLM analysis unavailable",
             "headlines_count": len(headlines),
             "headlines":      top3,
-            "top_headlines":  top3,   # alias for watchlist/ranked endpoints
+            "top_headlines":  top3,
             "provider":       provider,
             "fetched_at":     time.time(),
         }

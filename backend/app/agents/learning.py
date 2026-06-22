@@ -226,6 +226,25 @@ class LearningSystem:
         except Exception as exc:
             logger.warning("record_outcome failed: %s", exc)
 
+        # Track sentiment-specific accuracy in Redis for dynamic gate calibration.
+        # Stored as HASH ai_engine:sentiment_perf:{BUY|SELL} → {correct, total}.
+        # SentimentAgent reads this to tune confidence/score thresholds at runtime.
+        if row:
+            sent_sig = next((s for s in signals if s.get("agent") == "sentiment"), None)
+            if sent_sig and sent_sig.get("action") in ("BUY", "SELL"):
+                act = sent_sig["action"]
+                is_correct = (act == "BUY" and reward > 0) or (act == "SELL" and reward < 0)
+                try:
+                    from app.utils.redis_client import get_redis
+                    r = get_redis()
+                    key = f"ai_engine:sentiment_perf:{act}"
+                    await r.hincrby(key, "total", 1)
+                    if is_correct:
+                        await r.hincrby(key, "correct", 1)
+                    await r.expire(key, 86400 * 30)   # rolling 30-day window
+                except Exception as exc:
+                    logger.debug("sentiment perf tracking skipped: %s", exc)
+
         # Train the RL agent's Q-table from this outcome (every recorded trade,
         # regardless of caller — sessions, backtests, or the analyze→outcome flow).
         if rl_state is not None and rl_action:
