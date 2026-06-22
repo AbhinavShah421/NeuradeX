@@ -1592,6 +1592,47 @@ async def sentiment_refresh(symbol: str, force: bool = False):
     }
 
 
+@router.post("/sentiment/historical/bulk")
+async def sentiment_historical_bulk(payload: dict):
+    """Pre-fetch historical news sentiment for a list of symbols on a specific date.
+
+    Used by the backtest autopilot before starting a queue: it ranks all candidate
+    symbols by sentiment score for the backtest date so only the most bullish/
+    high-conviction stocks are selected.
+
+    Request body: {"symbols": ["SBIN", "HDFCBANK", ...], "date": "YYYY-MM-DD"}
+    Response: {"data": {"SBIN": {sentiment, score, confidence, catalyst, ...}, ...}}
+    """
+    import asyncio
+    from app.agents.sentiment_pipeline import run_pipeline_for_date
+
+    symbols: list[str] = [s.upper() for s in (payload.get("symbols") or []) if s]
+    date: str = (payload.get("date") or "").strip()
+    if not date or not symbols:
+        return {"status": "error", "detail": "symbols and date are required"}
+
+    async def _fetch(sym: str) -> tuple[str, dict]:
+        try:
+            result = await run_pipeline_for_date(sym, date)
+            return sym, result
+        except Exception as exc:
+            logger.debug("historical sentiment failed for %s/%s: %s", sym, date, exc)
+            return sym, {"sentiment": "neutral", "score": 0.0, "confidence": 0.0,
+                         "catalyst": "", "headlines_count": 0}
+
+    results = await asyncio.gather(*[_fetch(sym) for sym in symbols])
+    data = {sym: res for sym, res in results}
+    return {"status": "success", "date": date, "data": data}
+
+
+@router.get("/sentiment/historical/{symbol}/{date}")
+async def sentiment_historical_read(symbol: str, date: str):
+    """Read (or lazily fetch) cached historical sentiment for a symbol on a given date."""
+    from app.agents.sentiment_pipeline import run_pipeline_for_date
+    result = await run_pipeline_for_date(symbol.upper(), date)
+    return {"status": "success", "data": result}
+
+
 @router.get("/sentiment/{symbol}")
 async def sentiment_read(symbol: str):
     """Read the current cached sentiment for a symbol (no re-fetch)."""

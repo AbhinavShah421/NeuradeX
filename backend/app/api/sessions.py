@@ -215,7 +215,8 @@ def _detail(s: dict) -> dict:
     }
 
 
-async def _ensemble_decision(symbol: str, candles: list[dict], capital: float, position: str, mode: str = "paper"):
+async def _ensemble_decision(symbol: str, candles: list[dict], capital: float, position: str,
+                             mode: str = "paper", date: str | None = None):
     """Run the 7-agent ensemble (+memory gate) on the candles seen so far."""
     from app.agents import get_engine, get_learning
     engine   = get_engine()
@@ -226,7 +227,8 @@ async def _ensemble_decision(symbol: str, candles: list[dict], capital: float, p
             engine.update_weights(weights)
     except Exception:
         pass
-    context = {"symbol": symbol, "capital": capital, "position": position, "mode": mode}
+    context = {"symbol": symbol, "capital": capital, "position": position, "mode": mode,
+               "date": date}  # date is YYYY-MM-DD for replay/backtest; None for paper
     decision = await engine.decide(symbol, candles, context)
     agents = [
         {"agent_name": a.agent_name, "action": a.action,
@@ -302,7 +304,8 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
     conf   = 0.6
     reason = ""
     if not (force_close and pos_status == "LONG"):
-        decision, agents = await _ensemble_decision(symbol, window, s["capital"], pos_status, s.get("mode", "paper"))
+        decision, agents = await _ensemble_decision(symbol, window, s["capital"], pos_status,
+                                                      s.get("mode", "paper"), date=s.get("date"))
         conf, reason, ens_action = decision.confidence, decision.reasoning, decision.action
     else:
         ens_action = "SELL"

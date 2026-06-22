@@ -33,9 +33,14 @@ class SentimentAgent(BaseAgent):
         if len(candles) < 5:
             return AgentSignal(agent_name=self.name, action="HOLD", confidence=0.3,
                                reasoning="Insufficient data")
-        return await self._news_signal(symbol)
+        # In backtest/replay mode use the date-specific cached signal so the ensemble
+        # reflects what the market knew on that day, not today's news.
+        date = None
+        if context.get("mode") in ("backtest", "replay"):
+            date = context.get("date")
+        return await self._news_signal(symbol, date=date)
 
-    async def _news_signal(self, symbol: str) -> AgentSignal:
+    async def _news_signal(self, symbol: str, date: str | None = None) -> AgentSignal:
         abstain = AgentSignal(
             agent_name=self.name, action="HOLD", confidence=0.4,
             reasoning="No strong news catalyst — abstaining",
@@ -43,16 +48,31 @@ class SentimentAgent(BaseAgent):
         )
         try:
             from app.utils.redis_client import cache_get
-            raw = await cache_get(f"ai_engine:sentiment:{symbol.upper()}")
-            if not raw:
-                # No data yet — kick off the pipeline in the background so the
-                # NEXT ensemble call has a real signal to vote on.
-                try:
-                    from app.agents.sentiment_pipeline import run_pipeline
-                    asyncio.create_task(run_pipeline(symbol))
-                except Exception:
-                    pass
-                return abstain
+            sym = symbol.upper()
+            # Use date-specific key for backtest/replay; live key for paper/live.
+            if date:
+                redis_key = f"ai_engine:sentiment:{sym}:{date}"
+                raw = await cache_get(redis_key)
+                if not raw:
+                    # Historical data not pre-fetched yet — kick off a background
+                    # fetch so the NEXT candle has a real signal.
+                    try:
+                        from app.agents.sentiment_pipeline import run_pipeline_for_date
+                        asyncio.create_task(run_pipeline_for_date(sym, date))
+                    except Exception:
+                        pass
+                    return abstain
+            else:
+                raw = await cache_get(f"ai_engine:sentiment:{sym}")
+                if not raw:
+                    # No data yet — kick off the pipeline in the background so the
+                    # NEXT ensemble call has a real signal to vote on.
+                    try:
+                        from app.agents.sentiment_pipeline import run_pipeline
+                        asyncio.create_task(run_pipeline(sym))
+                    except Exception:
+                        pass
+                    return abstain
             d = json.loads(raw)
         except Exception as exc:
             logger.debug("news sentiment read failed for %s: %s", symbol, exc)
@@ -83,6 +103,7 @@ class SentimentAgent(BaseAgent):
                     "source": "news_llm", "sentiment": sentiment,
                     "score": d.get("score"), "catalyst": d.get("catalyst"),
                     "headlines": d.get("headlines_count"), "provider": d.get("provider"),
+                    "date": d.get("date"),  # present for historical signals
                 },
             )
         return abstain

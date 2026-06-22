@@ -394,6 +394,45 @@ async def _save_bt_state(st: dict) -> None:
         logger.debug("bt state save failed: %s", exc)
 
 
+async def _rank_by_historical_sentiment(symbols: list[str], date: str) -> list[str]:
+    """Call the backend's bulk historical-sentiment endpoint and sort symbols by
+    sentiment score for `date`.  Returns symbols ordered: bullish first (score ↓),
+    neutral in the middle, bearish last.  Falls back to the original order on error.
+
+    This lets the autopilot train agents on the stocks that actually had news
+    catalysts on the backtest date — meaning the sentiment agent (which reads
+    ai_engine:sentiment:{SYM}:{DATE}) will produce non-trivial signals during the
+    replay, giving more meaningful training data.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as c:
+            r = await c.post(
+                f"{BACKEND_URL}/api/ai-engine/sentiment/historical/bulk",
+                json={"symbols": symbols, "date": date},
+            )
+            if r.status_code != 200:
+                logger.debug("historical sentiment bulk returned %s", r.status_code)
+                return symbols
+        data: dict[str, dict] = r.json().get("data") or {}
+        def _score(sym: str) -> float:
+            d = data.get(sym, {})
+            raw_score = float(d.get("score", 0) or 0)
+            # Treat truly empty results (0 headlines) as neutral 0 so they
+            # don't falsely outrank stocks with weak-but-real signals.
+            if int(d.get("headlines_count", 0)) == 0:
+                return 0.0
+            return raw_score
+        ranked = sorted(symbols, key=_score, reverse=True)  # highest score first
+        logger.info(
+            "Historical sentiment ranking for %s: top=%s (score=%.2f), bottom=%s (score=%.2f)",
+            date, ranked[0], _score(ranked[0]), ranked[-1], _score(ranked[-1]),
+        )
+        return ranked
+    except Exception as exc:
+        logger.warning("historical sentiment ranking failed for %s: %s", date, exc)
+        return symbols
+
+
 async def _do_backtest_step() -> None:
     # Never compete with paper trading: outside the allowed window (i.e. from the
     # 09:00 morning cutoff until the post-close evening resume), close any running
@@ -416,9 +455,14 @@ async def _do_backtest_step() -> None:
     if not queue:
         # Use the fixed training universe (not the live watchlist) so stock
         # selection doesn't carry look-ahead bias from today's conviction picks.
-        # Shuffle so every run gives different stocks, exposing all universe
-        # members evenly over time.
-        syms = random.sample(_BT_UNIVERSE, min(BT_MAX, len(_BT_UNIVERSE)))
+        # Rank the full universe by historical sentiment for the cursor date so
+        # the most bullish/catalyst-backed names come first.  Then take the top
+        # BT_MAX — i.e. we always train on stocks that actually had a news event
+        # that day, giving the sentiment agent meaningful signals to learn from.
+        candidate_pool = list(_BT_UNIVERSE)
+        random.shuffle(candidate_pool)  # break ties randomly between equal scores
+        ranked = await _rank_by_historical_sentiment(candidate_pool, cursor)
+        syms = ranked[:BT_MAX]
         ids: list[str] = []
         for sym in syms:
             sid = await _start_session({

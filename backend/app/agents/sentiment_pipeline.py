@@ -41,9 +41,10 @@ from app.utils.llm_client import llm_chat
 
 logger = get_logger(__name__)
 
-_CACHE_TTL   = 900    # 15 min: don't re-fetch unless stale
-_MIN_REFRESH = 120    # hard minimum between fetches per symbol (avoid hammering)
-_MAX_HEADLINES = 6
+_CACHE_TTL          = 900    # 15 min: don't re-fetch unless stale
+_MIN_REFRESH        = 120    # hard minimum between fetches per symbol (avoid hammering)
+_MAX_HEADLINES      = 6
+_HIST_CACHE_TTL     = 86400  # historical results are immutable — cache 24 h
 
 _HEADERS = {
     "User-Agent": (
@@ -145,6 +146,127 @@ async def fetch_headlines(symbol: str, max_items: int = _MAX_HEADLINES) -> tuple
         return combined[:max_items], f"{provider}+{prov2}"
 
     return headlines, provider
+
+
+async def fetch_headlines_for_date(symbol: str, date: str,
+                                   max_items: int = _MAX_HEADLINES) -> tuple[list[str], str]:
+    """Fetch headlines published on or around `date` (YYYY-MM-DD).
+
+    Uses Google News RSS date-range operators so results reflect what the market
+    knew on that specific trading day, not today's news.  The window is
+    [date-1, date+1] so we capture pre-market news as well as same-day items.
+    Falls back to the live feed (no date filter) if the dated query returns nothing —
+    this handles very recent dates where date-range indexing isn't complete yet.
+    """
+    from datetime import datetime, timedelta
+    try:
+        d = datetime.strptime(date, "%Y-%m-%d")
+        after  = (d - timedelta(days=1)).strftime("%Y-%m-%d")
+        before = (d + timedelta(days=1)).strftime("%Y-%m-%d")
+    except ValueError:
+        return await fetch_headlines(symbol, max_items)
+
+    # Google News date-range query
+    query = f"{symbol}+NSE+stock+India+after:{after}+before:{before}"
+    url   = f"https://news.google.com/rss/search?q={query}&hl=en-IN&gl=IN&ceid=IN:en"
+    try:
+        async with aiohttp.ClientSession(headers=_HEADERS) as sess:
+            async with sess.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                if r.status == 200:
+                    text = await r.text()
+                    root  = ET.fromstring(text)
+                    items = root.findall(".//item")[:max_items]
+                    out   = []
+                    for item in items:
+                        title = (item.findtext("title") or "").strip()
+                        title = re.sub(r"\s+[-–]\s+\S.*$", "", title).strip()
+                        if title:
+                            out.append(title)
+                    if len(out) >= 2:
+                        return out, "google_news_dated"
+    except Exception as exc:
+        logger.debug("google_news_dated fetch failed for %s on %s: %s", symbol, date, exc)
+
+    # Fallback: undated live feed (still better than nothing)
+    return await fetch_headlines(symbol, max_items)
+
+
+async def run_pipeline_for_date(symbol: str, date: str, force: bool = False) -> dict:
+    """Fetch news for a specific past date, run LLM, cache in a date-keyed Redis key.
+
+    Key: ai_engine:sentiment:{SYMBOL}:{DATE}  (24-h TTL — historical data is immutable)
+
+    This is the entry point for backtest/replay historical sentiment pre-fetching.
+    The SentimentAgent reads this key (via context["date"]) during ensemble calls
+    when the session mode is replay or backtest.
+    """
+    sym = symbol.upper()
+    redis_key = f"ai_engine:sentiment:{sym}:{date}"
+
+    try:
+        from app.utils.redis_client import cache_get, cache_set
+    except Exception:
+        return {"status": "error", "detail": "redis unavailable"}
+
+    if not force:
+        try:
+            raw = await cache_get(redis_key)
+            if raw:
+                return json.loads(raw)
+        except Exception:
+            pass
+
+    headlines, provider = await fetch_headlines_for_date(sym, date)
+
+    if not headlines:
+        result: dict = {
+            "sentiment": "neutral", "score": 0.0, "confidence": 0.0,
+            "catalyst": "", "summary": "No headlines found for this date",
+            "headlines_count": 0, "headlines": [], "top_headlines": [],
+            "provider": provider, "date": date, "fetched_at": time.time(),
+        }
+        try:
+            await cache_set(redis_key, json.dumps(result), expire=_HIST_CACHE_TTL)
+        except Exception:
+            pass
+        return result
+
+    analysis = await analyze_with_llm(sym, headlines)
+    top3 = headlines[:3]
+    if analysis:
+        result = {
+            "sentiment":       str(analysis.get("sentiment", "neutral")).lower(),
+            "score":           float(analysis.get("score",      0) or 0),
+            "confidence":      float(analysis.get("confidence", 0) or 0),
+            "catalyst":        str(analysis.get("catalyst",    "") or "").strip(),
+            "summary":         str(analysis.get("summary",     "") or "").strip(),
+            "headlines_count": len(headlines),
+            "headlines":       top3,
+            "top_headlines":   top3,
+            "provider":        f"{provider}+llm",
+            "date":            date,
+            "fetched_at":      time.time(),
+        }
+    else:
+        result = {
+            "sentiment": "neutral", "score": 0.0, "confidence": 0.0,
+            "catalyst": "", "summary": "LLM analysis unavailable",
+            "headlines_count": len(headlines), "headlines": top3, "top_headlines": top3,
+            "provider": provider, "date": date, "fetched_at": time.time(),
+        }
+
+    try:
+        await cache_set(redis_key, json.dumps(result), expire=_HIST_CACHE_TTL)
+    except Exception as exc:
+        logger.warning("historical sentiment cache_set failed for %s/%s: %s", sym, date, exc)
+
+    logger.info(
+        "Historical sentiment: %s @ %s → %s (score %.2f, conf %.2f, %d headlines)",
+        sym, date, result["sentiment"], result["score"], result["confidence"],
+        len(headlines),
+        extra={"log_type": "ai_engine", "event": "historical_sentiment_pipeline"},
+    )
+    return result
 
 
 # ── LLM analysis ─────────────────────────────────────────────────────────────
