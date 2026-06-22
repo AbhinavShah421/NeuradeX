@@ -50,10 +50,10 @@ PAPER_TICK  = int(os.getenv("AUTOPILOT_TICK_SECS", "60"))
 # sessions hold longer than this. 0 = disabled (positions exit on the normal
 # intraday/ensemble rules + end-of-day square-off).
 MAX_HOLD_MIN = int(os.getenv("AUTOPILOT_MAX_HOLD_MINUTES", "0"))
-BT_SPEED    = int(os.getenv("AUTOPILOT_BACKTEST_SPEED", "1"))      # 1x — dense, real-like
-BT_MAX      = int(os.getenv("AUTOPILOT_BACKTEST_MAX", "15"))       # sessions per day queue
-BT_POLL     = int(os.getenv("AUTOPILOT_BACKTEST_POLL", "15"))      # seconds between queue checks
-BT_DAYS_BACK = int(os.getenv("AUTOPILOT_BACKTEST_MAX_DAYS_BACK", "30"))  # how far back, then wrap
+BT_SPEED      = int(os.getenv("AUTOPILOT_BACKTEST_SPEED", "1"))        # 1x — dense, real-like
+BT_BATCH_SIZE = int(os.getenv("AUTOPILOT_BACKTEST_BATCH_SIZE", "7"))    # concurrent sessions per batch
+BT_POLL       = int(os.getenv("AUTOPILOT_BACKTEST_POLL", "15"))         # seconds between queue checks
+BT_DAYS_BACK  = int(os.getenv("AUTOPILOT_BACKTEST_MAX_DAYS_BACK", "90"))  # how far back, then wrap
 
 # Fixed training universe for the backtest autopilot.
 # Using today's live watchlist to replay historical dates is look-ahead bias —
@@ -477,6 +477,21 @@ async def _rank_by_historical_sentiment(symbols: list[str], date: str) -> list[s
         return symbols
 
 
+async def _start_batch(syms: list[str], cursor: str) -> list[str]:
+    """Start up to BT_BATCH_SIZE sessions for `syms` on `cursor`. Returns started IDs."""
+    ids: list[str] = []
+    for sym in syms[:BT_BATCH_SIZE]:
+        sid = await _start_session({
+            "mode": "backtest", "symbol": sym, "date": cursor,
+            "start_time": "09:15", "capital": CAPITAL, "speed": BT_SPEED,
+            "max_hold_minutes": MAX_HOLD_MIN,
+        })
+        if sid:
+            ids.append(sid)
+        await asyncio.sleep(0.4)
+    return ids
+
+
 async def _do_backtest_step() -> None:
     # Never compete with paper trading: outside the allowed window (i.e. from the
     # 09:00 morning cutoff until the post-close evening resume), close any running
@@ -493,33 +508,21 @@ async def _do_backtest_step() -> None:
     st.setdefault("cursor", cursor)
     st.setdefault("completed_days", 0)
     st.setdefault("days_back", 0)
-    queue = st.get("queue") or []
+    queue            = st.get("queue") or []
+    syms_remaining   = st.get("symbols_remaining") or []
+    batch_idx        = st.get("batch_idx", 0)
 
-    # No active queue → start one for the cursor day.
-    if not queue:
-        # Use the fixed training universe (not the live watchlist) so stock
-        # selection doesn't carry look-ahead bias from today's conviction picks.
-        # Rank the full universe by historical sentiment for the cursor date so
-        # the most bullish/catalyst-backed names come first.  Then take the top
-        # BT_MAX — i.e. we always train on stocks that actually had a news event
-        # that day, giving the sentiment agent meaningful signals to learn from.
+    # ── No active batch AND no pending symbols → fresh day ────────────────────
+    if not queue and not syms_remaining:
+        # Rank the full universe by historical sentiment so the most
+        # catalyst-backed stocks come first within each batch.
         candidate_pool = list(_BT_UNIVERSE)
-        random.shuffle(candidate_pool)  # break ties randomly between equal scores
+        random.shuffle(candidate_pool)
         ranked = await _rank_by_historical_sentiment(candidate_pool, cursor)
-        syms = ranked[:BT_MAX]
-        ids: list[str] = []
-        for sym in syms:
-            sid = await _start_session({
-                "mode": "backtest", "symbol": sym, "date": cursor,
-                "start_time": "09:15", "capital": CAPITAL, "speed": BT_SPEED,
-                "max_hold_minutes": MAX_HOLD_MIN,
-            })
-            if sid:
-                ids.append(sid)
-            await asyncio.sleep(0.4)
 
+        ids = await _start_batch(ranked, cursor)
         if not ids:
-            # Holiday / no intraday data for that day → skip straight to the day before.
+            # Holiday / no data → skip to the previous trading day.
             st["cursor"] = _prev_trading_day(cursor)
             st["days_back"] = st.get("days_back", 0) + 1
             if st["days_back"] >= BT_DAYS_BACK:
@@ -528,34 +531,71 @@ async def _do_backtest_step() -> None:
             await _save_bt_state(st)
             return
 
-        st.update({"queue": ids, "queue_date": cursor, "queue_total": len(ids),
-                   "queue_pending": len(ids), "started_at": _now_ist().isoformat()})
+        remaining = ranked[BT_BATCH_SIZE:]   # symbols not yet batched
+        total = len(ranked)
+        st.update({
+            "queue": ids, "queue_date": cursor,
+            "queue_total": total, "queue_pending": len(ids),
+            "symbols_remaining": remaining, "batch_idx": 1,
+            "started_at": _now_ist().isoformat(),
+        })
         await _save_bt_state(st)
-        logger.info("backtest autopilot started queue for %s (%d sessions)", cursor, len(ids))
+        logger.info(
+            "backtest %s — batch 1/%d started (%d sessions, %d remaining)",
+            cursor, -(-total // BT_BATCH_SIZE), len(ids), len(remaining),
+        )
         return
 
-    # Active queue → poll for completion using the lightweight statuses endpoint.
-    status_by_id = await _session_statuses()
-    pending = [sid for sid in queue if status_by_id.get(sid, "done") == "running"]
-    st["queue_pending"] = len(pending)
-    if pending:
-        await _save_bt_state(st)
-        return
+    # ── Active batch → poll for completion ────────────────────────────────────
+    if queue:
+        status_by_id = await _session_statuses()
+        pending = [sid for sid in queue if status_by_id.get(sid, "done") == "running"]
+        st["queue_pending"] = len(pending)
+        if pending:
+            await _save_bt_state(st)
+            return
 
-    # Queue done → step back to the previous trading day (wrap at the floor).
+        # Batch done — start the next one if symbols remain.
+        if syms_remaining:
+            ids = await _start_batch(syms_remaining, cursor)
+            remaining = syms_remaining[BT_BATCH_SIZE:]
+            batch_idx += 1
+            total = st.get("queue_total", len(_BT_UNIVERSE))
+            n_batches = -(-total // BT_BATCH_SIZE)
+            st.update({
+                "queue": ids, "queue_pending": len(ids),
+                "symbols_remaining": remaining, "batch_idx": batch_idx,
+            })
+            await _save_bt_state(st)
+            logger.info(
+                "backtest %s — batch %d/%d started (%d sessions, %d remaining)",
+                cursor, batch_idx, n_batches, len(ids), len(remaining),
+            )
+            return
+
+        # All batches for this date done → advance cursor.
+        st["queue"] = []
+        st["queue_pending"] = 0
+
+    # ── All batches complete → step back to previous trading day ──────────────
     done_date = st.get("queue_date", cursor)
     days_back = st.get("days_back", 0) + 1
     next_cursor = _prev_trading_day(done_date)
     if days_back >= BT_DAYS_BACK:
         next_cursor = _prev_trading_day(_today())
         days_back = 0
-    st.update({"cursor": next_cursor, "queue": [], "queue_pending": 0, "started_at": None,
-               "completed_days": st.get("completed_days", 0) + 1,
-               "last_completed": done_date, "days_back": days_back})
+    total_batches = -(-st.get("queue_total", 1) // BT_BATCH_SIZE)
+    st.update({
+        "cursor": next_cursor, "queue": [], "queue_pending": 0,
+        "symbols_remaining": [], "batch_idx": 0, "started_at": None,
+        "completed_days": st.get("completed_days", 0) + 1,
+        "last_completed": done_date, "days_back": days_back,
+    })
     await _save_bt_state(st)
-    logger.info("backtest autopilot finished %s → next %s (day %d)", done_date, next_cursor, st["completed_days"])
-    # Backtesting also drives the dedicated pattern-recognition model: each
-    # completed day, retrain it on patterns only so the recogniser keeps learning.
+    logger.info(
+        "backtest finished %s (%d batches of %d) → next %s (day %d)",
+        done_date, total_batches, BT_BATCH_SIZE, next_cursor, st["completed_days"],
+    )
     await _train_pattern_model()
 
 
@@ -660,13 +700,17 @@ async def status() -> dict:
         },
         "backtest": {
             "enabled": await _flag(BACKTEST_FLAG),
-            "active_window": _backtest_allowed(),   # False = paused for paper-trading hours
+            "active_window": _backtest_allowed(),
             "running": len(bt_running),
             "speed": BT_SPEED,
+            "batch_size": BT_BATCH_SIZE,
             "cursor": st.get("cursor") or _prev_trading_day(_today()),
             "queue_date": st.get("queue_date"),
             "queue_total": st.get("queue_total", 0),
             "queue_pending": st.get("queue_pending", 0),
+            "batch_idx": st.get("batch_idx", 0),
+            "batches_total": -(-st.get("queue_total", 1) // BT_BATCH_SIZE) if st.get("queue_total") else 0,
+            "symbols_remaining": len(st.get("symbols_remaining") or []),
             "completed_days": st.get("completed_days", 0),
             "last_completed": st.get("last_completed"),
             "universe_size": len(_BT_UNIVERSE),
