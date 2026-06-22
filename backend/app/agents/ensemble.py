@@ -44,12 +44,16 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "memory":     1.3,  # historical precedent carries extra weight in the vote
 }
 
-# Agents that use real-time external data (live news, current macro) — meaningless
-# when replaying a historical day, so excluded entirely in replay mode.
-_REPLAY_SKIP_AGENTS: frozenset[str] = frozenset({"sentiment"})
+# Agents that require real-time data with no historical equivalent.
+# Sentiment IS included in replay/backtest — it reads a date-keyed Redis key
+# (ai_engine:sentiment:{sym}:{date}) pre-fetched by the autopilot's historical
+# sentiment ranking, and falls back to a background Google News dated-query fetch
+# on the first candle so the next call has a real signal.
+_REPLAY_SKIP_AGENTS: frozenset[str] = frozenset()
 
-# In replay, emphasise price-pattern agents; their signals are derived purely
-# from the same OHLCV data the replay session is stepping through.
+# In replay/backtest, emphasise price-pattern agents whose signals are derived
+# purely from OHLCV data; keep sentiment at its normal weight since it now uses
+# date-specific news, not today's feed.
 _REPLAY_WEIGHT_BOOST: dict[str, float] = {
     "pattern":   1.5,
     "technical": 1.2,
