@@ -15,6 +15,7 @@ class ProviderConfigUpdate(BaseModel):
     order:    Optional[list[str]] = None   # priority order of provider names
     disabled: Optional[list[str]] = None   # providers to skip
     keys:     Optional[dict] = None         # e.g. {"alphavantage": "KEY"}
+    primary:  Optional[str] = None          # "auto" | "groww" | "yahoo" — forced primary
 
 
 @router.get("/providers")

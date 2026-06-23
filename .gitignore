@@ -100,6 +100,9 @@ credentials/
 *.sqlite3
 *.sql.gz
 data/
+# …but backend/app/data/ is application source code, not a dataset dir — keep it.
+!backend/app/data/
+!backend/app/data/**/*.py
 mlruns/
 mlflow.db
 

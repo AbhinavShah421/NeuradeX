@@ -1033,7 +1033,7 @@ class ApiService {
   }
 
   async updateProviderSettings(payload: {
-    order?: string[]; disabled?: string[]; keys?: Record<string, string>;
+    order?: string[]; disabled?: string[]; keys?: Record<string, string>; primary?: string;
   }): Promise<ApiResponse<any>> {
     const response = await this.api.put('/api/settings/providers', payload);
     return response.data;

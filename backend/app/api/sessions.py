@@ -630,23 +630,27 @@ async def _advance_paper(s: dict) -> None:
         #   3. none → Yahoo's current-minute candle (already near real-time)
         ltp = 0.0
         src = "yahoo_live"
-        from app.utils.angel_client import angel_get_ltp
-        a_ltp = angel_get_ltp(symbol)
-        if a_ltp > 0:
-            ltp = a_ltp
-            src = "angel_live"
-            pt._accumulate_tick(symbol, ltp, ts)
-        elif not s.get("_groww_live_off"):
-            ltp = await _try_groww_ltp(symbol)
-            if ltp > 0:
-                src = "groww_live"
+        # Honour the user's primary data-provider choice. 'yahoo' forces the
+        # pure-Yahoo path (no broker overlays); 'groww' skips the Angel feed.
+        primary = await pt._get_primary()
+        if primary != "yahoo":
+            from app.utils.angel_client import angel_get_ltp
+            a_ltp = angel_get_ltp(symbol) if primary != "groww" else 0.0
+            if a_ltp > 0:
+                ltp = a_ltp
+                src = "angel_live"
                 pt._accumulate_tick(symbol, ltp, ts)
-                s["_groww_live_fails"] = 0
-            else:
-                fails = int(s.get("_groww_live_fails") or 0) + 1
-                s["_groww_live_fails"] = fails
-                if fails >= 3:
-                    s["_groww_live_off"] = True   # no live-data → use Yahoo only
+            elif not s.get("_groww_live_off"):
+                ltp = await _try_groww_ltp(symbol)
+                if ltp > 0:
+                    src = "groww_live"
+                    pt._accumulate_tick(symbol, ltp, ts)
+                    s["_groww_live_fails"] = 0
+                else:
+                    fails = int(s.get("_groww_live_fails") or 0) + 1
+                    s["_groww_live_fails"] = fails
+                    if fails >= 3:
+                        s["_groww_live_off"] = True   # no live-data → use Yahoo only
         # Refresh the Yahoo base every poll — _get_yahoo_cached has its own 15s TTL,
         # so this only hits Yahoo's API when the cache is stale. Without this the
         # base was fetched once per symbol and never again, freezing each session's

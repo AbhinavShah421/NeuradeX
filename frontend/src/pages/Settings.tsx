@@ -19,9 +19,17 @@ const PROVIDER_META: Record<string, { label: string; note: string }> = {
   alphavantage: { label: 'Alpha Vantage', note: 'Free API key (rate-limited). BSE prices used as an NSE fallback.' },
 };
 
+const PRIMARY_OPTIONS: { id: string; label: string; icon: string; note: string }[] = [
+  { id: 'auto',  label: 'Auto',          icon: 'auto_mode',     note: 'Use the priority order below — first source with data wins.' },
+  { id: 'groww', label: 'Groww',         icon: 'account_balance', note: 'Force Groww as the source everywhere (needs a live token).' },
+  { id: 'yahoo', label: 'Yahoo Finance', icon: 'public',        note: 'Force Yahoo everywhere — free, reliable, ~1–2 min delay.' },
+];
+
 const Settings: React.FC = () => {
   const [rows, setRows] = useState<ProviderRow[]>([]);
   const [keys, setKeys] = useState<Record<string, string>>({});
+  const [primary, setPrimary] = useState<string>('auto');
+  const [primarySaving, setPrimarySaving] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -32,12 +40,33 @@ const Settings: React.FC = () => {
       const res = await apiService.getProviderSettings();
       const d = (res as any).data;
       setRows(d?.providers ?? []);
+      setPrimary(d?.primary ?? 'auto');
     } catch {
       setMsg('Could not load settings');
     } finally {
       setLoading(false);
     }
   }, []);
+
+  const pickPrimary = async (id: string) => {
+    if (id === primary || primarySaving) return;
+    const prev = primary;
+    setPrimary(id);                 // optimistic
+    setPrimarySaving(id);
+    setMsg(null);
+    try {
+      const res = await apiService.updateProviderSettings({ primary: id });
+      const d = (res as any).data;
+      if (d?.providers) setRows(d.providers);
+      if (d?.primary) setPrimary(d.primary);
+      setMsg('✓ Data provider updated');
+    } catch (e: any) {
+      setPrimary(prev);            // revert on failure
+      setMsg(e?.response?.data?.detail || 'Could not update data provider');
+    } finally {
+      setPrimarySaving(null);
+    }
+  };
 
   useEffect(() => { load(); }, [load]);
 
@@ -80,12 +109,46 @@ const Settings: React.FC = () => {
         <h1 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: 'var(--nd-text-1)' }}>Settings</h1>
       </div>
 
+      {/* Primary data-provider selector — applies system-wide */}
+      <div style={{ ...card, marginBottom: 16 }}>
+        <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--nd-text-1)', marginBottom: 4 }}>Data Provider</div>
+        <p style={{ margin: '0 0 14px', fontSize: 13, lineHeight: 1.6, color: 'var(--nd-text-2)' }}>
+          Choose which source the whole system uses for prices and candles — paper trading, backtests,
+          charts and the watchlist. Changes apply immediately.
+        </p>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          {PRIMARY_OPTIONS.map(opt => {
+            const active = primary === opt.id;
+            return (
+              <button key={opt.id} onClick={() => pickPrimary(opt.id)} disabled={!!primarySaving}
+                style={{
+                  flex: '1 1 180px', textAlign: 'left', cursor: primarySaving ? 'wait' : 'pointer',
+                  border: `1.5px solid ${active ? 'var(--nd-green)' : 'var(--nd-border)'}`,
+                  background: active ? 'rgba(16,185,129,0.08)' : 'var(--nd-bg)',
+                  borderRadius: 10, padding: '12px 14px', transition: 'all 0.15s',
+                }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                  <span className="material-icons" style={{ fontSize: 18, color: active ? 'var(--nd-green)' : 'var(--nd-text-3)' }}>{opt.icon}</span>
+                  <span style={{ fontSize: 14, fontWeight: 700, color: active ? 'var(--nd-green)' : 'var(--nd-text-1)' }}>{opt.label}</span>
+                  {primarySaving === opt.id
+                    ? <span className="material-icons nd-spin" style={{ fontSize: 15, color: 'var(--nd-text-3)', marginLeft: 'auto' }}>autorenew</span>
+                    : active && <span className="material-icons" style={{ fontSize: 17, color: 'var(--nd-green)', marginLeft: 'auto' }}>check_circle</span>}
+                </div>
+                <div style={{ fontSize: 11.5, color: 'var(--nd-text-3)', lineHeight: 1.45 }}>{opt.note}</div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       <div style={{ ...card }}>
-        <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--nd-text-1)', marginBottom: 4 }}>Market Data Providers</div>
+        <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--nd-text-1)', marginBottom: 4 }}>Provider Priority &amp; Keys</div>
         <p style={{ margin: '0 0 16px', fontSize: 13, lineHeight: 1.6, color: 'var(--nd-text-2)' }}>
-          The system fetches trading data from these sources <strong>in order</strong> — the first one that returns
-          real data wins. Reorder by priority, enable/disable, and add API keys. If your top source is down or
-          rate-limited, the next is used automatically.
+          When the data provider is set to <strong>Auto</strong>, the system fetches from these sources
+          <strong> in order</strong> — the first one that returns real data wins. Reorder by priority,
+          enable/disable, and add API keys. {primary !== 'auto' && (
+            <span style={{ color: '#f59e0b' }}>Currently overridden — <strong>{primary}</strong> is forced as the primary source.</span>
+          )}
         </p>
 
         {loading ? (

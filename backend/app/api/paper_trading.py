@@ -319,18 +319,32 @@ async def _fetch_candles_groww(
     return [], "no_data"
 
 
+async def _get_primary() -> str:
+    """The user-selected primary data provider ('auto' | 'groww' | 'yahoo').
+    Read from the shared provider config so the choice applies system-wide."""
+    try:
+        from app.data.providers import get_primary_provider
+        return await get_primary_provider()
+    except Exception:
+        return "auto"
+
+
 async def _fetch_candles_for_start(symbol: str, up_to_time: str) -> tuple[list, str]:
     """Initial session bootstrap.
 
-    Priority:
-      1. Groww historical (works for past dates; usually empty for today's live session)
-      2. Yahoo Finance — provides today's complete 1-min history from 09:15 IST
-      3. Tick candles built from LTP polls (accumulated since backend started)
+    Honours the user's primary data-provider choice:
+      • 'yahoo' → Yahoo only (skip Groww)
+      • 'groww'/'auto' → Groww historical first, then Yahoo
+    Yahoo provides today's complete 1-min history from 09:15 IST; Groww historical
+    is usually empty for the in-progress day, so Yahoo is the live-day workhorse.
     """
-    # 1. Groww historical
-    candles, src = await _fetch_candles_groww(symbol, up_to_time, (5, 10, 15, 30, 60, 3, 2, 1))
-    if candles:
-        return candles, src
+    primary = await _get_primary()
+
+    # 1. Groww historical (skipped when the user forces Yahoo)
+    if primary != "yahoo":
+        candles, src = await _fetch_candles_groww(symbol, up_to_time, (5, 10, 15, 30, 60, 3, 2, 1))
+        if candles:
+            return candles, src
 
     # 2. Yahoo Finance for today's intraday history
     yahoo = await _get_yahoo_cached(symbol, up_to_time)
