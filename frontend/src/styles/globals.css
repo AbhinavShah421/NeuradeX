@@ -630,16 +630,15 @@ input[type=range] { accent-color: var(--nd-green); }
 
 /* ── Orders page ─────────────────────────────────────────────────────────────── */
 .nd-orders-page {
-  padding: 24px 32px;
-  max-width: 1200px;
-  margin: 0 auto;
+  /* .nd-main already caps width at 1280 with a 24px gutter — don't add an extra
+     max-width/padding on top, so the body aligns with the navbar and ticker. */
+  width: 100%;
 }
 .nd-orders-stats {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
 }
 @media (max-width: 768px) {
-  .nd-orders-page  { padding: 16px 12px; }
   .nd-orders-stats { grid-template-columns: repeat(2, 1fr); }
 }
 @media (max-width: 480px) {

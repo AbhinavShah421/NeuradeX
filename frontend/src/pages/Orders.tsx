@@ -382,7 +382,7 @@ const Orders: React.FC = () => {
   const [sortDir,  setSortDir]  = useState<'asc' | 'desc'>('desc');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(1);
-  const PAGE_SIZE = 50;
+  const [pageSize, setPageSize] = useState(50);
   const [lessons,     setLessons]     = useState<any[]>([]);
   const [postmortems, setPostmortems] = useState<any[]>([]);
   const [lossBusy,    setLossBusy]    = useState(false);
@@ -513,9 +513,9 @@ const Orders: React.FC = () => {
 
   // ── Pagination — filters/sort are applied to ALL sessions first, then we show
   //    one page (PAGE_SIZE) of the result. ──────────────────────────────────────
-  const totalPages = Math.max(1, Math.ceil(visibleSessions.length / PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil(visibleSessions.length / pageSize));
   const safePage = Math.min(page, totalPages);
-  const pagedSessions = visibleSessions.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+  const pagedSessions = visibleSessions.slice((safePage - 1) * pageSize, safePage * pageSize);
 
   const totalTrades  = stats?.tradeStats?.reduce((s, r) => s + Number(r.count), 0) ?? 0;
   const winningTrades = stats?.tradeStats?.find(r => r.outcome === 'WIN')?.count ?? 0;
@@ -715,18 +715,26 @@ const Orders: React.FC = () => {
         </div>
       )}
 
-      {/* Filter pills */}
+      {/* Filter bar: mode dropdown + Filters toggle + pagination (right) */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap', alignItems: 'center' }}>
-        {(['ALL', 'LIVE', 'PAPER', 'BACKTEST', 'REPLAY'] as const).map(f => (
-          <button key={f} onClick={() => setFilter(f)}
-            style={{ padding: '5px 14px', borderRadius: 20, border: '1px solid var(--nd-border)', cursor: 'pointer', fontSize: 12, fontWeight: 500, transition: 'all 0.15s',
-              background: filter === f ? (modeColor[f] ?? 'var(--nd-accent)') : 'var(--nd-surface)',
-              color: filter === f ? '#fff' : 'var(--nd-text-2)',
-              borderColor: filter === f ? (modeColor[f] ?? 'var(--nd-accent)') : 'var(--nd-border)',
-            }}>
-            {f}
-          </button>
-        ))}
+        <select
+          value={filter}
+          onChange={e => setFilter(e.target.value as any)}
+          title="Filter by trade mode"
+          style={{
+            padding: '6px 12px', borderRadius: 20, cursor: 'pointer',
+            fontSize: 12, fontWeight: 600,
+            border: `1px solid ${filter !== 'ALL' ? (modeColor[filter] ?? 'var(--nd-accent)') : 'var(--nd-border)'}`,
+            background: 'var(--nd-surface)',
+            color: filter !== 'ALL' ? (modeColor[filter] ?? 'var(--nd-accent)') : 'var(--nd-text-1)',
+            outline: 'none',
+          }}>
+          <option value="ALL">All modes</option>
+          <option value="PAPER">Paper</option>
+          <option value="BACKTEST">Backtest</option>
+          <option value="REPLAY">Replay</option>
+          <option value="LIVE">Live</option>
+        </select>
         <button onClick={() => setShowFilters(v => !v)}
           style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '5px 12px', borderRadius: 20, border: `1px solid ${filtersActive ? 'var(--nd-green)' : 'var(--nd-border)'}`, cursor: 'pointer', fontSize: 12, fontWeight: 500, background: 'var(--nd-surface)', color: filtersActive ? 'var(--nd-green)' : 'var(--nd-text-2)' }}>
           <span className="material-icons" style={{ fontSize: 15 }}>tune</span>
@@ -739,8 +747,15 @@ const Orders: React.FC = () => {
           {visibleSessions.length} session{visibleSessions.length !== 1 ? 's' : ''}
         </span>
         {!listLoading && (
-          <div style={{ marginLeft: 'auto' }}>
-            <Pager page={safePage} totalPages={totalPages} total={visibleSessions.length} pageSize={PAGE_SIZE} onPage={setPage} />
+          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: 'var(--nd-text-3)' }}>
+              Rows
+              <select value={pageSize} onChange={e => { setPageSize(Number(e.target.value)); setPage(1); }}
+                style={{ padding: '4px 8px', borderRadius: 6, border: '1px solid var(--nd-border)', background: 'var(--nd-surface)', color: 'var(--nd-text-1)', fontSize: 12, fontWeight: 600, cursor: 'pointer', outline: 'none' }}>
+                {[25, 50, 100, 200].map(n => <option key={n} value={n}>{n}</option>)}
+              </select>
+            </label>
+            <Pager page={safePage} totalPages={totalPages} total={visibleSessions.length} pageSize={pageSize} onPage={setPage} />
           </div>
         )}
       </div>
@@ -878,7 +893,7 @@ const Orders: React.FC = () => {
         </div>
         {totalPages > 1 && (
           <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 12 }}>
-            <Pager page={safePage} totalPages={totalPages} total={visibleSessions.length} pageSize={PAGE_SIZE} onPage={setPage} />
+            <Pager page={safePage} totalPages={totalPages} total={visibleSessions.length} pageSize={pageSize} onPage={setPage} />
           </div>
         )}
         </>
