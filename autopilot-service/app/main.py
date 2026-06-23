@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from .autopilot import paper_loop, backtest_loop, status, set_mode, kick, reset_cursor, _set_batch_size
+from .autopilot import paper_loop, backtest_loop, status, set_mode, kick, reset_cursor, _set_batch_size, _set_speed
 
 from app.elk_logger import setup_logging, get_logger
 setup_logging()
@@ -70,6 +70,17 @@ async def set_batch_size(req: BatchSizeRequest):
     n = await _set_batch_size(req.batch_size)
     # Kick the queue so a larger batch can fill immediately (no-op if disabled).
     asyncio.create_task(kick("backtest"))
+    return {"status": "success", "data": await status()}
+
+
+class SpeedRequest(BaseModel):
+    speed: int
+
+
+@app.post("/backtest/speed")
+async def set_speed(req: SpeedRequest):
+    """Change backtest replay speed — candles advanced per step (1–120)."""
+    await _set_speed(req.speed)
     return {"status": "success", "data": await status()}
 
 

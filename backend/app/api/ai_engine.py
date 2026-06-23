@@ -1073,6 +1073,28 @@ async def set_autopilot_batch_size(req: BatchSizeRequest):
     return {"status": "success", "data": await _autopilot_status()}
 
 
+class SpeedRequest(BaseModel):
+    speed: int
+
+
+@router.post("/autopilot/speed")
+async def set_autopilot_speed(req: SpeedRequest):
+    """Change the backtest autopilot's replay speed (candles/step, 1–120),
+    proxied to the autopilot microservice. Applies to newly started sessions."""
+    n = max(1, min(120, int(req.speed)))
+    try:
+        import httpx
+        from app.config import settings
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(f"{settings.AUTOPILOT_SERVICE_URL}/backtest/speed",
+                                  json={"speed": n})
+            if r.status_code == 200:
+                return {"status": "success", "data": (r.json().get("data") or {})}
+    except Exception as exc:
+        logger.warning("autopilot speed proxy failed: %s", exc)
+    return {"status": "success", "data": await _autopilot_status()}
+
+
 class PaperTimingRequest(BaseModel):
     mode: str = "normal"     # "normal" | "aggressive"
 

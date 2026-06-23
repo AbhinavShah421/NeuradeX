@@ -2439,6 +2439,8 @@ const LiveSessionsPanel: React.FC = () => {
   const [batchSize, setBatchSize]   = useState<number | null>(null);
   const [batchInput, setBatchInput] = useState('');
   const [savingBatch, setSavingBatch] = useState(false);
+  const [speed, setSpeed] = useState<number | null>(null);
+  const [savingSpeed, setSavingSpeed] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -2448,13 +2450,25 @@ const LiveSessionsPanel: React.FC = () => {
   }, []);
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [load]);
 
-  // Current autopilot batch size (concurrent sessions per batch).
+  // Current autopilot batch size + replay speed.
   useEffect(() => {
     apiService.getAutopilot().then((a: any) => {
       const bs = a?.data?.backtest?.batchSize;
       if (bs != null) { setBatchSize(bs); setBatchInput(String(bs)); }
+      const sp = a?.data?.backtest?.speed;
+      if (sp != null) setSpeed(sp);
     }).catch(() => {});
   }, []);
+
+  const applySpeed = async (n: number) => {
+    if (n === speed) return;
+    setSavingSpeed(true);
+    try {
+      const r = await apiService.setAutopilotSpeed(n);
+      setSpeed((r as any).data?.backtest?.speed ?? n);
+    } catch { /* keep last */ }
+    finally { setSavingSpeed(false); }
+  };
 
   const applyBatch = async () => {
     const n = Math.max(1, Math.min(50, parseInt(batchInput || '0', 10) || 0));
@@ -2483,6 +2497,20 @@ const LiveSessionsPanel: React.FC = () => {
         <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>Live Auto-Trading</div>
         <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>{sessions.length} running</span>
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
+          {/* Replay speed — candles advanced per step in new backtest sessions */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }} title="Backtest replay speed — candles advanced per step (applies to newly started sessions).">
+            <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>Speed</span>
+            <select
+              value={speed ?? ''} disabled={savingSpeed || speed == null}
+              onChange={e => applySpeed(Number(e.target.value))}
+              style={{ padding: '4px 6px', borderRadius: 6, border: '1px solid var(--nd-border)',
+                background: 'var(--nd-surface)', color: 'var(--nd-text-1)', fontSize: 12, fontWeight: 600,
+                cursor: 'pointer', outline: 'none', opacity: savingSpeed ? 0.6 : 1 }}>
+              {speed != null && ![1, 2, 5, 10, 30, 60].includes(speed) && <option value={speed}>{speed}×</option>}
+              {[1, 2, 5, 10, 30, 60].map(n => <option key={n} value={n}>{n}×</option>)}
+            </select>
+            {savingSpeed && <span className="material-icons nd-spin" style={{ fontSize: 14, color: 'var(--nd-text-3)' }}>autorenew</span>}
+          </div>
           {/* Concurrent-sessions-per-batch — editable; applies to the next batch */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }} title="How many stocks the autopilot trades at once per batch (1–50). Takes effect on the next batch.">
             <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>Batch size</span>

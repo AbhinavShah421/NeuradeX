@@ -125,6 +125,34 @@ async def _set_batch_size(n: int) -> int:
     return n
 
 
+# ── Dynamic replay speed (candles advanced per step in backtest sessions) ───────
+_SPEED_KEY = "ai_engine:autopilot_bt_speed"
+_SPEED_MIN, _SPEED_MAX = 1, 120
+_bt_speed: int | None = None   # runtime cache, lazily loaded from Redis
+
+
+async def _get_speed() -> int:
+    global _bt_speed
+    if _bt_speed is None:
+        try:
+            raw = await (await _get_redis()).get(_SPEED_KEY)
+            _bt_speed = int(raw) if raw else BT_SPEED
+        except Exception:
+            _bt_speed = BT_SPEED
+    return _bt_speed
+
+
+async def _set_speed(n: int) -> int:
+    global _bt_speed
+    n = max(_SPEED_MIN, min(_SPEED_MAX, int(n)))
+    _bt_speed = n
+    try:
+        await (await _get_redis()).set(_SPEED_KEY, str(n))
+    except Exception as exc:
+        logger.warning("speed persist failed: %s", exc)
+    return n
+
+
 # ── Time helpers ──────────────────────────────────────────────────────────────
 
 def _now_ist() -> datetime:
@@ -510,11 +538,12 @@ async def _rank_by_historical_sentiment(symbols: list[str], date: str) -> list[s
 async def _start_batch(syms: list[str], cursor: str) -> list[str]:
     """Start up to the configured batch size of sessions for `syms` on `cursor`. Returns started IDs."""
     bs = await _get_batch_size()
+    sp = await _get_speed()
     ids: list[str] = []
     for sym in syms[:bs]:
         sid = await _start_session({
             "mode": "backtest", "symbol": sym, "date": cursor,
-            "start_time": "09:15", "capital": CAPITAL, "speed": BT_SPEED,
+            "start_time": "09:15", "capital": CAPITAL, "speed": sp,
             "max_hold_minutes": MAX_HOLD_MIN,
         })
         if sid:
@@ -718,6 +747,7 @@ async def status() -> dict:
     syms = await _watchlist_symbols()
     committed = await _committed_symbols()
     bs = await _get_batch_size()
+    sp = await _get_speed()
     return {
         "paper": {
             "enabled": await _flag(PAPER_FLAG),
@@ -735,7 +765,7 @@ async def status() -> dict:
             "enabled": await _flag(BACKTEST_FLAG),
             "active_window": _backtest_allowed(),
             "running": len(bt_running),
-            "speed": BT_SPEED,
+            "speed": sp,
             "batch_size": bs,
             "cursor": st.get("cursor") or _prev_trading_day(_today()),
             "queue_date": st.get("queue_date"),
