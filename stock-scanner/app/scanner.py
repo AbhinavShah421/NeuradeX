@@ -351,6 +351,7 @@ _state = {
     "running": False, "scanning": False, "run_started": 0.0,
     "last_premarket_date": None, "last_eval_date": None,
     "last_eval": None, "calibration": None, "market_regime": "neutral",
+    "regime_detail": None,
 }
 _scan_lock = asyncio.Lock()
 
@@ -758,19 +759,52 @@ async def _load_universe() -> dict[str, str]:
     return uni
 
 
-async def _market_regime(client: httpx.AsyncClient) -> int:
-    """+1 bullish / -1 bearish / 0 neutral, from NIFTY 50 trend (SMA20 vs SMA50 + momentum)."""
+async def _market_regime(client: httpx.AsyncClient) -> tuple[int, dict]:
+    """+1 bullish / -1 bearish / 0 neutral, from NIFTY 50 trend (SMA20 vs SMA50 + momentum).
+    Returns (score, detail_dict) — detail carries all raw indicators for the UI modal."""
     candles = await _fetch_chart(client, "%5ENSEI")  # ^NSEI
     if len(candles) < 50:
-        return 0
+        return 0, {}
     closes = [c["c"] for c in candles]
     sma20, sma50 = _sma(closes, 20), _sma(closes, 50)
     mom = (closes[-1] - closes[-5]) / closes[-5] * 100 if len(closes) >= 5 else 0.0
-    if sma20 > sma50 and mom > 0:
-        return 1
-    if sma20 < sma50 and mom < 0:
-        return -1
-    return 0
+    price = closes[-1]
+    cross_up   = sma20 > sma50
+    mom_up     = mom > 0
+    cross_down = sma20 < sma50
+    mom_down   = mom < 0
+    if cross_up and mom_up:
+        score = 1
+    elif cross_down and mom_down:
+        score = -1
+    else:
+        score = 0
+    label = {1: "bullish", -1: "bearish", 0: "neutral"}[score]
+    detail = {
+        "regime":      label,
+        "index":       "NIFTY 50",
+        "nifty_price": round(price, 2),
+        "sma20":       round(sma20, 2),
+        "sma50":       round(sma50, 2),
+        "mom_5d_pct":  round(mom, 2),
+        "conditions": [
+            {
+                "id":     "sma_cross",
+                "label":  "SMA20 above SMA50 (uptrend alignment)",
+                "met":    cross_up,
+                "detail": f"SMA20 {sma20:,.0f} {'>' if cross_up else '<'} SMA50 {sma50:,.0f}",
+            },
+            {
+                "id":     "momentum",
+                "label":  "5-day momentum positive",
+                "met":    mom_up,
+                "detail": f"{'+' if mom >= 0 else ''}{mom:.2f}% over last 5 sessions",
+            },
+        ],
+        "candles_used": len(closes),
+        "updated_at":   _ist_now().isoformat(),
+    }
+    return score, detail
 
 
 # ── Calibration (learning loop) ───────────────────────────────────────────────
@@ -843,8 +877,10 @@ async def scan_once(phase: str = "intraday") -> dict:
         }
 
     async with httpx.AsyncClient(follow_redirects=True) as client:
-        regime = await _market_regime(client)
+        regime, regime_detail = await _market_regime(client)
         _state["market_regime"] = {1: "bullish", -1: "bearish", 0: "neutral"}[regime]
+        if regime_detail:
+            _state["regime_detail"] = regime_detail
         for sym, name in universe.items():
             candles = await _fetch_daily(client, sym)
             scanned += 1

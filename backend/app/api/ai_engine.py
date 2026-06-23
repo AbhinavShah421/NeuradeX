@@ -452,6 +452,21 @@ async def set_auto_scan(enabled: bool):
     return {"status": "error", "detail": "scanner unavailable"}
 
 
+@router.get("/regime-detail")
+async def regime_detail():
+    """Full market-regime breakdown: raw indicators, conditions, and methodology."""
+    import httpx
+    from app.config import settings
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(f"{settings.SCANNER_SERVICE_URL}/regime-detail")
+            if r.status_code == 200:
+                return r.json()
+    except Exception as exc:
+        logger.debug("regime-detail proxy failed: %s", exc)
+    return {"status": "success", "data": {}}
+
+
 @router.get("/scan-status")
 async def scan_status():
     """Centralized scan status (shared by Dashboard / Predictions / Portfolio):

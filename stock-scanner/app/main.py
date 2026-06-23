@@ -74,6 +74,14 @@ async def status():
     return {"status": "success", "data": {**st, "universe": st.get("universe") or len(UNIVERSE)}}
 
 
+@app.get("/regime-detail")
+async def regime_detail():
+    """Full market-regime breakdown — indicators, conditions, and raw values used."""
+    st = get_state()
+    detail = st.get("regime_detail") or {"regime": st.get("market_regime", "neutral")}
+    return {"status": "success", "data": detail}
+
+
 @app.post("/scan")
 async def scan(_: None = Depends(_require_internal)):
     """Trigger an immediate full sweep (manual refresh; also runs continuously)."""

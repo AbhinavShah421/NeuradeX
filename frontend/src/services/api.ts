@@ -976,6 +976,11 @@ class ApiService {
     return response.data;
   }
 
+  async getRegimeDetail(): Promise<any> {
+    const response = await this.api.get('/api/ai-engine/regime-detail');
+    return response.data;
+  }
+
   async sessionList(statusFilter?: string): Promise<ApiResponse<any>> {
     const params = statusFilter ? { status: statusFilter } : {};
     const response = await this.api.get('/api/sessions', { params });

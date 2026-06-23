@@ -2083,6 +2083,181 @@ const REGIME_STYLE: Record<string, { color: string; label: string; icon: string 
   neutral: { color: '#f59e0b', label: 'Neutral',            icon: 'trending_flat' },
 };
 
+// ── Regime detail modal ───────────────────────────────────────────────────────
+
+const REGIME_IMPLICATIONS: Record<string, { headline: string; why: string; trading: string[]; watch: string[] }> = {
+  bullish: {
+    headline: 'Broad market is in a confirmed uptrend.',
+    why: 'NIFTY 50\'s 20-day SMA is above the 50-day SMA (golden-cross alignment) AND the index gained ground over the last 5 sessions. Both momentum and trend filters are green.',
+    trading: [
+      'Long-biased setups have the macro wind at their back.',
+      'BUY signals from individual stock agents carry higher conviction.',
+      'Tighter stops are viable — pullbacks in uptrends tend to be shallow.',
+    ],
+    watch: [
+      'A reversal below SMA20 would weaken the thesis.',
+      'Momentum divergence (price rises but 5-day return fades) is an early warning.',
+    ],
+  },
+  bearish: {
+    headline: 'Broad market is in a confirmed downtrend.',
+    why: 'NIFTY 50\'s 20-day SMA has crossed below the 50-day SMA (death-cross alignment) AND the index fell over the last 5 sessions. Both momentum and trend filters are red.',
+    trading: [
+      'BUY signals face a headwind — treat them with extra skepticism.',
+      'SELL/HOLD signals are more likely to play out.',
+      'Reduce position sizes or widen stops to allow for bear-market volatility.',
+    ],
+    watch: [
+      'A reclaim of SMA20 above SMA50 flips the regime to neutral or bullish.',
+      'Positive 5-day momentum first is often the leading signal of a reversal.',
+    ],
+  },
+  neutral: {
+    headline: 'Broad market is sending mixed signals.',
+    why: 'Either SMA20 and SMA50 are aligned but momentum is counter-trend, or momentum is positive but the MAs are still bearish-aligned. One filter is green and one is red.',
+    trading: [
+      'No structural edge in either direction from the macro filter.',
+      'Stock-level signals (RSI, momentum, sentiment) carry more weight than usual.',
+      'Use tighter risk limits until the regime resolves.',
+    ],
+    watch: [
+      'Watch for both conditions to align in the same direction to confirm a new regime.',
+    ],
+  },
+};
+
+const RegimeModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
+  const [detail, setDetail] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    apiService.getRegimeDetail()
+      .then((r: any) => setDetail(r?.data ?? {}))
+      .catch(() => setDetail({}))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const regime: string = detail?.regime ?? 'neutral';
+  const rg = REGIME_STYLE[regime] ?? REGIME_STYLE.neutral;
+  const impl = REGIME_IMPLICATIONS[regime] ?? REGIME_IMPLICATIONS.neutral;
+  const conditions: any[] = detail?.conditions ?? [];
+  const fmtNum = (v: number | undefined) => v != null ? v.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 }) : '—';
+
+  return (
+    <div onClick={e => { if (e.target === e.currentTarget) onClose(); }}
+      style={{ position: 'fixed', inset: 0, background: '#00000088', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 12 }}>
+      <div style={{ background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 16, width: '100%', maxWidth: 500, maxHeight: '92vh', overflow: 'auto', boxShadow: '0 24px 64px #00000060' }}>
+
+        {/* Header */}
+        <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--nd-border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span className="material-icons" style={{ fontSize: 22, color: rg.color }}>{rg.icon}</span>
+            <div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: rg.color }}>{rg.label}</div>
+              <div style={{ fontSize: 11, color: 'var(--nd-text-3)', textTransform: 'uppercase', letterSpacing: 0.5 }}>Market Regime · {detail?.index ?? 'NIFTY 50'}</div>
+            </div>
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer' }}>
+            <span className="material-icons" style={{ color: 'var(--nd-text-3)', fontSize: 20 }}>close</span>
+          </button>
+        </div>
+
+        <div style={{ padding: '16px 20px' }}>
+          {loading ? (
+            <div style={{ textAlign: 'center', padding: 32, color: 'var(--nd-text-3)' }}>
+              <span className="material-icons nd-spin" style={{ fontSize: 22, verticalAlign: 'middle' }}>autorenew</span>
+            </div>
+          ) : (
+            <>
+              {/* Headline */}
+              <p style={{ margin: '0 0 16px', fontSize: 13, fontWeight: 600, color: 'var(--nd-text-1)', lineHeight: 1.5 }}>{impl.headline}</p>
+
+              {/* Raw indicators */}
+              {detail?.niftyPrice != null && (
+                <div style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 10, padding: '12px 14px', marginBottom: 16 }}>
+                  <div style={{ fontSize: 11, color: 'var(--nd-text-3)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 10 }}>Live Indicators</div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px 0' }}>
+                    {[
+                      { label: 'NIFTY 50 Price', value: `₹${fmtNum(detail.niftyPrice)}`, color: 'var(--nd-text-1)' },
+                      { label: '20-day SMA', value: `₹${fmtNum(detail.sma20)}`, color: detail.sma20 > detail.sma50 ? 'var(--nd-green)' : 'var(--nd-red)' },
+                      { label: '50-day SMA', value: `₹${fmtNum(detail.sma50)}`, color: 'var(--nd-text-2)' },
+                      { label: '5-day Momentum', value: `${detail.mom5dPct >= 0 ? '+' : ''}${fmtNum(detail.mom5dPct)}%`, color: detail.mom5dPct >= 0 ? 'var(--nd-green)' : 'var(--nd-red)' },
+                    ].map(row => (
+                      <div key={row.label}>
+                        <div style={{ fontSize: 10, color: 'var(--nd-text-3)' }}>{row.label}</div>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: row.color }}>{row.value}</div>
+                      </div>
+                    ))}
+                  </div>
+                  {detail.candlesUsed && (
+                    <div style={{ fontSize: 10, color: 'var(--nd-text-3)', marginTop: 8 }}>
+                      Based on {detail.candlesUsed} daily candles
+                      {detail.updatedAt ? ` · updated ${new Date(detail.updatedAt).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: true })}` : ''}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Condition checklist */}
+              {conditions.length > 0 && (
+                <div style={{ marginBottom: 16 }}>
+                  <div style={{ fontSize: 11, color: 'var(--nd-text-3)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Classification Conditions</div>
+                  {conditions.map((c: any) => (
+                    <div key={c.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 0', borderBottom: '1px solid var(--nd-border)' }}>
+                      <span className="material-icons" style={{ fontSize: 16, color: c.met ? 'var(--nd-green)' : 'var(--nd-red)', marginTop: 1, flexShrink: 0 }}>
+                        {c.met ? 'check_circle' : 'cancel'}
+                      </span>
+                      <div>
+                        <div style={{ fontSize: 12, fontWeight: 600, color: c.met ? 'var(--nd-text-1)' : 'var(--nd-text-3)' }}>{c.label}</div>
+                        <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginTop: 1 }}>{c.detail}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Why section */}
+              <div style={{ background: 'var(--nd-surface)', border: `1px solid ${rg.color}30`, borderRadius: 10, padding: '12px 14px', marginBottom: 16 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                  <span className="material-icons" style={{ fontSize: 14, color: rg.color }}>info</span>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: rg.color, textTransform: 'uppercase', letterSpacing: 0.4 }}>Why this regime</span>
+                </div>
+                <p style={{ margin: 0, fontSize: 12, color: 'var(--nd-text-2)', lineHeight: 1.6 }}>{impl.why}</p>
+              </div>
+
+              {/* Trading implications */}
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: 11, color: 'var(--nd-text-3)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Trading Implications</div>
+                {impl.trading.map((t, i) => (
+                  <div key={i} style={{ display: 'flex', gap: 8, marginBottom: 6 }}>
+                    <span style={{ fontSize: 12, color: rg.color, flexShrink: 0, marginTop: 1 }}>›</span>
+                    <span style={{ fontSize: 12, color: 'var(--nd-text-2)', lineHeight: 1.5 }}>{t}</span>
+                  </div>
+                ))}
+              </div>
+
+              {/* Watch for */}
+              <div style={{ background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.25)', borderRadius: 10, padding: '12px 14px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                  <span className="material-icons" style={{ fontSize: 14, color: '#f59e0b' }}>warning_amber</span>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: '#f59e0b', textTransform: 'uppercase', letterSpacing: 0.4 }}>Watch For</span>
+                </div>
+                {impl.watch.map((w, i) => (
+                  <div key={i} style={{ display: 'flex', gap: 8, marginBottom: i < impl.watch.length - 1 ? 4 : 0 }}>
+                    <span style={{ fontSize: 12, color: '#f59e0b', flexShrink: 0 }}>›</span>
+                    <span style={{ fontSize: 12, color: 'var(--nd-text-2)', lineHeight: 1.5 }}>{w}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ── Total-return sparkline ────────────────────────────────────────────────────
 const ReturnSparkline: React.FC<{ points: number[]; good: boolean }> = ({ points, good }) => {
   if (points.length < 2) return null;
@@ -2118,9 +2293,10 @@ const ReturnSparkline: React.FC<{ points: number[]; good: boolean }> = ({ points
 };
 
 const PerformanceRegimeStrip: React.FC = () => {
-  const [pm, setPm]         = useState<any>(null);
-  const [regime, setRegime] = useState<string>('neutral');
-  const [equity, setEquity] = useState<number[]>([]);
+  const [pm, setPm]               = useState<any>(null);
+  const [regime, setRegime]       = useState<string>('neutral');
+  const [equity, setEquity]       = useState<number[]>([]);
+  const [showRegime, setShowRegime] = useState(false);
 
   useEffect(() => {
     apiService.getPortfolioMetrics().then((r: any) => { if (r && !r.error) setPm(r); }).catch(() => {});
@@ -2141,14 +2317,28 @@ const PerformanceRegimeStrip: React.FC = () => {
   ] : [];
 
   return (
+    <>
+    {showRegime && <RegimeModal onClose={() => setShowRegime(false)} />}
     <div className="nd-card" style={{ padding: '12px 16px', marginBottom: 20, display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
-      {/* Market regime chip */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, paddingRight: 16, borderRight: (statTiles.length || pm) ? '1px solid var(--nd-border)' : 'none' }}>
+      {/* Market regime chip — clickable */}
+      <div
+        onClick={() => setShowRegime(true)}
+        title="Click for full regime breakdown"
+        style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          paddingRight: 16, borderRight: (statTiles.length || pm) ? '1px solid var(--nd-border)' : 'none',
+          cursor: 'pointer', borderRadius: 8, padding: '4px 8px',
+          transition: 'background 0.15s',
+        }}
+        onMouseEnter={e => (e.currentTarget.style.background = `${rg.color}12`)}
+        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+      >
         <span className="material-icons" style={{ fontSize: 20, color: rg.color }}>{rg.icon}</span>
         <div>
           <div style={{ fontSize: 10, color: 'var(--nd-text-3)', textTransform: 'uppercase', letterSpacing: 0.6 }}>Market Regime</div>
           <div style={{ fontSize: 13, fontWeight: 700, color: rg.color }}>{rg.label}</div>
         </div>
+        <span className="material-icons" style={{ fontSize: 13, color: 'var(--nd-text-3)', marginLeft: 2 }}>open_in_new</span>
       </div>
 
       {pm && pm.totalTrades > 0 ? (
@@ -2176,6 +2366,7 @@ const PerformanceRegimeStrip: React.FC = () => {
         <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>Live performance appears here once trades are recorded.</div>
       )}
     </div>
+    </>
   );
 };
 
