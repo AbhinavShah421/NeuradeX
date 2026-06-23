@@ -26,13 +26,13 @@ const ScanControl: React.FC<{ align?: 'left' | 'right' }> = ({ align = 'right' }
     <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginLeft: align === 'right' ? 'auto' : undefined }}>
       <span style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>
         AI scan {scanned}/{universe}
-        {scanning
-          ? <span style={{ color: 'var(--nd-accent)', fontWeight: 600 }}> · scanning… {pct}%</span>
-          : runningSessions > 0
-            ? <span style={{ color: '#f59e0b', fontWeight: 600 }}> · {runningSessions} session{runningSessions > 1 ? 's' : ''} running</span>
-            : lastScanLabel
-              ? <span> · {lastScanLabel}</span>
-              : null}
+        {scanning && <span style={{ color: 'var(--nd-accent)', fontWeight: 600 }}> · scanning… {pct}%</span>}
+        {!scanning && runningSessions > 0 && (
+          <span style={{ color: '#f59e0b', fontWeight: 600 }}> · {runningSessions} session{runningSessions > 1 ? 's' : ''} running</span>
+        )}
+        {lastScanLabel && (
+          <span title={`Last full-market scan completed ${lastScanLabel}`}> · last scan {lastScanLabel}</span>
+        )}
       </span>
 
       {/* Auto-scan toggle */}
