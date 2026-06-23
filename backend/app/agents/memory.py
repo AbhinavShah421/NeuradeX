@@ -446,11 +446,6 @@ class MemoryAgent(BaseAgent):
             floor_mult = FLOOR_PENALTY.get(res["actual_floor"], 0.70)
             conf       = base_conf * floor_mult
 
-            # Small bonus when retrieved cases share the same regime as current
-            regime_frac = sum(
-                1 for i, _ in _chosen_for(pa, best)
-                if True  # regime already filtered in query — always give bonus
-            )
             if res["symbol_local"]:
                 conf += 0.02   # same-symbol cases are more reliable
             if wr >= STRONG_WIN_RATE:
@@ -477,6 +472,3 @@ class MemoryAgent(BaseAgent):
         )
 
 
-def _chosen_for(pa: dict, action: str) -> list:
-    """Dummy helper to avoid unused-loop warning — regime check is in query()."""
-    return pa.get(action, {}).get("n", []) or []
