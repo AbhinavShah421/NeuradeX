@@ -2436,6 +2436,9 @@ const PerformanceRegimeStrip: React.FC = () => {
 const LiveSessionsPanel: React.FC = () => {
   const [sessions, setSessions] = useState<any[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
+  const [batchSize, setBatchSize]   = useState<number | null>(null);
+  const [batchInput, setBatchInput] = useState('');
+  const [savingBatch, setSavingBatch] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -2444,6 +2447,26 @@ const LiveSessionsPanel: React.FC = () => {
     } catch { /* keep last */ }
   }, []);
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [load]);
+
+  // Current autopilot batch size (concurrent sessions per batch).
+  useEffect(() => {
+    apiService.getAutopilot().then((a: any) => {
+      const bs = a?.data?.backtest?.batchSize;
+      if (bs != null) { setBatchSize(bs); setBatchInput(String(bs)); }
+    }).catch(() => {});
+  }, []);
+
+  const applyBatch = async () => {
+    const n = Math.max(1, Math.min(50, parseInt(batchInput || '0', 10) || 0));
+    if (!n || n === batchSize) { setBatchInput(batchSize != null ? String(batchSize) : ''); return; }
+    setSavingBatch(true);
+    try {
+      const r = await apiService.setAutopilotBatchSize(n);
+      const bs = (r as any).data?.backtest?.batchSize ?? n;
+      setBatchSize(bs); setBatchInput(String(bs));
+    } catch { setBatchInput(batchSize != null ? String(batchSize) : ''); }
+    finally { setSavingBatch(false); }
+  };
 
   const stop = async (id: string) => {
     setBusy(id);
@@ -2459,9 +2482,25 @@ const LiveSessionsPanel: React.FC = () => {
         <span className="material-icons" style={{ fontSize: 18, color: 'var(--nd-green)' }}>monitoring</span>
         <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>Live Auto-Trading</div>
         <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>{sessions.length} running</span>
-        <span style={{ marginLeft: 'auto', fontSize: 13, fontWeight: 700, color: totalPnl >= 0 ? 'var(--nd-green)' : 'var(--nd-red)' }}>
-          {totalPnl >= 0 ? '+' : ''}{inr(totalPnl)}
-        </span>
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
+          {/* Concurrent-sessions-per-batch — editable; applies to the next batch */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }} title="How many stocks the autopilot trades at once per batch (1–50). Takes effect on the next batch.">
+            <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>Batch size</span>
+            <input
+              type="number" min={1} max={50} value={batchInput} disabled={savingBatch}
+              onChange={e => setBatchInput(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+              onBlur={applyBatch}
+              style={{ width: 50, padding: '4px 6px', borderRadius: 6, border: '1px solid var(--nd-border)',
+                background: 'var(--nd-surface)', color: 'var(--nd-text-1)', fontSize: 12, fontWeight: 600,
+                textAlign: 'center', outline: 'none', opacity: savingBatch ? 0.6 : 1 }}
+            />
+            {savingBatch && <span className="material-icons nd-spin" style={{ fontSize: 14, color: 'var(--nd-text-3)' }}>autorenew</span>}
+          </div>
+          <span style={{ fontSize: 13, fontWeight: 700, color: totalPnl >= 0 ? 'var(--nd-green)' : 'var(--nd-red)' }}>
+            {totalPnl >= 0 ? '+' : ''}{inr(totalPnl)}
+          </span>
+        </div>
       </div>
       <div style={{ overflowX: 'auto' }}>
         <table style={{ width: '100%', minWidth: 540, borderCollapse: 'collapse', fontSize: 12 }}>

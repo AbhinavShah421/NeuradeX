@@ -1051,6 +1051,28 @@ async def reset_autopilot_cursor():
     return {"status": "success", "data": await _autopilot_status()}
 
 
+class BatchSizeRequest(BaseModel):
+    batch_size: int
+
+
+@router.post("/autopilot/batch-size")
+async def set_autopilot_batch_size(req: BatchSizeRequest):
+    """Change the backtest autopilot's concurrent-sessions-per-batch (1–50),
+    proxied to the autopilot microservice. Takes effect on the next batch."""
+    n = max(1, min(50, int(req.batch_size)))
+    try:
+        import httpx
+        from app.config import settings
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(f"{settings.AUTOPILOT_SERVICE_URL}/backtest/batch-size",
+                                  json={"batch_size": n})
+            if r.status_code == 200:
+                return {"status": "success", "data": (r.json().get("data") or {})}
+    except Exception as exc:
+        logger.warning("autopilot batch-size proxy failed: %s", exc)
+    return {"status": "success", "data": await _autopilot_status()}
+
+
 class PaperTimingRequest(BaseModel):
     mode: str = "normal"     # "normal" | "aggressive"
 

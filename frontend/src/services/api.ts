@@ -908,6 +908,10 @@ class ApiService {
     const response = await this.api.post('/api/ai-engine/autopilot/paper-timing', { mode });
     return response.data;
   }
+  async setAutopilotBatchSize(batchSize: number): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/ai-engine/autopilot/batch-size', { batch_size: batchSize });
+    return response.data;
+  }
   async learningCurve(source = 'PAPER,LIVE,REPLAY', window = 50): Promise<ApiResponse<any>> {
     const response = await this.api.get('/api/ai-engine/learning-curve', { params: { source, window } });
     return response.data;

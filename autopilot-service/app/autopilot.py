@@ -95,6 +95,36 @@ async def _get_redis() -> redis.Redis:
     return _redis
 
 
+# ── Dynamic batch size (concurrent backtest sessions per batch) ─────────────────
+# Editable at runtime from the dashboard; persisted in Redis so it survives a
+# restart. Falls back to the AUTOPILOT_BACKTEST_BATCH_SIZE env default.
+_BATCH_SIZE_KEY = "ai_engine:autopilot_bt_batch_size"
+_BATCH_SIZE_MIN, _BATCH_SIZE_MAX = 1, 50
+_bt_batch_size: int | None = None   # runtime cache, lazily loaded from Redis
+
+
+async def _get_batch_size() -> int:
+    global _bt_batch_size
+    if _bt_batch_size is None:
+        try:
+            raw = await (await _get_redis()).get(_BATCH_SIZE_KEY)
+            _bt_batch_size = int(raw) if raw else BT_BATCH_SIZE
+        except Exception:
+            _bt_batch_size = BT_BATCH_SIZE
+    return _bt_batch_size
+
+
+async def _set_batch_size(n: int) -> int:
+    global _bt_batch_size
+    n = max(_BATCH_SIZE_MIN, min(_BATCH_SIZE_MAX, int(n)))
+    _bt_batch_size = n
+    try:
+        await (await _get_redis()).set(_BATCH_SIZE_KEY, str(n))
+    except Exception as exc:
+        logger.warning("batch-size persist failed: %s", exc)
+    return n
+
+
 # ── Time helpers ──────────────────────────────────────────────────────────────
 
 def _now_ist() -> datetime:
@@ -478,9 +508,10 @@ async def _rank_by_historical_sentiment(symbols: list[str], date: str) -> list[s
 
 
 async def _start_batch(syms: list[str], cursor: str) -> list[str]:
-    """Start up to BT_BATCH_SIZE sessions for `syms` on `cursor`. Returns started IDs."""
+    """Start up to the configured batch size of sessions for `syms` on `cursor`. Returns started IDs."""
+    bs = await _get_batch_size()
     ids: list[str] = []
-    for sym in syms[:BT_BATCH_SIZE]:
+    for sym in syms[:bs]:
         sid = await _start_session({
             "mode": "backtest", "symbol": sym, "date": cursor,
             "start_time": "09:15", "capital": CAPITAL, "speed": BT_SPEED,
@@ -504,6 +535,7 @@ async def _do_backtest_step() -> None:
         return
 
     st = await _load_bt_state()
+    bs = await _get_batch_size()
     cursor = st.get("cursor") or _prev_trading_day(_today())
     st.setdefault("cursor", cursor)
     st.setdefault("completed_days", 0)
@@ -531,7 +563,7 @@ async def _do_backtest_step() -> None:
             await _save_bt_state(st)
             return
 
-        remaining = ranked[BT_BATCH_SIZE:]   # symbols not yet batched
+        remaining = ranked[bs:]   # symbols not yet batched
         total = len(ranked)
         st.update({
             "queue": ids, "queue_date": cursor,
@@ -542,7 +574,7 @@ async def _do_backtest_step() -> None:
         await _save_bt_state(st)
         logger.info(
             "backtest %s — batch 1/%d started (%d sessions, %d remaining)",
-            cursor, -(-total // BT_BATCH_SIZE), len(ids), len(remaining),
+            cursor, -(-total // bs), len(ids), len(remaining),
         )
         return
 
@@ -558,10 +590,10 @@ async def _do_backtest_step() -> None:
         # Batch done — start the next one if symbols remain.
         if syms_remaining:
             ids = await _start_batch(syms_remaining, cursor)
-            remaining = syms_remaining[BT_BATCH_SIZE:]
+            remaining = syms_remaining[bs:]
             batch_idx += 1
             total = st.get("queue_total", len(_BT_UNIVERSE))
-            n_batches = -(-total // BT_BATCH_SIZE)
+            n_batches = -(-total // bs)
             st.update({
                 "queue": ids, "queue_pending": len(ids),
                 "symbols_remaining": remaining, "batch_idx": batch_idx,
@@ -584,7 +616,7 @@ async def _do_backtest_step() -> None:
     if days_back >= BT_DAYS_BACK:
         next_cursor = _prev_trading_day(_today())
         days_back = 0
-    total_batches = -(-st.get("queue_total", 1) // BT_BATCH_SIZE)
+    total_batches = -(-st.get("queue_total", 1) // bs)
     st.update({
         "cursor": next_cursor, "queue": [], "queue_pending": 0,
         "symbols_remaining": [], "batch_idx": 0, "started_at": None,
@@ -594,7 +626,7 @@ async def _do_backtest_step() -> None:
     await _save_bt_state(st)
     logger.info(
         "backtest finished %s (%d batches of %d) → next %s (day %d)",
-        done_date, total_batches, BT_BATCH_SIZE, next_cursor, st["completed_days"],
+        done_date, total_batches, bs, next_cursor, st["completed_days"],
     )
     await _train_pattern_model()
 
@@ -685,6 +717,7 @@ async def status() -> dict:
     st  = await _load_bt_state()
     syms = await _watchlist_symbols()
     committed = await _committed_symbols()
+    bs = await _get_batch_size()
     return {
         "paper": {
             "enabled": await _flag(PAPER_FLAG),
@@ -703,13 +736,13 @@ async def status() -> dict:
             "active_window": _backtest_allowed(),
             "running": len(bt_running),
             "speed": BT_SPEED,
-            "batch_size": BT_BATCH_SIZE,
+            "batch_size": bs,
             "cursor": st.get("cursor") or _prev_trading_day(_today()),
             "queue_date": st.get("queue_date"),
             "queue_total": st.get("queue_total", 0),
             "queue_pending": st.get("queue_pending", 0),
             "batch_idx": st.get("batch_idx", 0),
-            "batches_total": -(-st.get("queue_total", 1) // BT_BATCH_SIZE) if st.get("queue_total") else 0,
+            "batches_total": -(-st.get("queue_total", 1) // bs) if st.get("queue_total") else 0,
             "symbols_remaining": len(st.get("symbols_remaining") or []),
             "completed_days": st.get("completed_days", 0),
             "last_completed": st.get("last_completed"),

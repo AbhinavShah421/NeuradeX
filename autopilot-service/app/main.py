@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from .autopilot import paper_loop, backtest_loop, status, set_mode, kick, reset_cursor
+from .autopilot import paper_loop, backtest_loop, status, set_mode, kick, reset_cursor, _set_batch_size
 
 from app.elk_logger import setup_logging, get_logger
 setup_logging()
@@ -57,6 +57,19 @@ async def control(req: ControlRequest):
     if req.enabled:
         # Start the first queue/tick immediately so the toggle feels instant.
         asyncio.create_task(kick(mode))
+    return {"status": "success", "data": await status()}
+
+
+class BatchSizeRequest(BaseModel):
+    batch_size: int
+
+
+@app.post("/backtest/batch-size")
+async def set_batch_size(req: BatchSizeRequest):
+    """Change how many backtest sessions run concurrently per batch (1–50)."""
+    n = await _set_batch_size(req.batch_size)
+    # Kick the queue so a larger batch can fill immediately (no-op if disabled).
+    asyncio.create_task(kick("backtest"))
     return {"status": "success", "data": await status()}
 
 
