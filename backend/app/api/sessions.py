@@ -427,6 +427,9 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
                 "status": "LONG", "entry_price": fill, "quantity": qty,
                 "entry_time": candle["time"], "current_pnl": 0.0,
                 "entry_fp": fp, "entry_regime": regime,
+                # Capture every agent's real vote at entry so the Orders execution
+                # trace shows the full ensemble (not a synthetic 5-agent stand-in).
+                "entry_agents": {a["agent_name"]: a["action"] for a in (agents or []) if a.get("agent_name")},
             }
             trade_executed = {"action": "BUY", "price": fill, "quantity": qty, "pnl": None, "time": candle["time"]}
             s["trades"].append({
@@ -481,7 +484,8 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
                 symbol=symbol, action="BUY", entry_price=entry, exit_price=exit_fill,
                 pnl_abs=round(pnl, 2), pnl_pct_decimal=pnl_pct / 100.0,
                 timestamp_open=entry_dt.isoformat(), timestamp_close=exit_dt.isoformat(),
-                duration_minutes=dur, agent_signals=_derive_agent_signals("BUY", ind),
+                duration_minutes=dur,
+                agent_signals=(pos.get("entry_agents") or _derive_agent_signals("BUY", ind)),
                 market_context={"regime": "intraday", "vwap": ind.get("vwap"), "rsi": ind.get("rsi"),
                                 "session_mode": s["mode"], "session_id": s["id"]},
                 confidence=conf,

@@ -99,17 +99,18 @@ function buildExecutionSteps(trade: TradeRecord): ExecStep[] {
   });
 
   const agentSignals = trade.agentSignals ?? {};
+  // Show every agent the ensemble actually recorded for this trade. Older trades
+  // only stored a synthetic 5-agent set, so fall back to that when nothing richer
+  // was persisted.
+  const agentEntries = Object.entries(agentSignals).filter(([, v]) => v != null && v !== '');
   steps.push({
     step: 2,
     name: 'Agent Decisions',
     icon: 'smart_toy',
     color: '#8b5cf6',
-    data: Object.fromEntries(
-      ['technical', 'sentiment', 'macro', 'pattern', 'rl'].map(agent => [
-        agent,
-        agentSignals[agent] ?? '—',
-      ])
-    ),
+    data: agentEntries.length > 0
+      ? Object.fromEntries(agentEntries)
+      : Object.fromEntries(['technical', 'sentiment', 'macro', 'pattern', 'rl'].map(a => [a, '—'])),
   });
 
   const mc = trade.marketContext ?? {};
@@ -182,6 +183,9 @@ function buildExecutionSteps(trade: TradeRecord): ExecStep[] {
 const AGENT_COLORS: Record<string, string> = {
   technical: '#3b82f6', sentiment: '#06b6d4', macro: '#f59e0b',
   pattern: '#8b5cf6', rl: '#10b981',
+  // Full ensemble roster
+  gbm: '#14b8a6', regime: '#a855f7', anomaly: '#ec4899', momentum: '#eab308',
+  memory: '#64748b', meanrev: '#f97316', volatility: '#ef4444',
 };
 const ACTION_COLOR: Record<string, string> = {
   BUY: '#22c55e', SELL: '#ef4444', HOLD: '#f59e0b',
