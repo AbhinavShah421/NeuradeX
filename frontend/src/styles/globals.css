@@ -222,6 +222,22 @@ body {
 .nd-ticker-up    { color: var(--nd-green); font-size: 12px; }
 .nd-ticker-dn    { color: var(--nd-red);   font-size: 12px; }
 
+/* ── Orders page two-column split (60% ledger / 40% AI insights) ─────────────── */
+.nd-orders-split {
+  display: grid;
+  grid-template-columns: 3fr 2fr;   /* ~60% / ~40% */
+  gap: 20px;
+  align-items: start;
+}
+.nd-orders-col-main { grid-column: 1; min-width: 0; }   /* min-width:0 lets wide
+                                                            tables scroll inside */
+.nd-orders-col-side { grid-column: 2; min-width: 0; }
+@media (max-width: 1024px) {
+  .nd-orders-split { grid-template-columns: 1fr; }
+  .nd-orders-col-main { grid-column: 1; order: 1; }
+  .nd-orders-col-side { grid-column: 1; order: 2; }
+}
+
 /* ── Main / Footer ─────────────────────────────────────────────────────────── */
 .nd-main {
   flex: 1;

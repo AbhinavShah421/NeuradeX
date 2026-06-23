@@ -486,6 +486,10 @@ const Orders: React.FC = () => {
         </div>
       )}
 
+      {/* Two-column split: left = performance + order list (60%), right = AI insights (40%) */}
+      <div className="nd-orders-split">
+        <div className="nd-orders-col-side">
+
       {/* ── AI Loss Learning — why trades lost + lessons applied to future decisions ── */}
       <div style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 12, padding: '16px 18px', marginBottom: 20 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: lessons.length || postmortems.length ? 12 : 0 }}>
@@ -573,30 +577,6 @@ const Orders: React.FC = () => {
         </div>
       )}
 
-      {/* Portfolio performance metrics */}
-      {portfolio && portfolio.totalTrades > 0 && (
-        <div style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 12, padding: '14px 18px', marginBottom: 20 }}>
-          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--nd-text-3)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 12 }}>
-            Portfolio Performance · {portfolio.totalTrades} closed trades
-          </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))', gap: 12 }}>
-            {[
-              { label: 'Sharpe',       value: portfolio.sharpeRatio.toFixed(2),       good: portfolio.sharpeRatio >= 1 },
-              { label: 'Sortino',      value: portfolio.sortinoRatio.toFixed(2),      good: portfolio.sortinoRatio >= 1 },
-              { label: 'Calmar',       value: portfolio.calmarRatio.toFixed(2),       good: portfolio.calmarRatio >= 1 },
-              { label: 'Max Drawdown', value: `${portfolio.maxDrawdownPct.toFixed(1)}%`, good: portfolio.maxDrawdownPct < 15 },
-              { label: 'Total Return', value: `${portfolio.totalReturnPct >= 0 ? '+' : ''}${portfolio.totalReturnPct.toFixed(1)}%`, good: portfolio.totalReturnPct >= 0 },
-              { label: 'Avg P&L/trade', value: `${portfolio.meanPnlPct >= 0 ? '+' : ''}${portfolio.meanPnlPct.toFixed(2)}%`, good: portfolio.meanPnlPct >= 0 },
-            ].map(m => (
-              <div key={m.label} style={{ textAlign: 'center' }}>
-                <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginBottom: 4 }}>{m.label}</div>
-                <div style={{ fontSize: 18, fontWeight: 700, color: m.good ? 'var(--nd-green)' : 'var(--nd-red)' }}>{m.value}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
       {/* Per-agent accuracy (precision / recall / F1) */}
       {agentAcc && Object.values(agentAcc).some(a => a.f1 !== undefined) && (
         <div style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 12, padding: '14px 18px', marginBottom: 20 }}>
@@ -633,6 +613,34 @@ const Orders: React.FC = () => {
                 ))}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+        </div>{/* /nd-orders-col-side */}
+
+        <div className="nd-orders-col-main">
+
+      {/* Portfolio performance metrics */}
+      {portfolio && portfolio.totalTrades > 0 && (
+        <div style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 12, padding: '14px 18px', marginBottom: 20 }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--nd-text-3)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 12 }}>
+            Portfolio Performance · {portfolio.totalTrades} closed trades
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))', gap: 12 }}>
+            {[
+              { label: 'Sharpe',       value: portfolio.sharpeRatio.toFixed(2),       good: portfolio.sharpeRatio >= 1 },
+              { label: 'Sortino',      value: portfolio.sortinoRatio.toFixed(2),      good: portfolio.sortinoRatio >= 1 },
+              { label: 'Calmar',       value: portfolio.calmarRatio.toFixed(2),       good: portfolio.calmarRatio >= 1 },
+              { label: 'Max Drawdown', value: `${portfolio.maxDrawdownPct.toFixed(1)}%`, good: portfolio.maxDrawdownPct < 15 },
+              { label: 'Total Return', value: `${portfolio.totalReturnPct >= 0 ? '+' : ''}${portfolio.totalReturnPct.toFixed(1)}%`, good: portfolio.totalReturnPct >= 0 },
+              { label: 'Avg P&L/trade', value: `${portfolio.meanPnlPct >= 0 ? '+' : ''}${portfolio.meanPnlPct.toFixed(2)}%`, good: portfolio.meanPnlPct >= 0 },
+            ].map(m => (
+              <div key={m.label} style={{ textAlign: 'center' }}>
+                <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginBottom: 4 }}>{m.label}</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: m.good ? 'var(--nd-green)' : 'var(--nd-red)' }}>{m.value}</div>
+              </div>
+            ))}
           </div>
         </div>
       )}
@@ -786,6 +794,9 @@ const Orders: React.FC = () => {
           </div>
         </div>
       )}
+
+        </div>{/* /nd-orders-col-main */}
+      </div>{/* /nd-orders-split */}
 
       {/* Execution preview modal */}
       {selected && <ExecutionModal trade={selected} allTrades={trades} onClose={() => setSelected(null)} />}
