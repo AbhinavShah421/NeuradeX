@@ -172,8 +172,9 @@ body {
 .nd-theme-btn .material-icons { font-size: 17px; }
 
 /* ── Market ticker strip ────────────────────────────────────────────────────── */
-/* Full-width bar (border + background), but its content is constrained to the
-   same max-width container as the header nav and main, so it lines up. */
+/* Full-width bar (border + background). The content is constrained to the same
+   max-width container as the header nav and main so it lines up, and scrolls
+   right-to-left as a seamless marquee (two identical groups, translateX -50%). */
 .nd-ticker {
   border-top: 1px solid var(--nd-border);
   background: var(--nd-surface);
@@ -182,13 +183,28 @@ body {
   max-width: 1280px;
   margin: 0 auto;
   padding: 5px 24px;
-  display: flex;
-  justify-content: center;
-  gap: 36px;
-  overflow-x: auto;
-  scrollbar-width: none;
+  overflow: hidden;          /* viewport mask — clips the moving track */
 }
-.nd-ticker-inner::-webkit-scrollbar { display: none; }
+.nd-ticker-track {
+  display: flex;
+  width: max-content;
+  animation: nd-ticker-scroll 38s linear infinite;
+}
+/* Pause when the user wants to read a value */
+.nd-ticker-inner:hover .nd-ticker-track { animation-play-state: paused; }
+.nd-ticker-group {
+  display: flex;
+  gap: 36px;
+  padding-right: 36px;       /* seam spacing equals the inter-item gap */
+  flex-shrink: 0;
+}
+@keyframes nd-ticker-scroll {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .nd-ticker-track { animation: none; }
+}
 
 .nd-ticker-item {
   display: flex;
@@ -798,7 +814,7 @@ body.nd-chart-fullscreen-open { overflow: hidden; }
   .nd-main { padding: 16px 12px; }
 
   /* Ticker */
-  .nd-ticker-inner { justify-content: flex-start; gap: 16px; padding: 5px 12px; }
+  .nd-ticker-inner { padding: 5px 12px; }
 
   /* Responsive grids */
   .nd-grid-4       { grid-template-columns: repeat(2, 1fr); }

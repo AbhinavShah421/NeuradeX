@@ -391,15 +391,28 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
 
         <div className="nd-ticker">
           <div className="nd-ticker-inner">
-            {INDICES.map(idx => (
-              <div key={idx.name} className="nd-ticker-item">
-                <span className="nd-ticker-name">{idx.name}</span>
-                <span className="nd-ticker-val">{idx.value}</span>
-                <span className={idx.change >= 0 ? 'nd-ticker-up' : 'nd-ticker-dn'}>
-                  {idx.change >= 0 ? '+' : ''}{idx.change.toFixed(2)} ({idx.pct}%)
-                </span>
-              </div>
-            ))}
+            <div className="nd-ticker-track">
+              {/* Two identical groups so the marquee loops seamlessly (-50%) */}
+              {[0, 1].map(copy => (
+                <div className="nd-ticker-group" key={copy} aria-hidden={copy === 1}>
+                  {INDICES.map(idx => {
+                    const up = idx.change >= 0;
+                    return (
+                      <div key={idx.name} className="nd-ticker-item">
+                        <span className="nd-ticker-name">{idx.name}</span>
+                        <span className="nd-ticker-val">{idx.value}</span>
+                        <span className={up ? 'nd-ticker-up' : 'nd-ticker-dn'} style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+                          <span className="material-icons" style={{ fontSize: 15, lineHeight: 1 }}>
+                            {up ? 'trending_up' : 'trending_down'}
+                          </span>
+                          {up ? '+' : ''}{idx.change.toFixed(2)} ({idx.pct}%)
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       </header>
