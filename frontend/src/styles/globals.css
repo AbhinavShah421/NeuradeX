@@ -229,13 +229,15 @@ body {
   gap: 20px;
   align-items: start;
 }
-.nd-orders-col-main { grid-column: 1; min-width: 0; }   /* min-width:0 lets wide
-                                                            tables scroll inside */
-.nd-orders-col-side { grid-column: 2; min-width: 0; }
+/* Both pinned to row 1 so they sit parallel — the side column is first in the
+   DOM, so without an explicit row the main column would drop to row 2. */
+.nd-orders-col-main { grid-column: 1; grid-row: 1; min-width: 0; }  /* min-width:0
+                                                       lets wide tables scroll */
+.nd-orders-col-side { grid-column: 2; grid-row: 1; min-width: 0; }
 @media (max-width: 1024px) {
   .nd-orders-split { grid-template-columns: 1fr; }
-  .nd-orders-col-main { grid-column: 1; order: 1; }
-  .nd-orders-col-side { grid-column: 1; order: 2; }
+  .nd-orders-col-main { grid-column: 1; grid-row: auto; order: 1; }
+  .nd-orders-col-side { grid-column: 1; grid-row: auto; order: 2; }
 }
 
 /* ── Main / Footer ─────────────────────────────────────────────────────────── */
