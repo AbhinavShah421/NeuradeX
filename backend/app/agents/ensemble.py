@@ -158,11 +158,16 @@ class EnsembleEngine:
         total    = sum(vote.values()) or 1.0
         vote_pct = {k: v / total for k, v in vote.items()}
         action   = max(vote, key=lambda k: vote[k])
-        confidence = 0.30 + vote_pct[action] * 0.65
 
-        # Agreement score
+        # Agreement score — how many agents actually voted this way.
         agreers   = sum(1 for s in signals if s.action == action)
         agreement = agreers / len(signals) if signals else 0.0
+
+        # Confidence reflects BOTH the weighted-vote share AND genuine agreement,
+        # so a single heavily-weighted agent can't fake high confidence. Post-trade
+        # analysis showed lopsided high-confidence entries (one dominant voice) are
+        # the ones that reverse and lose; blending in agreement fixes that.
+        confidence = 0.30 + 0.65 * (0.6 * vote_pct[action] + 0.4 * agreement)
 
         # Risk score from volatility agent
         risk_score = 0.50
