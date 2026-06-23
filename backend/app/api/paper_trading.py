@@ -873,11 +873,13 @@ async def paper_trading_tick(
 
     # Merged candles: Yahoo Finance history (09:15 → now-2min) + Groww tick candles
     # (real prices for recent minutes) + live in-progress bar with current LTP.
-    # Refresh Yahoo cache in the background every 3 min to pick up new completed bars.
-    if symbol not in _yahoo_candles:
-        current_time_for_yahoo = _current_candle_time()
-        yahoo = await _get_yahoo_cached(symbol, current_time_for_yahoo)
-        # _get_yahoo_cached already stores in _yahoo_candles
+    # Always refresh — _get_yahoo_cached has a 15s TTL, so this only hits Yahoo's
+    # API when stale. Fetching once per symbol froze the candle window otherwise.
+    current_time_for_yahoo = _current_candle_time()
+    try:
+        await _get_yahoo_cached(symbol, current_time_for_yahoo)
+    except Exception:
+        pass
 
     candles     = _get_merged_candles(symbol, price, ts)
     data_source = "yahoo+groww" if (_yahoo_candles.get(symbol) or ([], 0))[0] else ("groww_ticks" if candles else "no_data")

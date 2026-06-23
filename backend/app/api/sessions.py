@@ -647,11 +647,14 @@ async def _advance_paper(s: dict) -> None:
                 s["_groww_live_fails"] = fails
                 if fails >= 3:
                     s["_groww_live_off"] = True   # no live-data → use Yahoo only
-        if symbol not in pt._yahoo_candles:
-            try:
-                await pt._get_yahoo_cached(symbol, cur)
-            except Exception:
-                pass
+        # Refresh the Yahoo base every poll — _get_yahoo_cached has its own 15s TTL,
+        # so this only hits Yahoo's API when the cache is stale. Without this the
+        # base was fetched once per symbol and never again, freezing each session's
+        # candle window at the time it started (stale data, no new candles).
+        try:
+            await pt._get_yahoo_cached(symbol, cur)
+        except Exception:
+            pass
         candles = pt._get_merged_candles(symbol, ltp, ts)
         if candles:
             s["candles"]      = candles
