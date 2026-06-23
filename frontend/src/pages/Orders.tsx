@@ -310,12 +310,69 @@ function ExecutionModal({ trade, allTrades = [], onClose }: { trade: TradeRecord
   );
 }
 
+// ── Pagination control ─────────────────────────────────────────────────────────
+
+const Pager: React.FC<{ page: number; totalPages: number; total: number; pageSize: number; onPage: (p: number) => void }> = ({ page, totalPages, total, pageSize, onPage }) => {
+  if (totalPages <= 1) return null;
+  const from = (page - 1) * pageSize + 1;
+  const to = Math.min(page * pageSize, total);
+  const mk = (label: React.ReactNode, p: number, disabled: boolean, active = false) => (
+    <button key={`${label}-${p}`} onClick={() => !disabled && onPage(p)} disabled={disabled}
+      style={{ minWidth: 26, height: 26, padding: '0 7px', borderRadius: 6, fontSize: 12, fontWeight: 600,
+        border: `1px solid ${active ? 'var(--nd-accent)' : 'var(--nd-border)'}`,
+        background: active ? 'var(--nd-accent)' : 'var(--nd-surface)',
+        color: active ? '#fff' : disabled ? 'var(--nd-text-3)' : 'var(--nd-text-2)',
+        cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.4 : 1 }}>
+      {label}
+    </button>
+  );
+  const nums: number[] = [];
+  for (let p = 1; p <= totalPages; p++) {
+    if (p === 1 || p === totalPages || (p >= page - 1 && p <= page + 1)) nums.push(p);
+  }
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
+      <span style={{ fontSize: 11.5, color: 'var(--nd-text-3)', marginRight: 2 }}>{from}–{to} of {total}</span>
+      {mk('‹', page - 1, page <= 1)}
+      {nums.map((p, i) => {
+        const prev = nums[i - 1];
+        return (
+          <React.Fragment key={p}>
+            {prev && p - prev > 1 && <span style={{ color: 'var(--nd-text-3)', fontSize: 12 }}>…</span>}
+            {mk(p, p, false, p === page)}
+          </React.Fragment>
+        );
+      })}
+      {mk('›', page + 1, page >= totalPages)}
+    </div>
+  );
+};
+
+// ── Order-list skeleton (shown while the list reloads on a mode change) ─────────
+
+const OrderListSkeleton: React.FC = () => (
+  <div style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 12, overflow: 'hidden' }}>
+    {Array.from({ length: 8 }).map((_, i) => (
+      <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 16, padding: '14px 16px', borderBottom: '1px solid var(--nd-border)' }}>
+        <div className="nd-skel" style={{ width: 16, height: 16 }} />
+        <div className="nd-skel" style={{ width: 90, height: 14 }} />
+        <div className="nd-skel" style={{ width: 60, height: 18, borderRadius: 4 }} />
+        <div className="nd-skel" style={{ width: 70, height: 14 }} />
+        <div className="nd-skel" style={{ width: 80, height: 14, marginLeft: 'auto' }} />
+        <div className="nd-skel" style={{ width: 70, height: 14 }} />
+        <div className="nd-skel" style={{ width: 96, height: 14 }} />
+      </div>
+    ))}
+  </div>
+);
+
 // ── Main Orders Page ──────────────────────────────────────────────────────────
 
 const Orders: React.FC = () => {
   const [trades,  setTrades]  = useState<TradeRecord[]>([]);
   const [stats,   setStats]   = useState<Stats | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(true);        // initial page load only
+  const [listLoading, setListLoading] = useState(true); // order-list-only reload (mode change)
   const [error,   setError]   = useState<string | null>(null);
   const [portfolio, setPortfolio] = useState<PortfolioMetrics | null>(null);
   const [agentAcc,  setAgentAcc]  = useState<Record<string, AgentMetric> | null>(null);
@@ -324,6 +381,8 @@ const Orders: React.FC = () => {
   const [sortKey,  setSortKey]  = useState<string>('created');
   const [sortDir,  setSortDir]  = useState<'asc' | 'desc'>('desc');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 50;
   const [lessons,     setLessons]     = useState<any[]>([]);
   const [postmortems, setPostmortems] = useState<any[]>([]);
   const [lossBusy,    setLossBusy]    = useState(false);
@@ -370,12 +429,17 @@ const Orders: React.FC = () => {
     loadOnce().catch(e => { setError(e.message); setLoading(false); });
   }, []);
 
+  // Mode-pill change reloads ONLY the order list (skeleton), never the whole page.
   useEffect(() => {
-    setLoading(true);
+    setListLoading(true);
+    setPage(1);
     apiService.getFeedbackTrades(filter === 'ALL' ? undefined : filter).then(data => {
       setTrades(Array.isArray(data) ? data : data.trades ?? []);
-    }).catch(() => {}).finally(() => setLoading(false));
+    }).catch(() => {}).finally(() => setListLoading(false));
   }, [filter]);
+
+  // Reset to page 1 whenever sort or any column filter changes.
+  useEffect(() => { setPage(1); }, [sortKey, sortDir, fSymbol, fPnl, fMinTrades, fMinWin, fTradeFrom, fTradeTo, fCreatedFrom, fCreatedTo]);
 
   // Server already filters by source — trades array is already the right subset.
   const filteredTrades = trades;
@@ -446,6 +510,12 @@ const Orders: React.FC = () => {
   });
   const filtersActive = !!(fSymbol || fPnl !== 'ALL' || fMinTrades || fMinWin || fTradeFrom || fTradeTo || fCreatedFrom || fCreatedTo);
   const clearFilters = () => { setFSymbol(''); setFPnl('ALL'); setFMinTrades(''); setFMinWin(''); setFTradeFrom(''); setFTradeTo(''); setFCreatedFrom(''); setFCreatedTo(''); };
+
+  // ── Pagination — filters/sort are applied to ALL sessions first, then we show
+  //    one page (PAGE_SIZE) of the result. ──────────────────────────────────────
+  const totalPages = Math.max(1, Math.ceil(visibleSessions.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const pagedSessions = visibleSessions.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
 
   const totalTrades  = stats?.tradeStats?.reduce((s, r) => s + Number(r.count), 0) ?? 0;
   const winningTrades = stats?.tradeStats?.find(r => r.outcome === 'WIN')?.count ?? 0;
@@ -627,7 +697,7 @@ const Orders: React.FC = () => {
           <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--nd-text-3)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 12 }}>
             Portfolio Performance · {portfolio.totalTrades} closed trades
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))', gap: 12 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, minmax(0, 1fr))', gap: 8 }}>
             {[
               { label: 'Sharpe',       value: portfolio.sharpeRatio.toFixed(2),       good: portfolio.sharpeRatio >= 1 },
               { label: 'Sortino',      value: portfolio.sortinoRatio.toFixed(2),      good: portfolio.sortinoRatio >= 1 },
@@ -636,9 +706,9 @@ const Orders: React.FC = () => {
               { label: 'Total Return', value: `${portfolio.totalReturnPct >= 0 ? '+' : ''}${portfolio.totalReturnPct.toFixed(1)}%`, good: portfolio.totalReturnPct >= 0 },
               { label: 'Avg P&L/trade', value: `${portfolio.meanPnlPct >= 0 ? '+' : ''}${portfolio.meanPnlPct.toFixed(2)}%`, good: portfolio.meanPnlPct >= 0 },
             ].map(m => (
-              <div key={m.label} style={{ textAlign: 'center' }}>
-                <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginBottom: 4 }}>{m.label}</div>
-                <div style={{ fontSize: 18, fontWeight: 700, color: m.good ? 'var(--nd-green)' : 'var(--nd-red)' }}>{m.value}</div>
+              <div key={m.label} style={{ textAlign: 'center', minWidth: 0 }}>
+                <div style={{ fontSize: 10, color: 'var(--nd-text-3)', marginBottom: 4, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{m.label}</div>
+                <div style={{ fontSize: 16, fontWeight: 700, whiteSpace: 'nowrap', color: m.good ? 'var(--nd-green)' : 'var(--nd-red)' }}>{m.value}</div>
               </div>
             ))}
           </div>
@@ -668,6 +738,11 @@ const Orders: React.FC = () => {
         <span style={{ marginLeft: 4, fontSize: 12, color: 'var(--nd-text-3)', alignSelf: 'center' }}>
           {visibleSessions.length} session{visibleSessions.length !== 1 ? 's' : ''}
         </span>
+        {!listLoading && (
+          <div style={{ marginLeft: 'auto' }}>
+            <Pager page={safePage} totalPages={totalPages} total={visibleSessions.length} pageSize={PAGE_SIZE} onPage={setPage} />
+          </div>
+        )}
       </div>
 
       {/* Column filters panel */}
@@ -705,11 +780,19 @@ const Orders: React.FC = () => {
       )}
 
       {/* Trade list */}
-      {filteredTrades.length === 0 ? (
+      {listLoading ? (
+        <OrderListSkeleton />
+      ) : filteredTrades.length === 0 ? (
         <div style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 12, padding: 48, textAlign: 'center', color: 'var(--nd-text-3)' }}>
           No trades yet. Trades from Live, Paper, and Backtest modes all appear here.
         </div>
+      ) : visibleSessions.length === 0 ? (
+        <div style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 12, padding: 48, textAlign: 'center', color: 'var(--nd-text-3)' }}>
+          No sessions match the current filters.{' '}
+          <button onClick={clearFilters} style={{ background: 'none', border: 'none', color: 'var(--nd-accent)', cursor: 'pointer', fontSize: 13, textDecoration: 'underline' }}>Clear filters</button>
+        </div>
       ) : (
+        <>
         <div style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 12, overflow: 'hidden' }}>
           <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' as any }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, minWidth: 820 }}>
@@ -728,7 +811,7 @@ const Orders: React.FC = () => {
               </tr>
             </thead>
             <tbody>
-              {visibleSessions.map(s => {
+              {pagedSessions.map(s => {
                 const open = expanded.has(s.key);
                 const fmt = (ms: number) => ms ? new Date(ms).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—';
                 return (
@@ -793,6 +876,12 @@ const Orders: React.FC = () => {
           </table>
           </div>
         </div>
+        {totalPages > 1 && (
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 12 }}>
+            <Pager page={safePage} totalPages={totalPages} total={visibleSessions.length} pageSize={PAGE_SIZE} onPage={setPage} />
+          </div>
+        )}
+        </>
       )}
 
         </div>{/* /nd-orders-col-main */}

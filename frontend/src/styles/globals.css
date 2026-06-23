@@ -222,6 +222,14 @@ body {
 .nd-ticker-up    { color: var(--nd-green); font-size: 12px; }
 .nd-ticker-dn    { color: var(--nd-red);   font-size: 12px; }
 
+/* ── Skeleton shimmer (loading placeholders) ────────────────────────────────── */
+@keyframes nd-skel-pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 0.85; } }
+.nd-skel {
+  background: var(--nd-border);
+  border-radius: 6px;
+  animation: nd-skel-pulse 1.2s ease-in-out infinite;
+}
+
 /* ── Orders page two-column split (60% ledger / 40% AI insights) ─────────────── */
 .nd-orders-split {
   display: grid;
