@@ -50,6 +50,11 @@ TRADE_GATE_KEY = "ai_engine:trade_gate"
 # (win-rate 16% at >0.90 vs 40% at 0.50–0.60). So disciplined gates also skip
 # OVER-confident setups. Expectancy on the [floor, ceiling] band is positive
 # where the unbounded gate was negative. "loose" stays uncapped by design.
+# A long entry requires genuine multi-agent support: at least this many agents
+# must independently vote BUY, on every gate. Stops a single agent (or just the
+# intraday timing trigger) from opening a trade the ensemble doesn't back.
+_MIN_BUY_VOTES = 2
+
 TRADE_GATES = {
     "strict": {"label": "Strict", "require_buy": True,  "min_conf": 0.52, "max_conf": 0.76,
                "desc": "Enters only when the ensemble votes BUY within the calibrated confidence band (over-confident signals are skipped). Fewest, best-calibrated trades."},
@@ -319,8 +324,12 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         gate_mode = await get_trade_gate()
         gate = TRADE_GATES[gate_mode]
         blocked: list[str] = []
+        # Genuine BUY support: count agents that independently voted BUY.
+        buy_votes = sum(1 for a in agents if (a.get("action") == "BUY"))
         if tsig != 1:
             blocked.append(_timing_block_reason(ind, candle))
+        if buy_votes < _MIN_BUY_VOTES:
+            blocked.append(f"only {buy_votes} agent{'s' if buy_votes != 1 else ''} voted BUY — need at least {_MIN_BUY_VOTES}")
         if gate["require_buy"] and ens_action != "BUY":
             blocked.append(f"ensemble did not vote BUY (it's {ens_action})")
         elif not gate["require_buy"] and ens_action == "SELL":
@@ -331,6 +340,7 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         if conf > max_conf:
             blocked.append(f"confidence {conf:.0%} above the {max_conf:.0%} ceiling (over-confident setups historically reverse)")
         enter = (tsig == 1
+                 and buy_votes >= _MIN_BUY_VOTES
                  and (ens_action == "BUY" if gate["require_buy"] else ens_action != "SELL")
                  and gate["min_conf"] <= conf <= max_conf)
         # Pattern-quality gate (shared pattern AI engine): only trade good patterns.
@@ -427,9 +437,11 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
                 "status": "LONG", "entry_price": fill, "quantity": qty,
                 "entry_time": candle["time"], "current_pnl": 0.0,
                 "entry_fp": fp, "entry_regime": regime,
-                # Capture every agent's real vote at entry so the Orders execution
-                # trace shows the full ensemble (not a synthetic 5-agent stand-in).
+                # Capture every agent's real vote + the ensemble confidence AT ENTRY
+                # so the Orders execution trace shows the actual entry decision
+                # (not the exit candle's numbers or a synthetic 5-agent stand-in).
                 "entry_agents": {a["agent_name"]: a["action"] for a in (agents or []) if a.get("agent_name")},
+                "entry_conf": conf,
             }
             trade_executed = {"action": "BUY", "price": fill, "quantity": qty, "pnl": None, "time": candle["time"]}
             s["trades"].append({
@@ -488,7 +500,7 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
                 agent_signals=(pos.get("entry_agents") or _derive_agent_signals("BUY", ind)),
                 market_context={"regime": "intraday", "vwap": ind.get("vwap"), "rsi": ind.get("rsi"),
                                 "session_mode": s["mode"], "session_id": s["id"]},
-                confidence=conf,
+                confidence=pos.get("entry_conf", conf),
                 trade_source=s.get("trade_source", "PAPER" if s["mode"] == "paper" else "REPLAY"),
             )]))
         except Exception:
