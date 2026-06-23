@@ -1087,6 +1087,7 @@ const ScanAccuracyCard: React.FC = () => {
   const [data, setData] = useState<any>(null);
   const [show, setShow] = useState<{ intraday: boolean; delivery: boolean; committed: boolean }>(
     { intraday: true, delivery: true, committed: true });
+  const [hover, setHover] = useState<{ cx: number; cy: number; sLabel: string; sColor: string; p: any } | null>(null);
   useEffect(() => { apiService.scanEvaluation().then(r => setData((r as any).data)).catch(() => {}); }, []);
 
   const intraday: any[] = data?.trend ?? [];
@@ -1149,7 +1150,8 @@ const ScanAccuracyCard: React.FC = () => {
           No graded scans yet — the morning watchlist is graded after each close (delivery picks after a {data?.latest?.horizon_days ?? 5}-day hold).
         </div>
       ) : (
-        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 160 }} preserveAspectRatio="none">
+        <div style={{ position: 'relative', width: '100%' }} onMouseLeave={() => setHover(null)}>
+        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 160, display: 'block' }} preserveAspectRatio="none">
           {[yMin, (yMin + yMax) / 2, yMax].map((v, i) => (
             <g key={i}>
               <line x1={PL} y1={sy(v)} x2={W - PR} y2={sy(v)} stroke="var(--nd-border)" strokeWidth="0.5" />
@@ -1166,10 +1168,23 @@ const ScanAccuracyCard: React.FC = () => {
                 {s.pts.length > 1
                   ? <polyline points={line} fill="none" stroke={s.color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
                   : null}
-                {s.pts.map((p, i) => (
-                  <circle key={i} cx={xi(p.date)} cy={sy(p.accuracy * 100)} r="3"
-                    fill={p.meetsTarget ? s.color : '#ef4444'} stroke={s.color} strokeWidth="1" />
-                ))}
+                {s.pts.map((p, i) => {
+                  const cx = xi(p.date), cy = sy(p.accuracy * 100);
+                  const active = hover && hover.p === p;
+                  return (
+                    <g key={i}>
+                      <circle cx={cx} cy={cy} r={active ? 5 : 3}
+                        fill={p.meetsTarget ? s.color : '#ef4444'} stroke={active ? '#fff' : s.color} strokeWidth={active ? 1.5 : 1}
+                        style={{ transition: 'r 0.1s' }} />
+                      {/* larger invisible hit target for easy hover/focus */}
+                      <circle cx={cx} cy={cy} r="9" fill="transparent" style={{ cursor: 'pointer' }}
+                        tabIndex={0}
+                        onMouseEnter={() => setHover({ cx, cy, sLabel: s.label, sColor: s.color, p })}
+                        onFocus={() => setHover({ cx, cy, sLabel: s.label, sColor: s.color, p })}
+                        onBlur={() => setHover(null)} />
+                    </g>
+                  );
+                })}
               </g>
             );
           })}
@@ -1177,6 +1192,52 @@ const ScanAccuracyCard: React.FC = () => {
             <text key={k} x={xi(d)} y={H - 8} fontSize="9" fill="var(--nd-text-3)" textAnchor={k === 0 ? 'start' : 'end'}>{d}</text>
           ))}
         </svg>
+
+        {/* Hover tooltip */}
+        {hover && (() => {
+          const leftPct = (hover.cx / W) * 100;
+          const topPct = (hover.cy / H) * 100;
+          const flipRight = leftPct > 62;       // keep tooltip on-screen near the right edge
+          const er = hover.p.avgRealizedReturnPct;
+          return (
+            <div style={{
+              position: 'absolute', left: `${leftPct}%`, top: `${topPct}%`,
+              transform: `translate(${flipRight ? '-100%' : '0'}, calc(-100% - 10px))`,
+              marginLeft: flipRight ? -8 : 8,
+              background: 'var(--nd-bg-2, #1b2330)', border: `1px solid ${hover.sColor}55`,
+              borderRadius: 8, padding: '8px 10px', minWidth: 150, zIndex: 20,
+              boxShadow: '0 6px 20px rgba(0,0,0,.4)', pointerEvents: 'none',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                <span style={{ width: 8, height: 8, borderRadius: '50%', background: hover.sColor, flexShrink: 0 }} />
+                <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--nd-text-1)' }}>{hover.sLabel}</span>
+                <span style={{ marginLeft: 'auto', fontSize: 9.5, fontWeight: 700, padding: '1px 5px', borderRadius: 4,
+                  background: hover.p.meetsTarget ? '#22c55e22' : '#ef444422',
+                  color: hover.p.meetsTarget ? '#22c55e' : '#ef4444' }}>
+                  {hover.p.meetsTarget ? 'HIT' : 'MISS'}
+                </span>
+              </div>
+              <div style={{ fontSize: 10.5, color: 'var(--nd-text-3)', marginBottom: 6 }}>{hover.p.date}</div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 11.5, marginBottom: 2 }}>
+                <span style={{ color: 'var(--nd-text-3)' }}>Accuracy</span>
+                <span style={{ fontWeight: 700, color: hover.sColor }}>{(hover.p.accuracy * 100).toFixed(0)}% vs {target.toFixed(0)}%</span>
+              </div>
+              {hover.p.picks != null && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 11.5, marginBottom: 2 }}>
+                  <span style={{ color: 'var(--nd-text-3)' }}>Picks graded</span>
+                  <span style={{ fontWeight: 600, color: 'var(--nd-text-1)' }}>{hover.p.picks}</span>
+                </div>
+              )}
+              {er != null && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 11.5 }}>
+                  <span style={{ color: 'var(--nd-text-3)' }}>Avg move/pick</span>
+                  <span style={{ fontWeight: 600, color: er >= 0 ? 'var(--nd-green)' : 'var(--nd-red)' }}>{er >= 0 ? '+' : ''}{er.toFixed(2)}%</span>
+                </div>
+              )}
+            </div>
+          );
+        })()}
+        </div>
       )}
 
       {/* spacer pushes the status note to the bottom so the card fills the row
