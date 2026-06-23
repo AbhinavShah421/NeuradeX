@@ -1,5 +1,6 @@
 """AI Engine REST API — analyze, record outcomes, performance, history."""
 from __future__ import annotations
+import asyncio
 import os
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -418,6 +419,39 @@ async def backfill_committed(days: int = 20, limit: int = 400):
         return {"status": "error", "detail": str(exc)}
 
 
+@router.get("/auto-scan")
+async def get_auto_scan():
+    """Return whether the continuous background scan loop is enabled."""
+    import httpx
+    from app.config import settings
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(f"{settings.SCANNER_SERVICE_URL}/auto-scan")
+            if r.status_code == 200:
+                return r.json()
+    except Exception as exc:
+        logger.debug("auto-scan status proxy failed: %s", exc)
+    return {"status": "success", "data": {"enabled": True}}
+
+
+@router.post("/auto-scan")
+async def set_auto_scan(enabled: bool):
+    """Enable or disable the continuous background scan loop."""
+    import httpx
+    from app.config import settings
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.post(
+                f"{settings.SCANNER_SERVICE_URL}/auto-scan",
+                params={"enabled": str(enabled).lower()},
+            )
+            if r.status_code == 200:
+                return r.json()
+    except Exception as exc:
+        logger.warning("auto-scan toggle proxy failed: %s", exc)
+    return {"status": "error", "detail": "scanner unavailable"}
+
+
 @router.get("/scan-status")
 async def scan_status():
     """Centralized scan status (shared by Dashboard / Predictions / Portfolio):
@@ -427,9 +461,16 @@ async def scan_status():
     from app.config import settings
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            r = await client.get(f"{settings.SCANNER_SERVICE_URL}/status")
-            if r.status_code == 200:
-                d = (r.json() or {}).get("data", {})
+            status_r, auto_r = await asyncio.gather(
+                client.get(f"{settings.SCANNER_SERVICE_URL}/status"),
+                client.get(f"{settings.SCANNER_SERVICE_URL}/auto-scan"),
+                return_exceptions=True,
+            )
+            if not isinstance(status_r, Exception) and status_r.status_code == 200:
+                d = (status_r.json() or {}).get("data", {})
+                auto_enabled = True
+                if not isinstance(auto_r, Exception) and auto_r.status_code == 200:
+                    auto_enabled = bool((auto_r.json() or {}).get("data", {}).get("enabled", True))
                 return {"status": "success", "data": {
                     "scanning": bool(d.get("scanning")),
                     "running": bool(d.get("running")),
@@ -438,6 +479,7 @@ async def scan_status():
                     "candidates": d.get("candidates", 0),
                     "last_scan": d.get("last_scan"),
                     "market_regime": d.get("market_regime"),
+                    "auto_scan_enabled": auto_enabled,
                 }}
     except Exception as exc:
         logger.debug("scan-status proxy failed: %s", exc)

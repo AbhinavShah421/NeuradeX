@@ -1,11 +1,12 @@
 import React from 'react';
 import { useScanStore } from '../stores/scanStore';
 
-// Shared AI-scan status + Rescan button. Identical state on every page: the
-// Rescan button is disabled whenever a sweep is running or any trading session
-// is live (sessions use the same market data pipeline).
 const ScanControl: React.FC<{ align?: 'left' | 'right' }> = ({ align = 'right' }) => {
-  const { scanning, scanned, universe, lastScan, runningSessions, rescan } = useScanStore();
+  const {
+    scanning, scanned, universe, lastScan, runningSessions,
+    autoScanEnabled, togglingAutoScan,
+    rescan, toggleAutoScan,
+  } = useScanStore();
   const pct = universe ? Math.round((scanned / universe) * 100) : 0;
   const blocked = scanning || runningSessions > 0;
 
@@ -15,7 +16,7 @@ const ScanControl: React.FC<{ align?: 'left' | 'right' }> = ({ align = 'right' }
       })
     : null;
 
-  const tooltip = scanning
+  const rescanTooltip = scanning
     ? 'A scan is already running'
     : runningSessions > 0
       ? `Cannot scan while ${runningSessions} session${runningSessions > 1 ? 's are' : ' is'} running`
@@ -33,10 +34,32 @@ const ScanControl: React.FC<{ align?: 'left' | 'right' }> = ({ align = 'right' }
               ? <span> · {lastScanLabel}</span>
               : null}
       </span>
+
+      {/* Auto-scan toggle */}
+      <button
+        onClick={toggleAutoScan}
+        disabled={togglingAutoScan}
+        title={autoScanEnabled ? 'Auto-scan is ON — click to pause background sweeps' : 'Auto-scan is OFF — click to resume background sweeps'}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 5, padding: '5px 10px',
+          borderRadius: 8, border: '1px solid var(--nd-border)',
+          background: autoScanEnabled ? 'rgba(16,185,129,0.12)' : 'var(--nd-surface)',
+          color: autoScanEnabled ? 'var(--nd-green)' : 'var(--nd-text-3)',
+          cursor: togglingAutoScan ? 'not-allowed' : 'pointer',
+          opacity: togglingAutoScan ? 0.6 : 1,
+          fontSize: 11, fontWeight: 600, transition: 'all 0.15s',
+        }}>
+        <span className="material-icons" style={{ fontSize: 13 }}>
+          {autoScanEnabled ? 'autorenew' : 'pause_circle'}
+        </span>
+        Auto
+      </button>
+
+      {/* Manual rescan button */}
       <button
         onClick={rescan}
         disabled={blocked}
-        title={tooltip}
+        title={rescanTooltip}
         style={{
           display: 'flex', alignItems: 'center', gap: 5, padding: '6px 14px', borderRadius: 8,
           border: '1px solid var(--nd-border)', background: 'var(--nd-surface)',

@@ -58,6 +58,7 @@ SCAN_ACCURACY_TARGET  = float(os.getenv("SCAN_ACCURACY_TARGET", "0.90"))
 # system abstains. Precision over coverage: few picks, high hit-rate. The bar is
 # adaptive (stored in Redis) and auto-tightens toward SCAN_ACCURACY_TARGET.
 _HC_PARAMS_KEY        = "ai_engine:hc_params"
+_AUTO_SCAN_KEY        = "scanner:auto_scan"        # "1" = enabled (default), "0" = paused
 # Defaults are deliberately strict: a genuine high-conviction pick needs ALL six
 # independent confirmations and a high win-probability. This keeps the committed
 # tier to a handful of names a day (≈70%+ hit-rate in backtest) rather than many
@@ -72,6 +73,25 @@ COMMITTED_MAX         = int(os.getenv("SCAN_COMMITTED_MAX", "3"))
 COMMITTED_HORIZON     = int(os.getenv("SCAN_COMMITTED_HORIZON", "3"))
 COMMITTED_TARGET_PCT  = float(os.getenv("SCAN_COMMITTED_TARGET_PCT", "1.0"))
 _COMMITTED_DONE_KEY   = "ai_engine:committed_eval_done:{}"
+
+
+async def get_auto_scan() -> bool:
+    """Return True if the continuous auto-scan loop is enabled (default: True)."""
+    try:
+        r = await _get_redis()
+        val = await r.get(_AUTO_SCAN_KEY)
+        return val != "0"   # any value except explicit "0" → enabled
+    except Exception:
+        return True
+
+
+async def set_auto_scan(enabled: bool) -> None:
+    """Persist the auto-scan toggle to Redis so it survives service restarts."""
+    try:
+        r = await _get_redis()
+        await r.set(_AUTO_SCAN_KEY, "1" if enabled else "0")
+    except Exception:
+        pass
 
 
 async def _load_hc_params() -> dict:
@@ -1497,11 +1517,15 @@ async def backfill_intraday(days: int = 14, limit: int = 400) -> dict:
 # ── Schedulers ────────────────────────────────────────────────────────────────
 
 async def scanner_loop() -> None:
-    """Continuous intraday sweep — keeps the watchlist fresh during the day."""
+    """Continuous intraday sweep — keeps the watchlist fresh during the day.
+    Skips each cycle when auto-scan is disabled via the dashboard toggle."""
     await asyncio.sleep(5)
     while True:
         try:
-            await scan_once(phase="intraday")
+            if await get_auto_scan():
+                await scan_once(phase="intraday")
+            else:
+                logger.info("auto-scan paused — skipping intraday sweep")
         except asyncio.CancelledError:
             break
         except Exception as exc:

@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .scanner import (
     scanner_loop, schedule_loop, scan_once, evaluate_day,
     evaluate_delivery, grade_due_delivery, backfill_delivery, backfill_committed, backfill_intraday,
-    get_state, get_latest_eval, warm_state,
+    get_state, get_latest_eval, warm_state, get_auto_scan, set_auto_scan,
 )
 from .universe import UNIVERSE
 
@@ -53,6 +53,19 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 async def health():
     st = get_state()
     return {"status": "ok", "service": "stock-scanner", **st, "universe": st.get("universe") or len(UNIVERSE)}
+
+
+@app.get("/auto-scan")
+async def auto_scan_status():
+    """Return whether the continuous background scan loop is enabled."""
+    return {"status": "success", "data": {"enabled": await get_auto_scan()}}
+
+
+@app.post("/auto-scan")
+async def toggle_auto_scan(enabled: bool, _: None = Depends(_require_internal)):
+    """Enable or disable the continuous background scan loop."""
+    await set_auto_scan(enabled)
+    return {"status": "success", "data": {"enabled": enabled}}
 
 
 @app.get("/status")

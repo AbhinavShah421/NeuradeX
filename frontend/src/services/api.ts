@@ -971,6 +971,11 @@ class ApiService {
     return response.data;
   }
 
+  async setAutoScan(enabled: boolean): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/ai-engine/auto-scan', null, { params: { enabled } });
+    return response.data;
+  }
+
   async sessionList(statusFilter?: string): Promise<ApiResponse<any>> {
     const params = statusFilter ? { status: statusFilter } : {};
     const response = await this.api.get('/api/sessions', { params });

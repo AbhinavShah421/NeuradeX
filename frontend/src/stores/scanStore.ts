@@ -14,8 +14,11 @@ interface ScanState {
   marketRegime: string | null;
   triggering: boolean;
   runningSessions: number;
+  autoScanEnabled: boolean;
+  togglingAutoScan: boolean;
   fetchStatus: () => Promise<void>;
   rescan: () => Promise<void>;
+  toggleAutoScan: () => Promise<void>;
 }
 
 export const useScanStore = create<ScanState>((set, get) => ({
@@ -27,6 +30,8 @@ export const useScanStore = create<ScanState>((set, get) => ({
   marketRegime: null,
   triggering: false,
   runningSessions: 0,
+  autoScanEnabled: true,
+  togglingAutoScan: false,
 
   fetchStatus: async () => {
     try {
@@ -43,6 +48,7 @@ export const useScanStore = create<ScanState>((set, get) => ({
           candidates: d.candidates ?? 0,
           lastScan: d.lastScan ?? null,
           marketRegime: d.marketRegime ?? null,
+          autoScanEnabled: d.autoScanEnabled !== false,   // default true if absent
         });
       }
       if (sessRes.status === 'fulfilled') {
@@ -60,6 +66,19 @@ export const useScanStore = create<ScanState>((set, get) => ({
     finally {
       set({ triggering: false });
       setTimeout(() => get().fetchStatus(), 2000);
+    }
+  },
+
+  toggleAutoScan: async () => {
+    if (get().togglingAutoScan) return;
+    const next = !get().autoScanEnabled;
+    set({ togglingAutoScan: true, autoScanEnabled: next });   // optimistic update
+    try {
+      await apiService.setAutoScan(next);
+    } catch {
+      set({ autoScanEnabled: !next });   // revert on failure
+    } finally {
+      set({ togglingAutoScan: false });
     }
   },
 }));
