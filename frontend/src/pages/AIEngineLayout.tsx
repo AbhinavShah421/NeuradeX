@@ -63,7 +63,7 @@ const AIEngineLayout: React.FC = () => {
   const activeItem = SUB_NAV.find(n => isActive(n.to, n.exact)) ?? SUB_NAV[0];
 
   return (
-    <div style={{ maxWidth: 1280, margin: '0 auto', padding: '0 16px' }}>
+    <div style={{ maxWidth: 1280, margin: '0 auto' }}>
 
       {/* Sub-nav header */}
       <div style={{ paddingTop: 20, paddingBottom: 0, marginBottom: 24 }}>

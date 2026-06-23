@@ -182,8 +182,11 @@ body {
 .nd-ticker-inner {
   max-width: 1280px;
   margin: 0 auto;
-  padding: 5px 24px;
-  overflow: hidden;          /* viewport mask — clips the moving track */
+  padding: 5px 24px;         /* aligns the content box with the header nav + main */
+}
+.nd-ticker-viewport {
+  overflow: hidden;          /* clips at the padded content box, so the marquee
+                                never bleeds into the alignment gutter */
 }
 .nd-ticker-track {
   display: flex;
@@ -191,7 +194,7 @@ body {
   animation: nd-ticker-scroll 38s linear infinite;
 }
 /* Pause when the user wants to read a value */
-.nd-ticker-inner:hover .nd-ticker-track { animation-play-state: paused; }
+.nd-ticker-viewport:hover .nd-ticker-track { animation-play-state: paused; }
 .nd-ticker-group {
   display: flex;
   gap: 36px;

@@ -391,6 +391,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
 
         <div className="nd-ticker">
           <div className="nd-ticker-inner">
+            <div className="nd-ticker-viewport">
             <div className="nd-ticker-track">
               {/* Two identical groups so the marquee loops seamlessly (-50%) */}
               {[0, 1].map(copy => (
@@ -412,6 +413,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
                   })}
                 </div>
               ))}
+            </div>
             </div>
           </div>
         </div>
