@@ -148,6 +148,28 @@ async def get_trade_gate() -> str:
     return mode
 
 
+_regime_cache = {"regime": "neutral", "ts": 0.0}
+
+
+async def get_market_regime() -> str:
+    """Broad NIFTY regime (bullish/bearish/neutral) the scanner computed, cached
+    ~60s. Used to block long entries when the whole market is falling."""
+    import time, json
+    now = time.monotonic()
+    if now - _regime_cache["ts"] < 60:
+        return _regime_cache["regime"]
+    regime = "neutral"
+    try:
+        from app.utils.redis_client import cache_get
+        raw = await cache_get("ai_engine:watchlist")
+        if raw:
+            regime = (json.loads(raw).get("market_regime") or "neutral").lower()
+    except Exception:
+        pass
+    _regime_cache.update({"regime": regime, "ts": now})
+    return regime
+
+
 # ── Models ────────────────────────────────────────────────────────────────────
 
 class StartSessionRequest(BaseModel):
@@ -365,6 +387,31 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
                 blocked.append(f"insufficient BUY consensus: {buy_votes} agents voted BUY (need {min_buy}+)")
         if tsig == -1:
             blocked.append("intraday signal bearish (downtrend) — skipping entry")
+        # ── Direction filter (Lever 1) ────────────────────────────────────────
+        # We are long-only. Post-trade analysis showed 78% of losers were longs
+        # opened counter-trend (price below VWAP / SMA5<SMA20) — falling knives.
+        # Only enter with the stock's own trend, and never long a bearish market.
+        price_now = candle.get("close", 0.0)
+        uptrend = (ind.get("sma5", 0) >= ind.get("sma20", 0)) and (price_now >= ind.get("vwap", price_now))
+        if not uptrend:
+            blocked.append("counter-trend (price below VWAP or SMA5<SMA20) — long only with the trend")
+        # Broad-market veto only applies to live/paper (today's NIFTY regime).
+        # Replay/backtest are historical dates, so today's regime is irrelevant —
+        # the per-stock uptrend filter above is the date-correct direction gate.
+        mkt_bearish = False
+        if s.get("mode") == "paper":
+            mkt_bearish = (await get_market_regime()) == "bearish"
+            if mkt_bearish:
+                blocked.append("market regime bearish — skipping longs")
+        # ── Entry-timing filter (Lever 2) ─────────────────────────────────────
+        # Within an uptrend, don't buy extreme overbought tops — they reverse fast
+        # and are the anti-predictive high-confidence momentum chases. (We do NOT
+        # require positive momentum: a pullback within the uptrend is a better long
+        # than chasing strength, so a mildly-negative mom is fine.)
+        rsi_now = ind.get("rsi", 50.0)
+        good_timing = rsi_now <= 70
+        if not good_timing:
+            blocked.append(f"overbought (RSI {rsi_now:.0f}>70) — wait for a pullback")
         # The confidence band only describes a BUY decision. When the ensemble's
         # winning action is HOLD (gentle/loose entering on BUY support), its
         # confidence is the HOLD confidence — irrelevant to the BUY, so skip it.
@@ -377,7 +424,7 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
             elif conf > max_conf:
                 blocked.append(f"BUY confidence {conf:.0%} above the {max_conf:.0%} ceiling (over-confident setups historically reverse)")
                 conf_ok = False
-        enter = (tsig != -1 and support_ok and conf_ok)
+        enter = (tsig != -1 and support_ok and conf_ok and uptrend and not mkt_bearish and good_timing)
         # Pattern-quality gate (shared pattern AI engine): only trade good patterns.
         # Backtest/replay require an A-grade pattern; paper/live require ≥ B.
         if enter:
