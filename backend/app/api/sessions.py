@@ -395,14 +395,10 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         uptrend = (ind.get("sma5", 0) >= ind.get("sma20", 0)) and (price_now >= ind.get("vwap", price_now))
         if not uptrend:
             blocked.append("counter-trend (price below VWAP or SMA5<SMA20) — long only with the trend")
-        # Broad-market veto only applies to live/paper (today's NIFTY regime).
-        # Replay/backtest are historical dates, so today's regime is irrelevant —
-        # the per-stock uptrend filter above is the date-correct direction gate.
-        mkt_bearish = False
-        if s.get("mode") == "paper":
-            mkt_bearish = (await get_market_regime()) == "bearish"
-            if mkt_bearish:
-                blocked.append("market regime bearish — skipping longs")
+        # NOTE: no hard broad-market veto. The per-stock uptrend filter above is
+        # the real direction gate — a stock in an intraday uptrend is a valid long
+        # even on a red market day, and a blanket "market is bearish" block just
+        # froze all paper trading. (get_market_regime remains available for sizing.)
         # ── Entry-timing filter (Lever 2) ─────────────────────────────────────
         # Within an uptrend, don't buy extreme overbought tops — they reverse fast
         # and are the anti-predictive high-confidence momentum chases. (We do NOT
@@ -424,7 +420,7 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
             elif conf > max_conf:
                 blocked.append(f"BUY confidence {conf:.0%} above the {max_conf:.0%} ceiling (over-confident setups historically reverse)")
                 conf_ok = False
-        enter = (tsig != -1 and support_ok and conf_ok and uptrend and not mkt_bearish and good_timing)
+        enter = (tsig != -1 and support_ok and conf_ok and uptrend and good_timing)
         # Pattern-quality gate (shared pattern AI engine): only trade good patterns.
         # Backtest/replay require an A-grade pattern; paper/live require ≥ B.
         if enter:
