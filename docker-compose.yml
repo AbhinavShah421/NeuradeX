@@ -627,6 +627,30 @@ services:
           memory: 128M   # 44MB actual; simple polling loop
           cpus: '0.3'
 
+  # ── Groww Live-Feed Service ───────────────────────────────────────────────────
+  # Isolated so the heavy growwapi SDK (pydantic/pandas/protobuf pins) can't clash
+  # with the backend. Streams real-time LTPs to Redis for paper trading.
+  groww-feed-service:
+    build:
+      context: ./groww-feed-service
+      dockerfile: Dockerfile
+    container_name: stock-prediction-groww-feed
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      SERVICE_NAME: groww-feed-service
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - stock-prediction-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.4'
+
   # ── Sentiment Service ─────────────────────────────────────────────────────────
 
   sentiment-service:

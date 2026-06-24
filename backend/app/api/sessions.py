@@ -681,13 +681,35 @@ _PAPER_POLL_SECS = 8   # how often a paper session refreshes its live market dat
 
 async def _try_groww_ltp(symbol: str) -> float:
     """Best-effort real-time price from Groww. Returns 0.0 if the key lacks the
-    live-data entitlement (401) — we swallow it quietly so it never triggers a
-    token-refresh storm. When/if the live-data subscription is enabled, paper
-    sessions automatically start using real Groww ticks."""
+    live-data entitlement — swallowed quietly so it never triggers a token-refresh
+    storm. Tries the lightweight real-time /live-data/ltp endpoint first (lowest
+    latency, often entitled when full quote isn't), then falls back to /quote."""
     from app.utils.groww_client import get_groww_client
+    from app.utils import groww_feed
+    # 0. Live websocket stream (preferred — real-time ticks from the feed service)
+    px = await groww_feed.get_ltp(symbol)
+    if px > 0:
+        return px
+    # Make sure the feed service is streaming this symbol for next time.
+    await groww_feed.request_symbols([symbol])
+
     groww = get_groww_client()
     if not groww or groww.get_status().get("status") != "ok":
         return 0.0
+    # 1. Real-time LTP endpoint (current last-traded price, minimal payload)
+    try:
+        raw = await groww.get_ltp([symbol])
+        for key in (f"NSE_{symbol}", symbol):
+            entry = raw.get(key)
+            if isinstance(entry, dict):
+                v = entry.get("ltp") or entry.get("last_price") or entry.get("last_trade_price")
+                if v:
+                    return float(v)
+            elif isinstance(entry, (int, float)) and entry:
+                return float(entry)
+    except Exception:
+        pass
+    # 2. Full quote fallback
     try:
         raw = await groww.get_quote(symbol)
         for k in ("ltp", "lastPrice", "last_price", "lastTradedPrice"):

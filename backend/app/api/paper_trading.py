@@ -826,6 +826,18 @@ async def paper_trading_tick(
     change_pct  = 0.0
     quote_source = "cache"
 
+    # Real-time price from the live Groww websocket feed (preferred — current tick,
+    # no REST latency). Lazily tells the feed service to stream this symbol.
+    try:
+        from app.utils import groww_feed as _gf
+        await _gf.request_symbols([symbol])
+        _stream_ltp = await _gf.get_ltp(symbol)
+        if _stream_ltp > 0:
+            ltp = _stream_ltp
+            quote_source = "groww_stream"
+    except Exception:
+        pass
+
     if groww:
         try:
             raw = await groww.get_quote(symbol)
@@ -838,7 +850,7 @@ async def paper_trading_tick(
                         except (TypeError, ValueError): pass
                 return None
 
-            ltp           = _f(raw, "ltp", "lastPrice", "last_price", "lastTradedPrice") or None
+            ltp           = ltp or _f(raw, "ltp", "lastPrice", "last_price", "lastTradedPrice")
             prev_close    = _f(raw, "close", "prevClose", "prev_close", "previousClose")
             day_open      = _f(raw, "open", "openPrice", "open_price", "dayOpen")
             day_high      = _f(raw, "high", "highPrice", "high_price", "dayHigh", "52WeekHigh")
