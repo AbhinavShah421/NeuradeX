@@ -58,20 +58,23 @@ _RELIABLE_BUY_AGENTS = frozenset({"sentiment", "pattern", "memory", "gbm"})
 # Trade-gate tuning is data-driven (see analysis):
 #   • BUY-vote count predicts win-rate: 1→21%, 2→41%, 3→50% (real ensemble tops
 #     out ~2-3 BUYs, so 2 is the practical consensus floor).
-#   • Ensemble confidence is ANTI-predictive above ~0.72 (90-100% conf → 14-24%
-#     win) — over-confident entries are momentum-chasing that reverses. The
-#     profitable band is ~0.50-0.72, so EVERY gate now caps confidence.
-#   • need_reliable: at least one BUY must come from a high-precision agent.
+#   • Ensemble confidence is ANTI-predictive above ~0.72 — but the confidence
+#     band is only meaningful for a BUY decision, so it's applied ONLY when the
+#     ensemble's winning action is BUY (gating it on a HOLD-consensus confidence
+#     froze trading entirely).
+#   • need_reliable: a BUY must include a high-precision agent (sentiment/pattern/
+#     memory/gbm). Required only on "strict" — in replay these agents abstain
+#     often, so requiring it on the default gate starves training.
 TRADE_GATES = {
     "strict": {"label": "Strict", "require_buy": True,  "min_conf": 0.50, "max_conf": 0.70,
-               "min_buy": 3, "need_reliable": True,
-               "desc": "Needs 3+ agents (incl. a high-precision one) voting BUY, in the 50-70% confidence sweet-spot. Fewest, highest win-rate trades."},
-    "gentle": {"label": "Gentle", "require_buy": False, "min_conf": 0.50, "max_conf": 0.72,
-               "min_buy": 2, "need_reliable": True,
-               "desc": "Needs 2+ agents (incl. a high-precision one) voting BUY, inside the profitable 50-72% confidence band. Balanced."},
-    "loose":  {"label": "Loose",  "require_buy": False, "min_conf": 0.48, "max_conf": 0.78,
-               "min_buy": 2, "need_reliable": False,
-               "desc": "Needs 2+ agents voting BUY; widest confidence band (still caps over-confident momentum chasing). Most trades."},
+               "min_buy": 3, "need_reliable": True, "min_grade": "B",
+               "desc": "Needs 3+ agents (incl. a high-precision one) voting BUY, in the 50-70% confidence sweet-spot, with a B+ pattern. Fewest, highest win-rate trades."},
+    "gentle": {"label": "Gentle", "require_buy": False, "min_conf": 0.50, "max_conf": 0.74,
+               "min_buy": 2, "need_reliable": False, "min_grade": "C",
+               "desc": "Needs 2+ agents voting BUY (or a high-precision agent) and a non-bearish ensemble, with a C+ pattern. Balanced."},
+    "loose":  {"label": "Loose",  "require_buy": False, "min_conf": 0.0,  "max_conf": 1.01,
+               "min_buy": 2, "need_reliable": False, "min_grade": "D", "reliable_single": True,
+               "desc": "Needs 2 BUY votes OR one high-precision agent; pattern grade not enforced. Most trades — for training volume (lower win-rate)."},
 }
 _gate_cache = {"mode": "", "ts": 0.0}
 
@@ -341,26 +344,40 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         has_reliable_buy = bool(buy_voters & _RELIABLE_BUY_AGENTS)
         min_buy = gate.get("min_buy", 2)
         need_reliable = gate.get("need_reliable", False)
-        if tsig != 1:
-            blocked.append(_timing_block_reason(ind, candle))
-        if buy_votes < min_buy:
-            blocked.append(f"only {buy_votes} agent{'s' if buy_votes != 1 else ''} voted BUY — need at least {min_buy}")
-        if need_reliable and not has_reliable_buy:
-            blocked.append("no high-precision agent (sentiment/pattern/memory) voted BUY")
-        if gate["require_buy"] and ens_action != "BUY":
-            blocked.append(f"ensemble did not vote BUY (it's {ens_action})")
-        elif not gate["require_buy"] and ens_action == "SELL":
-            blocked.append("ensemble is bearish (SELL)")
+        # The entry trigger is the ensemble BUY consensus itself — NOT the narrow
+        # oversold-bounce timing signal (the two rarely co-occur, which froze
+        # trading). The timing signal is now only a veto: skip entries while it is
+        # actively bearish (tsig == -1 / downtrend), but a neutral timing is fine.
+        # Entry support: real ensemble consensus is what predicts wins — single-
+        # agent BUYs historically lose (~21-25%) while >=2 agreeing win ~41-50%.
+        # So a long needs >=min_buy BUY votes. Only the "loose" (training-volume)
+        # gate also allows a single high-precision agent's BUY.
+        reliable_single = gate.get("reliable_single", False)
+        if gate["require_buy"]:
+            support_ok = (ens_action == "BUY" and buy_votes >= min_buy)
+            if not support_ok:
+                blocked.append(f"strict: need ensemble BUY with {min_buy}+ votes (got {ens_action}, {buy_votes} BUY)")
+        else:
+            support_ok = (buy_votes >= min_buy or (reliable_single and has_reliable_buy and buy_votes >= 1)) and ens_action != "SELL"
+            if ens_action == "SELL":
+                blocked.append("ensemble is bearish (SELL)")
+            elif not support_ok:
+                blocked.append(f"insufficient BUY consensus: {buy_votes} agents voted BUY (need {min_buy}+)")
+        if tsig == -1:
+            blocked.append("intraday signal bearish (downtrend) — skipping entry")
+        # The confidence band only describes a BUY decision. When the ensemble's
+        # winning action is HOLD (gentle/loose entering on BUY support), its
+        # confidence is the HOLD confidence — irrelevant to the BUY, so skip it.
         max_conf = gate.get("max_conf", 1.01)
-        if conf < gate["min_conf"]:
-            blocked.append(f"confidence {conf:.0%} below the {gate['min_conf']:.0%} floor")
-        if conf > max_conf:
-            blocked.append(f"confidence {conf:.0%} above the {max_conf:.0%} ceiling (over-confident setups historically reverse)")
-        enter = (tsig == 1
-                 and buy_votes >= min_buy
-                 and (has_reliable_buy or not need_reliable)
-                 and (ens_action == "BUY" if gate["require_buy"] else ens_action != "SELL")
-                 and gate["min_conf"] <= conf <= max_conf)
+        conf_ok = True
+        if ens_action == "BUY":
+            if conf < gate["min_conf"]:
+                blocked.append(f"BUY confidence {conf:.0%} below the {gate['min_conf']:.0%} floor")
+                conf_ok = False
+            elif conf > max_conf:
+                blocked.append(f"BUY confidence {conf:.0%} above the {max_conf:.0%} ceiling (over-confident setups historically reverse)")
+                conf_ok = False
+        enter = (tsig != -1 and support_ok and conf_ok)
         # Pattern-quality gate (shared pattern AI engine): only trade good patterns.
         # Backtest/replay require an A-grade pattern; paper/live require ≥ B.
         if enter:
@@ -374,7 +391,7 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
                 psig = await get_pattern_engine().signal(window, symbol,
                                                          exclude_memory_sources=excl)
                 s["last_pattern"] = psig
-                min_grade = _min_pattern_grade(session_mode)
+                min_grade = gate.get("min_grade", _min_pattern_grade(session_mode))
                 if psig.get("ok") and grade_rank(psig["grade"]) > grade_rank(min_grade):
                     enter = False
                     blocked.append(f"pattern grade {psig['grade']} below required {min_grade} "
@@ -383,7 +400,7 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
                 logger.debug("pattern gate skipped: %s", exc)
         action = "BUY" if enter else "HOLD"
         if action == "BUY":
-            reason = f"Entry: intraday buy-trigger + ensemble {ens_action} ({conf:.0%}). {reason}".strip()
+            reason = f"Entry: {buy_votes} agents voted BUY (ensemble {ens_action} {conf:.0%}). {reason}".strip()
         else:
             reason = f"No entry [{gate['label']} gate] — " + "; ".join(blocked) + "."
     else:  # LONG
