@@ -750,10 +750,20 @@ async def _advance_paper(s: dict) -> None:
         #   3. none → Yahoo's current-minute candle (already near real-time)
         ltp = 0.0
         src = "yahoo_live"
-        # Honour the user's primary data-provider choice. 'yahoo' forces the
-        # pure-Yahoo path (no broker overlays); 'groww' skips the Angel feed.
         primary = await pt._get_primary()
+        # 1. Groww live websocket feed — a cheap Redis read, so always try it first
+        #    (independent of the sticky _groww_live_off REST flag). Register the
+        #    symbol so the feed service streams it.
+        from app.utils import groww_feed
         if primary != "yahoo":
+            await groww_feed.request_symbols([symbol])
+            f_ltp = await groww_feed.get_ltp(symbol)
+            if f_ltp > 0:
+                ltp = f_ltp
+                src = "groww_stream"
+                pt._accumulate_tick(symbol, ltp, ts)
+        # 2. Broker/REST overlays only if the stream has nothing yet.
+        if ltp <= 0 and primary != "yahoo":
             from app.utils.angel_client import angel_get_ltp
             a_ltp = angel_get_ltp(symbol) if primary != "groww" else 0.0
             if a_ltp > 0:
@@ -770,7 +780,7 @@ async def _advance_paper(s: dict) -> None:
                     fails = int(s.get("_groww_live_fails") or 0) + 1
                     s["_groww_live_fails"] = fails
                     if fails >= 3:
-                        s["_groww_live_off"] = True   # no live-data → use Yahoo only
+                        s["_groww_live_off"] = True   # no REST live-data → stream/Yahoo only
         # Refresh the Yahoo base every poll — _get_yahoo_cached has its own 15s TTL,
         # so this only hits Yahoo's API when the cache is stale. Without this the
         # base was fetched once per symbol and never again, freezing each session's
