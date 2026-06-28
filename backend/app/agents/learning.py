@@ -7,7 +7,9 @@ from app.utils.elk_logger import get_logger
 
 logger = get_logger(__name__)
 
-_WEIGHTS_KEY = "ai_engine:agent_weights"
+_WEIGHTS_KEY      = "ai_engine:agent_weights"
+_ACTION_RATES_KEY = "ai_engine:agent_action_rates"
+_MIN_ACTION_SAMPLES = 20   # minimum decisions before we trust action-specific rate
 
 _DDL_STATEMENTS = [
     """CREATE TABLE IF NOT EXISTS ai_engine_predictions (
@@ -252,6 +254,10 @@ class LearningSystem:
                 from app.agents import get_rl_agent
                 from app.agents.rl_agent import ACTIONS
                 action_idx = ACTIONS.index(rl_action) if rl_action in ACTIONS else 2
+                # next_state = rl_state: we don't store the exit-candle state, so we reuse
+                # the entry state. This means the Q-update is reward-only (no future value
+                # bootstrapping across candles). A known simplification — to fix properly,
+                # store the exit window's state in ai_engine_outcomes.
                 await get_rl_agent().update(rl_state, action_idx, reward, rl_state)
             except Exception as exc:
                 logger.debug("RL update skipped: %s", exc)
@@ -303,6 +309,39 @@ class LearningSystem:
             await cache_set(_WEIGHTS_KEY, json.dumps(weights), expire=3600)
         except Exception as exc:
             logger.debug("Could not sync weights to Redis: %s", exc)
+        await self._sync_action_rates_to_redis()
+
+    async def _sync_action_rates_to_redis(self) -> None:
+        """Publish per-agent, per-action accuracy rates so the ensemble can use
+        action-specific weights (BUY voters weighted by BUY rate, SELL by SELL rate)."""
+        try:
+            from sqlalchemy import text
+            from app.database.postgres import engine
+            async with engine.begin() as conn:
+                rows = (await conn.execute(text("""
+                    SELECT
+                        sig->>'agent'  AS agent_name,
+                        sig->>'action' AS action,
+                        COUNT(*)::int  AS total,
+                        SUM(CASE WHEN o.outcome = 'correct' THEN 1 ELSE 0 END)::int AS correct
+                    FROM ai_engine_predictions p
+                    JOIN ai_engine_outcomes o USING (prediction_id)
+                    CROSS JOIN LATERAL jsonb_array_elements(p.agent_signals::jsonb) AS sig
+                    WHERE sig->>'agent' IS NOT NULL
+                    GROUP BY sig->>'agent', sig->>'action'
+                """))).fetchall()
+
+            rates: dict[str, dict[str, float]] = {}
+            for r in rows:
+                agent, action, total, correct = r[0], r[1], r[2] or 0, r[3] or 0
+                if total >= _MIN_ACTION_SAMPLES:
+                    rates.setdefault(agent, {})[action] = round(correct / total, 3)
+
+            from app.utils.redis_client import cache_set
+            await cache_set(_ACTION_RATES_KEY, json.dumps(rates), expire=3600)
+            logger.debug("Action rates synced: %d agents", len(rates))
+        except Exception as exc:
+            logger.debug("Could not sync action rates to Redis: %s", exc)
 
     # ── Performance stats ─────────────────────────────────────────────────────
 
@@ -311,26 +350,89 @@ class LearningSystem:
             from sqlalchemy import text
             from app.database.postgres import engine
             async with engine.begin() as conn:
+                # Ensure every registered agent has a row so the UI always shows
+                # all agents, even newly added ones with no completed trades yet.
+                from app.agents.ensemble import DEFAULT_WEIGHTS
+                for agent_name, default_w in DEFAULT_WEIGHTS.items():
+                    await conn.execute(text("""
+                        INSERT INTO ai_engine_agent_weights
+                            (agent_name, weight, total_predictions, correct_predictions, total_reward)
+                        VALUES (:n, :w, 0, 0, 0.0)
+                        ON CONFLICT (agent_name) DO NOTHING
+                    """), {"n": agent_name, "w": default_w})
+
                 rows = (await conn.execute(text("""
                     SELECT agent_name, weight, total_predictions,
                            correct_predictions, total_reward
                     FROM ai_engine_agent_weights
                     ORDER BY weight DESC
                 """))).fetchall()
+
+                # Per-agent, per-action breakdown from the predictions + outcomes tables.
+                # jsonb_array_elements unnests the agent_signals JSON array so each agent
+                # vote is its own row, then we group by agent+action to get BUY/SELL/HOLD
+                # counts and accuracy.
+                action_rows = (await conn.execute(text("""
+                    SELECT
+                        sig->>'agent'  AS agent_name,
+                        sig->>'action' AS action,
+                        COUNT(*)::int  AS total,
+                        SUM(CASE WHEN o.outcome = 'correct' THEN 1 ELSE 0 END)::int AS correct,
+                        ROUND(AVG(o.pnl_pct)::numeric, 2) AS avg_pnl
+                    FROM ai_engine_predictions p
+                    JOIN ai_engine_outcomes o USING (prediction_id)
+                    CROSS JOIN LATERAL jsonb_array_elements(p.agent_signals::jsonb) AS sig
+                    WHERE sig->>'agent' IS NOT NULL
+                    GROUP BY sig->>'agent', sig->>'action'
+                    ORDER BY sig->>'agent', sig->>'action'
+                """))).fetchall()
+
+            # Index by_action per agent
+            by_action_map: dict[str, list[dict]] = {}
+            for r in action_rows:
+                aname, action, total, correct, avg_pnl = r[0], r[1], r[2] or 0, r[3] or 0, float(r[4] or 0)
+                by_action_map.setdefault(aname, []).append({
+                    "action":    action,
+                    "total":     total,
+                    "correct":   correct,
+                    "rate":      round(correct / total, 3) if total > 0 else 0.0,
+                    "avg_pnl":   avg_pnl,
+                })
+
+            # Fetch registry overrides — these take precedence over the DB weight
+            # in the ensemble, so Pattern Memory must show the override weight too.
+            registry_overrides: dict[str, float] = {}
+            try:
+                from app.agents.registry import get_registry, weight_override
+                reg = await get_registry()
+                for agent_name in [r[0] for r in rows]:
+                    ov = weight_override(reg, agent_name)
+                    if ov is not None:
+                        registry_overrides[agent_name] = ov
+            except Exception:
+                pass
+
             result = []
             for r in rows:
-                total   = r[2] or 0   # total analyses run
-                correct = r[3] or 0   # correct among those with recorded outcomes
-                # accuracy denominator: only predictions with a known outcome
-                # (correct_predictions <= outcomes_recorded <= total)
+                total   = r[2] or 0
+                correct = r[3] or 0
+                db_weight = round(float(r[1]), 3)
+                # If a registry override exists, that's the effective weight the
+                # ensemble actually uses — show it so Pattern Memory stays in sync.
+                effective_weight = round(registry_overrides.get(r[0], db_weight), 3)
                 result.append({
-                    "agent":        r[0],
-                    "weight":       round(float(r[1]), 3),
-                    "total":        total,
-                    "correct":      correct,
-                    "accuracy":     round(correct / total, 3) if correct > 0 and total > 0 else 0.0,
-                    "total_reward": round(float(r[4]), 4),
+                    "agent":          r[0],
+                    "weight":         effective_weight,
+                    "weight_learned": db_weight,           # raw DB weight for reference
+                    "weight_pinned":  r[0] in registry_overrides,
+                    "total":          total,
+                    "correct":        correct,
+                    "accuracy":       round(correct / total, 3) if correct > 0 and total > 0 else 0.0,
+                    "total_reward":   round(float(r[4]), 4),
+                    "by_action":      by_action_map.get(r[0], []),
                 })
+            # Re-sort by effective weight (registry overrides can change the order)
+            result.sort(key=lambda x: x["weight"], reverse=True)
             return result
         except Exception as exc:
             logger.warning("get_performance failed: %s", exc)

@@ -1,56 +1,25 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import apiService from '../services/api';
 
-type SvcStatus = 'checking' | 'ok' | 'error';
-interface SvcState { name: string; icon: string; status: SvcStatus; }
-
-const MICROSERVICE_NAMES = [
-  'Market Data', 'Technical Agent', 'Sentiment Agent', 'Macro Agent',
-  'Pattern Agent', 'RL Agent', 'Ensemble Engine', 'Feedback Service', 'Model Trainer',
-];
-
-const INITIAL_SVCS: SvcState[] = [
-  { name: 'Backend',          icon: 'dns',              status: 'checking' },
-  { name: 'Market Data',      icon: 'candlestick_chart', status: 'checking' },
-  { name: 'Technical Agent',  icon: 'show_chart',       status: 'checking' },
-  { name: 'Sentiment Agent',  icon: 'article',          status: 'checking' },
-  { name: 'Macro Agent',      icon: 'public',           status: 'checking' },
-  { name: 'Pattern Agent',    icon: 'pattern',          status: 'checking' },
-  { name: 'RL Agent',         icon: 'smart_toy',        status: 'checking' },
-  { name: 'Ensemble Engine',  icon: 'hub',              status: 'checking' },
-  { name: 'Feedback Service', icon: 'feedback',         status: 'checking' },
-  { name: 'Model Trainer',    icon: 'model_training',   status: 'checking' },
-  { name: 'LLM',              icon: 'psychology',       status: 'checking' },
-];
-
-async function pollServices(): Promise<SvcState[]> {
-  const next = INITIAL_SVCS.map(s => ({ ...s, status: 'checking' as SvcStatus }));
-  const set = (name: string, status: SvcStatus) => {
-    const s = next.find(x => x.name === name);
-    if (s) s.status = status;
-  };
-  await Promise.allSettled([
-    apiService.healthCheck()
-      .then(() => set('Backend', 'ok'))
-      .catch(() => set('Backend', 'error')),
-    apiService.getServicesHealth()
-      .then(r => {
-        const list: any[] = (r as any).data ?? r ?? [];
-        for (const svc of list)
-          if (MICROSERVICE_NAMES.includes(svc.name))
-            set(svc.name, svc.status === 'ok' ? 'ok' : 'error');
-        MICROSERVICE_NAMES.forEach(n => {
-          const s = next.find(x => x.name === n);
-          if (s && s.status === 'checking') s.status = 'error';
-        });
-      })
-      .catch(() => MICROSERVICE_NAMES.forEach(n => set(n, 'error'))),
-    apiService.getLlmStatus()
-      .then(r => { const d = (r as any).data ?? r; set('LLM', d?.available ? 'ok' : 'error'); })
-      .catch(() => set('LLM', 'error')),
-  ]);
-  return next;
+// One Docker container as reported by /api/system/services.
+interface DockerSvc {
+  name:    string;        // container name, e.g. stock-prediction-backend
+  label:   string;        // friendly label
+  icon:    string;        // material icon
+  state:   string;        // running | exited | restarting | paused | created
+  status:  string;        // "Up 7 minutes (healthy)"
+  health:  string | null; // healthy | unhealthy | starting | null
+  running: boolean;
+  // NB: the axios interceptor camelCases all response keys (cpu_pct → cpuPct).
+  cpuPct:    number | null;
+  memUsedMb: number | null;
+  logSeverity: 'error' | 'warning' | 'ok';  // from log_severity
 }
+
+interface DockerTotals { running: number; count: number; cpuPct: number; memUsedMb: number; }
+
+const fmtMem = (mb: number | null) =>
+  mb == null ? '—' : mb >= 1024 ? `${(mb / 1024).toFixed(1)}G` : `${Math.round(mb)}M`;
 
 const POS_KEY  = 'nd-sys-status-pos';
 const BTN_SIZE = 48;
@@ -73,7 +42,11 @@ function loadPos() {
 const FloatingSystemStatus: React.FC = () => {
   const [pos,    setPos]    = useState(loadPos);
   const [open,   setOpen]   = useState(false);
-  const [svcs,   setSvcs]   = useState<SvcState[]>(INITIAL_SVCS.map(s => ({ ...s })));
+  const [svcs,   setSvcs]   = useState<DockerSvc[]>([]);
+  const [totals, setTotals] = useState<DockerTotals | null>(null);
+  const [svcErr, setSvcErr] = useState<string | null>(null);
+  const [busy,   setBusy]   = useState<string | null>(null);   // container name being actioned
+  const [restartingAll, setRestartingAll] = useState(false);
   const [dragging, setDragging] = useState(false);
 
   // Paper trading time config
@@ -86,17 +59,54 @@ const FloatingSystemStatus: React.FC = () => {
   const moved         = useRef(false);
   const touchHandled  = useRef(false);  // prevents synthetic click firing after touchend
 
-  // ── Poll services ───────────────────────────────────────────────────────────
-  const refresh = useCallback(async () => {
-    const next = await pollServices();
-    setSvcs(next);
+  // ── Poll Docker services ──────────────────────────────────────────────────
+  const refresh = useCallback(async (fresh = false) => {
+    try {
+      const r: any = await apiService.getDockerServices(fresh);
+      setSvcs(r.data ?? []);
+      setTotals(r.totals ?? null);
+      setSvcErr(null);
+    } catch (e: any) {
+      setSvcErr(e?.response?.data?.detail ?? e?.message ?? 'Docker unavailable');
+    }
   }, []);
 
   useEffect(() => {
     refresh();
-    const t = setInterval(refresh, 60_000);
+    const t = setInterval(refresh, 30_000);
     return () => clearInterval(t);
   }, [refresh]);
+
+  const control = async (name: string, action: 'start' | 'stop' | 'restart') => {
+    setBusy(name);
+    try {
+      await apiService.controlDockerService(name, action);
+      // give Docker a beat to flip state, then refresh (bypass cache)
+      setTimeout(() => refresh(true), 1200);
+    } catch (e: any) {
+      setSvcErr(`${action} ${name}: ${e?.response?.data?.detail ?? e?.message ?? 'failed'}`);
+    } finally {
+      setTimeout(() => setBusy(null), 1200);
+    }
+  };
+
+  const openLogs = (name: string) => {
+    window.open(apiService.dockerLogsUrl(name), '_blank', 'noopener,noreferrer');
+  };
+
+  const restartAll = async () => {
+    if (!window.confirm('Restart all running services? (backend is skipped — it can’t restart itself)')) return;
+    setRestartingAll(true);
+    setSvcErr(null);
+    try {
+      await apiService.restartAllDockerServices();
+      setTimeout(() => refresh(true), 2000);
+    } catch (e: any) {
+      setSvcErr(`restart all: ${e?.response?.data?.detail ?? e?.message ?? 'failed'}`);
+    } finally {
+      setTimeout(() => setRestartingAll(false), 2000);
+    }
+  };
 
   // ── Load paper config on mount ───────────────────────────────────────────
   useEffect(() => {
@@ -180,14 +190,20 @@ const FloatingSystemStatus: React.FC = () => {
   };
 
   // ── Derived state ───────────────────────────────────────────────────────────
-  const ok     = svcs.filter(s => s.status === 'ok').length;
+  const ok     = svcs.filter(s => s.running).length;
   const total  = svcs.length;
-  const allOk  = ok === total;
-  const dotColor = allOk ? '#00b386' : '#f59e0b';
+  const allOk  = total > 0 && ok === total;
+  const dotColor = svcErr ? '#ef4444' : allOk ? '#00b386' : '#f59e0b';
+
+  // Sort: not-running first (needs attention), then by label.
+  const sortedSvcs = [...svcs].sort((a, b) => {
+    if (a.running !== b.running) return a.running ? 1 : -1;
+    return a.label.localeCompare(b.label);
+  });
 
   // Panel position — above if space, else below; right-aligned to button
-  const panelW   = 230;
-  const panelH   = total * 40 + 52;
+  const panelW   = 362;  // +25% over the original 290px
+  const panelH   = 380; // fixed height; services list scrolls inside
   const panelTop = pos.y - panelH - 8 >= 8 ? pos.y - panelH - 8 : pos.y + BTN_SIZE + 8;
   const panelLeft = Math.max(8, Math.min(window.innerWidth - panelW - 8, pos.x - panelW + BTN_SIZE));
 
@@ -257,31 +273,176 @@ const FloatingSystemStatus: React.FC = () => {
             borderRadius: 12,
             boxShadow: '0 12px 40px rgba(0,0,0,0.25)',
             overflow: 'hidden',
+            display: 'flex', flexDirection: 'column',
           }}
         >
-          {svcs.map((svc, i) => (
-            <div key={svc.name} style={{
-              display: 'flex', alignItems: 'center', gap: 10,
-              padding: '8px 14px',
-              borderBottom: i < svcs.length - 1 ? '1px solid var(--nd-border)' : 'none',
+          {/* Header: count + restart-all + manual refresh */}
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 6,
+            padding: '8px 12px', borderBottom: '1px solid var(--nd-border)',
+          }}>
+            <span className="material-icons" style={{ fontSize: 14, color: 'var(--nd-text-3)' }}>dns</span>
+            <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--nd-text-1)' }}>Docker Services</span>
+            <span style={{ fontSize: 10, fontWeight: 600, color: dotColor, marginLeft: 2 }}>{ok}/{total}</span>
+            <button
+              onClick={e => { e.stopPropagation(); restartAll(); }}
+              disabled={restartingAll}
+              title="Restart all (skips backend)"
+              style={{
+                marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4,
+                background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.4)',
+                borderRadius: 6, padding: '3px 8px', cursor: restartingAll ? 'wait' : 'pointer',
+                color: '#f59e0b', fontSize: 10, fontWeight: 700,
+              }}
+            >
+              <span className="material-icons" style={{ fontSize: 12, animation: restartingAll ? 'nd-spin 0.9s linear infinite' : 'none' }}>
+                {restartingAll ? 'autorenew' : 'restart_alt'}
+              </span>
+              {restartingAll ? 'Restarting…' : 'Restart all'}
+            </button>
+            <button
+              onClick={e => { e.stopPropagation(); refresh(true); }}
+              title="Refresh"
+              style={{
+                background: 'none', border: 'none', cursor: 'pointer',
+                color: 'var(--nd-text-3)', padding: 2, display: 'flex',
+              }}
+            >
+              <span className="material-icons" style={{ fontSize: 15 }}>refresh</span>
+            </button>
+          </div>
+
+          {/* Totals strip */}
+          {totals && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 12,
+              padding: '6px 12px', borderBottom: '1px solid var(--nd-border)',
+              background: 'var(--nd-surface)', fontSize: 10.5,
             }}>
-              <div style={{
-                width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
-                background: svc.status === 'ok' ? '#00b386' : svc.status === 'error' ? '#f59e0b' : 'var(--nd-text-3)',
-                boxShadow: svc.status === 'ok' ? '0 0 5px rgba(0,179,134,0.7)' : 'none',
+              <span style={{ display: 'flex', alignItems: 'center', gap: 4, color: 'var(--nd-text-2)' }}>
+                <span className="material-icons" style={{ fontSize: 12, color: '#0ea5e9' }}>memory</span>
+                CPU <strong style={{ color: 'var(--nd-text-1)' }}>{totals.cpuPct}%</strong>
+              </span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 4, color: 'var(--nd-text-2)' }}>
+                <span className="material-icons" style={{ fontSize: 12, color: '#a855f7' }}>sd_card</span>
+                Mem <strong style={{ color: 'var(--nd-text-1)' }}>{fmtMem(totals.memUsedMb)}</strong>
+              </span>
+              <span style={{ marginLeft: 'auto', color: 'var(--nd-text-3)' }}>{totals.running} running</span>
+            </div>
+          )}
+
+          {svcErr && (
+            <div style={{
+              padding: '8px 12px', fontSize: 10.5, lineHeight: 1.5,
+              color: '#ef4444', background: 'rgba(239,68,68,0.08)',
+              borderBottom: '1px solid var(--nd-border)',
+            }}>
+              {svcErr}
+            </div>
+          )}
+
+          {/* Scrollable services list */}
+          <div style={{ overflowY: 'auto', maxHeight: 248 }}>
+          {sortedSvcs.length === 0 && !svcErr && (
+            <div style={{ padding: '14px 12px', fontSize: 11, color: 'var(--nd-text-3)', textAlign: 'center' }}>
+              Loading containers…
+            </div>
+          )}
+          {sortedSvcs.map((svc, i) => {
+            const dotCol = svc.running
+              ? (svc.health === 'unhealthy' ? '#f59e0b' : '#00b386')
+              : '#ef4444';
+            const isBusy = busy === svc.name;
+            return (
+            <div key={svc.name} style={{
+              display: 'flex', alignItems: 'center', gap: 7,
+              padding: '6px 10px 6px 12px',
+              borderBottom: i < sortedSvcs.length - 1 ? '1px solid var(--nd-border)' : 'none',
+              opacity: isBusy ? 0.6 : 1,
+            }}>
+              <div title={svc.status} style={{
+                width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
+                background: dotCol,
+                boxShadow: svc.running ? `0 0 5px ${dotCol}aa` : 'none',
               }} />
-              <span className="material-icons" style={{ fontSize: 13, color: 'var(--nd-text-3)', flexShrink: 0 }}>
+              <span className="material-icons" style={{ fontSize: 12, color: 'var(--nd-text-3)', flexShrink: 0 }}>
                 {svc.icon}
               </span>
-              <span style={{ flex: 1, fontSize: 12, color: 'var(--nd-text-1)', fontWeight: 500 }}>{svc.name}</span>
               <span style={{
-                fontSize: 10.5, fontWeight: 600,
-                color: svc.status === 'ok' ? '#00b386' : svc.status === 'error' ? '#f59e0b' : 'var(--nd-text-3)',
-              }}>
-                {svc.status === 'ok' ? 'Live' : svc.status === 'error' ? 'Waiting' : '…'}
-              </span>
+                flex: 1, minWidth: 0, fontSize: 11, color: 'var(--nd-text-1)', fontWeight: 500,
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }} title={svc.label}>{svc.label}</span>
+
+              {/* CPU / Mem */}
+              {svc.running && (
+                <span style={{
+                  display: 'flex', flexDirection: 'column', alignItems: 'flex-end',
+                  flexShrink: 0, lineHeight: 1.25, minWidth: 46,
+                }} title={`CPU ${svc.cpuPct ?? '—'}% · Mem ${fmtMem(svc.memUsedMb)}`}>
+                  <span style={{
+                    fontSize: 9.5, fontWeight: 600,
+                    color: (svc.cpuPct ?? 0) >= 80 ? '#ef4444' : (svc.cpuPct ?? 0) >= 40 ? '#f59e0b' : 'var(--nd-text-2)',
+                  }}>{svc.cpuPct == null ? '—' : `${svc.cpuPct}%`}</span>
+                  <span style={{ fontSize: 9.5, color: 'var(--nd-text-3)' }}>{fmtMem(svc.memUsedMb)}</span>
+                </span>
+              )}
+
+              {/* Logs link → new tab. Color flags recent-log severity. */}
+              {(() => {
+                const sevColor = svc.logSeverity === 'error' ? '#ef4444'
+                               : svc.logSeverity === 'warning' ? '#f59e0b'
+                               : '#00b386';
+                const sevTitle = svc.logSeverity === 'error' ? 'Errors in recent logs — view (new tab)'
+                               : svc.logSeverity === 'warning' ? 'Warnings in recent logs — view (new tab)'
+                               : 'No errors/warnings — view logs (new tab)';
+                return (
+                  <button
+                    onClick={e => { e.stopPropagation(); openLogs(svc.name); }}
+                    title={sevTitle}
+                    style={{
+                      background: 'none', border: 'none', cursor: 'pointer',
+                      color: sevColor, padding: 2, display: 'flex', flexShrink: 0,
+                    }}
+                  >
+                    <span className="material-icons" style={{ fontSize: 14 }}>article</span>
+                  </button>
+                );
+              })()}
+
+              {/* Control: start (if down) or restart/stop (if up) */}
+              {svc.running ? (
+                <>
+                  <button
+                    onClick={e => { e.stopPropagation(); control(svc.name, 'restart'); }}
+                    disabled={isBusy}
+                    title="Restart"
+                    style={{ background: 'none', border: 'none', cursor: isBusy ? 'wait' : 'pointer', color: 'var(--nd-text-3)', padding: 2, display: 'flex', flexShrink: 0 }}
+                  >
+                    <span className="material-icons" style={{ fontSize: 14 }}>{isBusy ? 'hourglass_empty' : 'restart_alt'}</span>
+                  </button>
+                  <button
+                    onClick={e => { e.stopPropagation(); control(svc.name, 'stop'); }}
+                    disabled={isBusy}
+                    title="Stop"
+                    style={{ background: 'none', border: 'none', cursor: isBusy ? 'wait' : 'pointer', color: '#ef4444', padding: 2, display: 'flex', flexShrink: 0 }}
+                  >
+                    <span className="material-icons" style={{ fontSize: 14 }}>stop_circle</span>
+                  </button>
+                </>
+              ) : (
+                <button
+                  onClick={e => { e.stopPropagation(); control(svc.name, 'start'); }}
+                  disabled={isBusy}
+                  title="Start"
+                  style={{ background: 'none', border: 'none', cursor: isBusy ? 'wait' : 'pointer', color: '#00b386', padding: 2, display: 'flex', flexShrink: 0 }}
+                >
+                  <span className="material-icons" style={{ fontSize: 15 }}>{isBusy ? 'hourglass_empty' : 'play_circle'}</span>
+                </button>
+              )}
             </div>
-          ))}
+            );
+          })}
+          </div>
 
           {/* Paper trading time config */}
           <div style={{ borderTop: '1px solid var(--nd-border)', padding: '10px 14px 12px' }}>

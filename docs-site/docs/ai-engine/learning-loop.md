@@ -6,17 +6,20 @@ sidebar_label: Learning & Pattern Memory
 
 # Continuous Learning & Pattern Memory
 
-The AI Engine is a **7-agent ensemble** that learns from every trade it observes.
+The AI Engine is a **12-agent ensemble** that learns from every trade it observes.
 Three things are trained on every realised outcome — agent **weights**, the **RL
 Q-table**, and the **Pattern Memory** bank — so the more you backtest and
 paper-trade, the more accurate future predictions become.
 
 > **Where it lives:** `backend/app/agents/` (`ensemble.py`, `learning.py`,
-> `memory.py`, `fingerprint.py`, `rl_agent.py`) and `backend/app/api/ai_engine.py`.
+> `memory.py`, `fingerprint.py`, `rl_agent.py`, `day_structure.py`, …) and
+> `backend/app/api/ai_engine.py`. This is the **in-process** ensemble (Live
+> Analysis + paper/replay/backtest sessions), distinct from the standalone
+> microservice ensemble-engine.
 
 ---
 
-## The 7 agents
+## The 12 agents
 
 | Agent | Signal source |
 |---|---|
@@ -27,9 +30,23 @@ paper-trade, the more accurate future predictions become.
 | `sentiment` | **LLM news sentiment** — reads the [sentiment-service](../microservices/sentiment-service.md) signal (Google-News + LLM); the only price-independent agent |
 | `rl` | Q-learning policy (108-state table in Redis) |
 | `memory` | **Case-based reasoning** over historical outcomes |
+| `meanrev` | Mean-reversion — fades overextended moves (Bollinger / z-score / RSI extremes) |
+| `regime` | Market-regime filter (HMM) — reweights momentum vs mean-reversion |
+| `anomaly` | IsolationForest trap detector — vetoes abnormal bars |
+| `gbm` | Gradient-Boosted P(up) over the pattern fingerprint (trainable) |
+| `day_structure` | **Full-day structure** — where price sits in the day's range, swing S/R levels, and risk/reward for a long. Votes SELL near the day high; also an explicit entry-gate veto in sessions |
 
 The ensemble combines them with a **confidence-weighted vote**; the final action
 then passes through the **memory evidence gate** (below).
+
+> **Enable / weight per agent** from the **Agents & Memory** page
+> (`/ai-engine/memory`). Overrides live in the Redis registry
+> (`ai_engine:model_registry`); `weight: null` means "use the learned weight".
+> Weights are no longer capped at 2.
+
+> **Deployment:** the ensemble runs in both `stock-prediction-backend` and
+> `stock-prediction-session-runner`. After changing the agent roster, restart
+> **both** — a running Python process loads agent code only at startup.
 
 ---
 
@@ -79,7 +96,7 @@ fingerprint + RL state); on exit the realised P&L is recorded as an **outcome**.
 A background job (`app/agents/memory_sweep.py`) runs at **~02:00 IST** and
 rebuilds the `BACKTEST` portion of the bank from fresh real backtests across the
 watchlist — *replace, not append*, so it stays bounded; `LIVE`/`PAPER`/`REPLAY`
-cases are preserved. Trigger manually from the **Pattern Memory** page.
+cases are preserved. Trigger manually from the **Agents & Memory** page.
 
 ---
 
@@ -98,7 +115,7 @@ cases are preserved. Trigger manually from the **Pattern Memory** page.
 
 | Method & path | Description |
 |---|---|
-| `POST /api/ai-engine/analyze` | Run the 7-agent ensemble; stores a prediction |
+| `POST /api/ai-engine/analyze` | Run the 12-agent ensemble; stores a prediction |
 | `POST /api/ai-engine/outcome` | Record a trade outcome → trains weights + RL + memory |
 | `GET /api/ai-engine/performance` | Per-agent weight + accuracy |
 | `GET /api/ai-engine/learning-summary` | Totals, overall accuracy, per-agent stats, 24h activity, memory size |

@@ -14,6 +14,7 @@ from .meanrev   import MeanReversionAgent
 from .regime    import RegimeFilterAgent
 from .anomaly   import AnomalyDetectorAgent
 from .gbm_agent import GBMAgent
+from .day_structure import DayStructureAgent
 
 _engine:   EnsembleEngine | None = None
 _learning: LearningSystem | None = None
@@ -64,6 +65,7 @@ def get_engine() -> EnsembleEngine:
             RegimeFilterAgent(),
             AnomalyDetectorAgent(),
             GBMAgent(),
+            DayStructureAgent(),
         ]
         _engine = EnsembleEngine(agents)
     return _engine

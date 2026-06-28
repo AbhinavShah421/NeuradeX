@@ -79,7 +79,7 @@ Running alongside the trade pipeline above is the loop that makes the system
         │                  autopilot (if ON, market open)
         │                  opens a paper session per watchlist stock
         │                           │
-        │                  7-agent ensemble decides on real data
+        │                  12-agent ensemble decides on real data
         │                           │
         │                  closed trades → train weights + RL + memory
         │                           │

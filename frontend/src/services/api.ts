@@ -804,6 +804,11 @@ class ApiService {
     }
   }
 
+  async agentActionTrend(agent: string, action: string): Promise<any> {
+    const response = await this.api.get('/api/ai-engine/agent-action-trend', { params: { agent, action } });
+    return response.data;
+  }
+
   async aiEngineHistory(symbol?: string, limit = 20): Promise<ApiResponse<any>> {
     try {
       const response = await this.api.get('/api/ai-engine/history', {
@@ -1056,6 +1061,35 @@ class ApiService {
   async getLlmStatus(): Promise<ApiResponse<any>> {
     const response = await this.api.get('/api/ai-engine/llm-status', { timeout: 6000 });
     return response.data;
+  }
+
+  // ── Docker system control (floating system-status panel) ──────────────────
+  async getDockerServices(fresh = false): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/system/services', {
+      timeout: 20000,
+      params: fresh ? { fresh: true } : undefined,
+    });
+    return response.data;
+  }
+
+  async controlDockerService(name: string, action: 'start' | 'stop' | 'restart'): Promise<ApiResponse<any>> {
+    const response = await this.api.post(`/api/system/services/${name}/${action}`, null, { timeout: 35000 });
+    return response.data;
+  }
+
+  async restartAllDockerServices(): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/system/restart-all', null, { timeout: 120000 });
+    return response.data;
+  }
+
+  async candleCoverage(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/system/candles/coverage', { timeout: 15000 });
+    return response.data;
+  }
+
+  // Absolute URL to a container's logs page (opens in a new browser tab).
+  dockerLogsUrl(name: string): string {
+    return `${API_BASE_URL || ''}/api/system/services/${name}/logs`;
   }
 
   // AI loss-learning: post-mortems on losing trades + aggregated lessons

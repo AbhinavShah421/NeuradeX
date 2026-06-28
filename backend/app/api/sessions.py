@@ -66,13 +66,17 @@ _RELIABLE_BUY_AGENTS = frozenset({"sentiment", "pattern", "memory", "gbm"})
 #     memory/gbm). Required only on "strict" — in replay these agents abstain
 #     often, so requiring it on the default gate starves training.
 TRADE_GATES = {
-    "strict": {"label": "Strict", "require_buy": True,  "min_conf": 0.50, "max_conf": 0.70,
+    # override_ceiling: when the ensemble's winning action is NOT BUY but it is
+    # *confident* (>= this), don't override it into a long. Post-trade data shows
+    # entry-confidence is strongly anti-predictive — win-rate falls 38% (conf 0.6)
+    # → 24% (0.8) → 13% (1.0). The worst losers are confident-HOLD overrides.
+    "strict": {"label": "Strict", "require_buy": True,  "min_conf": 0.50, "max_conf": 0.70, "override_ceiling": 0.74,
                "min_buy": 3, "need_reliable": True, "min_grade": "B",
                "desc": "Needs 3+ agents (incl. a high-precision one) voting BUY, in the 50-70% confidence sweet-spot, with a B+ pattern. Fewest, highest win-rate trades."},
-    "gentle": {"label": "Gentle", "require_buy": False, "min_conf": 0.50, "max_conf": 0.74,
+    "gentle": {"label": "Gentle", "require_buy": False, "min_conf": 0.50, "max_conf": 0.74, "override_ceiling": 0.78,
                "min_buy": 2, "need_reliable": False, "min_grade": "C",
                "desc": "Needs 2+ agents voting BUY (or a high-precision agent) and a non-bearish ensemble, with a C+ pattern. Balanced."},
-    "loose":  {"label": "Loose",  "require_buy": False, "min_conf": 0.0,  "max_conf": 1.01,
+    "loose":  {"label": "Loose",  "require_buy": False, "min_conf": 0.0,  "max_conf": 1.01, "override_ceiling": 1.01,
                "min_buy": 2, "need_reliable": False, "min_grade": "D", "reliable_single": True,
                "desc": "Needs 2 BUY votes OR one high-precision agent; pattern grade not enforced. Most trades — for training volume (lower win-rate)."},
 }
@@ -258,16 +262,9 @@ def _detail(s: dict) -> dict:
 
 async def _ensemble_decision(symbol: str, candles: list[dict], capital: float, position: str,
                              mode: str = "paper", date: str | None = None):
-    """Run the 7-agent ensemble (+memory gate) on the candles seen so far."""
-    from app.agents import get_engine, get_learning
-    engine   = get_engine()
-    learning = get_learning()
-    try:
-        weights = await learning.get_weights()
-        if weights:
-            engine.update_weights(weights)
-    except Exception:
-        pass
+    """Run the 11-agent ensemble (+memory gate) on the candles seen so far."""
+    from app.agents import get_engine
+    engine  = get_engine()
     context = {"symbol": symbol, "capital": capital, "position": position, "mode": mode,
                "date": date}  # date is YYYY-MM-DD for replay/backtest; None for paper
     decision = await engine.decide(symbol, candles, context)
@@ -303,6 +300,12 @@ async def _feed_memory(symbol: str, fp, regime: str, pnl_pct: float, entry: floa
 
 
 _PAPER_DROP_CANDLES = 6     # N consecutive lower closes = drop pattern (3 was triggering on normal chop)
+_LOSS_COOLDOWN_MIN  = 10    # after a losing exit, block new entries for this many minutes
+                            # (stops the system re-scalping the same chop range — the
+                            #  TITAN-style 6-losing-round-trips-in-an-afternoon pattern)
+_LATE_ENTRY_CUTOFF_MIN = 14 * 60   # 14:00 IST — no new entries after this in replay/
+                                   # backtest (paper uses its own configurable cutoff).
+                                   # Afternoon win-rate is 22-24% vs ~31% in the morning.
 
 
 def _timing_block_reason(ind: dict, candle: dict) -> str:
@@ -339,7 +342,7 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
     aggressive = s.get("timing_mode") == "aggressive"
     tsig = -1 if (force_close and pos_status == "LONG") else _tech_signal(ind, pos_status, candle, entry_price, aggressive=aggressive)
 
-    # The 7-agent ensemble (+memory gate) is the decision brain: it provides the
+    # The 11-agent ensemble (+memory gate) is the decision brain: it provides the
     # confidence, the reasoning, and can confirm or veto what the timing signal proposes.
     agents = s.get("agents", [])
     conf   = 0.6
@@ -420,7 +423,51 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
             elif conf > max_conf:
                 blocked.append(f"BUY confidence {conf:.0%} above the {max_conf:.0%} ceiling (over-confident setups historically reverse)")
                 conf_ok = False
-        enter = (tsig != -1 and support_ok and conf_ok and uptrend and good_timing)
+        # ── Confident-override veto (Mistake #1: confidence is anti-predictive) ──
+        # Entry confidence is inverted: trades entered at conf ≥0.8 win ~24% / at
+        # 1.0 only 13%, vs 38% at 0.6. The worst case is overriding a *confident*
+        # non-BUY ensemble with a marginal BUY-vote entry — so block exactly that.
+        override_ceiling = gate.get("override_ceiling", 1.01)
+        confident_override = (ens_action != "BUY" and conf >= override_ceiling)
+        if confident_override:
+            blocked.append(
+                f"ensemble confidently {ens_action} ({conf:.0%} ≥ {override_ceiling:.0%}) — "
+                f"not overriding into a long (high entry-confidence is anti-predictive)"
+            )
+        enter = (tsig != -1 and support_ok and conf_ok and uptrend and good_timing and not confident_override)
+        # ── Post-loss cooldown ────────────────────────────────────────────────
+        # After a losing exit, stay out for _LOSS_COOLDOWN_MIN minutes instead of
+        # immediately re-entering the same chop range. This is the single biggest
+        # cut to the "6 small losing round-trips in one afternoon" pattern.
+        if enter:
+            cd_until = s.get("cooldown_until_min", 0)
+            now_min  = _time_to_minutes(candle.get("time", "09:15"))
+            if cd_until and now_min < cd_until:
+                enter = False
+                blocked.append(
+                    f"post-loss cooldown — no re-entry until {cd_until // 60:02d}:{cd_until % 60:02d} "
+                    f"({cd_until - now_min}m left)"
+                )
+        # ── Day-structure veto ────────────────────────────────────────────────
+        # The day_structure agent votes SELL when price is in the top tier of the
+        # day's range with poor risk/reward for a long (near day high, resistance
+        # overhead, extended move). Two independent checks:
+        #   (a) a confident SELL vote, and
+        #   (b) poor R/R while high in the day range — even if the vote is HOLD,
+        #       a long with little upside and the whole day below it is bad expectancy.
+        if enter:
+            ds_agent = next((a for a in agents if a.get("agent_name") == "day_structure"), None)
+            ind_ds   = (ds_agent or {}).get("indicators") or {}
+            rng_pct  = ind_ds.get("day_range_pct")
+            rr       = ind_ds.get("rr_ratio")
+            ds_sell  = ds_agent and ds_agent.get("action") == "SELL" and ds_agent.get("confidence", 0) >= 0.62
+            poor_rr_high = (rr is not None and rng_pct is not None and rr < 0.60 and rng_pct > 0.55)
+            if ds_sell or poor_rr_high:
+                enter = False
+                blocked.append(
+                    f"day-structure veto: {(rng_pct or 0)*100:.0f}% of day range, "
+                    f"R/R {(rr or 0):.1f}× — unfavorable risk/reward for a long entry"
+                )
         # Pattern-quality gate (shared pattern AI engine): only trade good patterns.
         # Backtest/replay require an A-grade pattern; paper/live require ≥ B.
         if enter:
@@ -447,10 +494,22 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         else:
             reason = f"No entry [{gate['label']} gate] — " + "; ".join(blocked) + "."
     else:  # LONG
-        # Exit on the intraday signal OR if the ensemble turns bearish; otherwise hold.
-        action = "SELL" if (tsig == -1 or ens_action == "SELL") else "HOLD"
+        # Reward/risk fix (Mistake #3): winners were exiting at +0.7% avg despite a
+        # +2.5% target — a soft ensemble SELL (mean-reversion noise) kept cutting
+        # them early. So once a position is in profit, ONLY the technical
+        # stop/target/trail (tsig) exits it; a soft ensemble SELL no longer does.
+        # Flat/losing positions still exit on an ensemble SELL (cut losers fast).
+        gain_pct = ((candle["close"] - entry_price) / entry_price * 100) if entry_price else 0.0
+        ens_sell_strong = (ens_action == "SELL" and conf >= 0.78)
+        if gain_pct >= 0.4 and not ens_sell_strong:
+            action = "SELL" if tsig == -1 else "HOLD"      # winner — let it run
+        else:
+            action = "SELL" if (tsig == -1 or ens_action == "SELL") else "HOLD"
         if action == "SELL":
             reason = f"Exit: intraday signal/ensemble {ens_action}. {reason}".strip()
+        elif gain_pct >= 0.4:
+            reason = (f"Letting winner run (+{gain_pct:.1f}%) — exit on stop/target/trail "
+                      f"or a confident ensemble SELL only. Ensemble {ens_action} ({conf:.0%}).")
         else:
             reason = (f"Holding position — exit needs a sell-trigger (stop/target/trend-break) "
                       f"or the ensemble turning bearish. Ensemble {ens_action} ({conf:.0%}).")
@@ -466,6 +525,16 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         if held >= max_hold:
             action = "SELL"
             reason = f"Hold cap: position held {held}m ≥ {max_hold}m — force exit."
+
+    # ── Late-session entry cutoff for replay/backtest ─────────────────────────
+    # Afternoon entries are materially worse (14-15h win-rate 22-24% vs ~31% in
+    # the morning). Paper has its own configurable no_entry_after; give replay and
+    # backtest a fixed cutoff so historical training/eval reflects the same rule.
+    if action == "BUY" and not force_close and s.get("mode") in ("replay", "backtest"):
+        if _time_to_minutes(candle.get("time", "09:15")) >= _LATE_ENTRY_CUTOFF_MIN:
+            action = "HOLD"
+            reason = (f"No new entries after {_LATE_ENTRY_CUTOFF_MIN // 60:02d}:"
+                      f"{_LATE_ENTRY_CUTOFF_MIN % 60:02d} — afternoon win-rate is materially lower.")
 
     # ── Paper-trading specific rules (configurable times + profit/drop logic) ──
     if not force_close and s.get("mode") == "paper":
@@ -527,6 +596,10 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
                 "action": "BUY", "price": fill, "quantity": qty,
                 "confidence": int(conf * 100), "reason": reason,
                 "pnl": None, "pnl_pct": None, "candle_index": idx, "indicators": ind,
+                "agents": [{"agent": a.get("agent_name") or a.get("agent"),
+                            "action": a.get("action"), "confidence": a.get("confidence"),
+                            "weight": a.get("weight"), "reasoning": a.get("reasoning")}
+                           for a in (agents or [])],
             })
             # Train the AI engine: record this entry as a prediction so the exit
             # outcome can update per-agent weights (fingerprint=None here — the
@@ -563,6 +636,10 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
             "confidence": int(conf * 100), "reason": reason,
             "pnl": round(pnl, 2), "pnl_pct": pnl_pct, "candle_index": idx, "indicators": ind,
             "costs": fees,
+            "agents": [{"agent": a.get("agent_name") or a.get("agent"),
+                        "action": a.get("action"), "confidence": a.get("confidence"),
+                        "weight": a.get("weight"), "reasoning": a.get("reasoning")}
+                       for a in (agents or [])],
         })
         # Persist round-trip to Orders + teach the memory bank
         try:
@@ -596,6 +673,10 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
             except Exception as exc:
                 logger.debug("session record_outcome skipped: %s", exc)
         s["position"] = {"status": "NONE", "entry_price": 0.0, "quantity": 0, "entry_time": None, "current_pnl": 0.0}
+        # Post-loss cooldown: block re-entry for a window after a losing round-trip
+        # so the system doesn't immediately re-scalp the same chop range.
+        if pnl < 0 and not force_close:
+            s["cooldown_until_min"] = _time_to_minutes(candle.get("time", "09:15")) + _LOSS_COOLDOWN_MIN
         # Paper sessions: one trade per session — keep running for agent learning
         if s.get("mode") == "paper" and not force_close:
             s["no_more_entries"] = True
@@ -637,7 +718,8 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
             "atr": round(ind.get("atr", 0.0), 2),
         },
         "agents": [{"agent": a.get("agent_name") or a.get("agent"), "action": a.get("action"),
-                    "confidence": a.get("confidence")} for a in (agents or [])][:8],
+                    "confidence": a.get("confidence"), "weight": a.get("weight"),
+                    "reasoning": a.get("reasoning")} for a in (agents or [])],
     }
     s["last_decision"] = decision
     log = s.get("decision_log") or []
@@ -996,11 +1078,11 @@ async def start_session(req: StartSessionRequest):
         if req_date.weekday() >= 5:
             raise HTTPException(400, "Selected date is a weekend. Pick a weekday.")
 
-        all_candles = await _fetch_full_day_candles(symbol, req.date)
+        all_candles, candle_src = await _fetch_full_day_candles(symbol, req.date)
         if not all_candles:
             raise HTTPException(422, _no_real_intraday_msg(symbol, req.date))
         prev_date = _prev_trading_day(datetime.strptime(req.date, "%Y-%m-%d")).strftime("%Y-%m-%d")
-        prev_day  = await _fetch_full_day_candles(symbol, prev_date)
+        prev_day, _ = await _fetch_full_day_candles(symbol, prev_date)
 
         # Dynamically determine BACKTEST vs REPLAY:
         # first time trading this symbol on this date → BACKTEST, repeat → REPLAY
@@ -1014,7 +1096,7 @@ async def start_session(req: StartSessionRequest):
         base.update({
             "date": req.date, "all_candles": all_candles, "current_idx": start_idx,
             "prev_day_candles": prev_day, "prev_day_date": prev_date,
-            "current_time": all_candles[start_idx]["time"], "data_source": "groww",
+            "current_time": all_candles[start_idx]["time"], "data_source": candle_src,
         })
         # Initial step is handled by the background session_runner_loop within 2 s.
         # Running it here would block the HTTP response for 10–30 s (LLM ensemble).
@@ -1035,6 +1117,17 @@ async def start_session(req: StartSessionRequest):
             "date": _today_str(), "candles": candles, "prev_day_candles": [],
             "current_time": cur, "data_source": src,
         })
+        # Ensure this paper-traded symbol's 1s candles are ALSO captured into the
+        # dataset — add it to the capture allowlist and the feed subscription so the
+        # session runs on (and saves) real Groww stream data even if it isn't one of
+        # the baseline allowlisted symbols.
+        try:
+            from app.utils.redis_client import get_redis
+            from app.utils import groww_feed
+            await get_redis().sadd("candle_capture:symbols", symbol)
+            await groww_feed.request_symbols([symbol])
+        except Exception as exc:
+            logger.debug("paper capture-arm skipped for %s: %s", symbol, exc)
         # Let the background loop handle the first step to avoid blocking the response.
 
     await save_session(base)

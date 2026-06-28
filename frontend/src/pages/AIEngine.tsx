@@ -58,21 +58,23 @@ const STOCKS = [
 ];
 
 const AGENT_ICONS: Record<string, string> = {
-  technical:  'show_chart',
-  pattern:    'candlestick_chart',
-  momentum:   'speed',
-  volatility: 'waves',
-  sentiment:  'psychology',
-  rl:         'smart_toy',
+  technical:     'show_chart',
+  pattern:       'candlestick_chart',
+  momentum:      'speed',
+  volatility:    'waves',
+  sentiment:     'psychology',
+  rl:            'smart_toy',
+  day_structure: 'map',
 };
 
 const AGENT_COLORS: Record<string, string> = {
-  technical:  '#3b82f6',
-  pattern:    '#8b5cf6',
-  momentum:   '#f59e0b',
-  volatility: '#ef4444',
-  sentiment:  '#06b6d4',
-  rl:         '#10b981',
+  technical:     '#3b82f6',
+  pattern:       '#8b5cf6',
+  momentum:      '#f59e0b',
+  volatility:    '#ef4444',
+  sentiment:     '#06b6d4',
+  rl:            '#10b981',
+  day_structure: '#0ea5e9',
 };
 
 const ACTION_COLOR: Record<string, string> = {

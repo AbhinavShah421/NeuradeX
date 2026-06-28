@@ -159,6 +159,12 @@ class SentimentAgent(BaseAgent):
 
         signal = await self._news_signal(symbol, date=date)
 
+        # Regime gate — filter/discount the news signal based on the current market
+        # regime derived from the session's candle window.  Must run before momentum
+        # alignment so that a high-vol veto can short-circuit the whole chain.
+        if signal.action in ("BUY", "SELL") and len(candles) >= 30:
+            signal = self._regime_gate(signal, candles)
+
         # Momentum-sentiment alignment: discount confidence when news direction
         # opposes current price momentum (overbought + bullish, oversold + bearish).
         if signal.action in ("BUY", "SELL") and len(candles) >= 15:
@@ -202,6 +208,94 @@ class SentimentAgent(BaseAgent):
             action=signal.action,
             confidence=conf,
             reasoning=signal.reasoning + note,
+            indicators=ind,
+        )
+
+    # ── Regime gate ────────────────────────────────────────────────────────────
+
+    # Strong catalysts that can justify acting even in high-vol markets
+    _STRONG_CATS = {"earnings", "m_and_a", "legal", "rating", "buyback"}
+
+    def _regime_gate(self, signal: AgentSignal, candles: list[dict]) -> AgentSignal:
+        """Adjust or veto the news signal based on the current market regime.
+
+        Regime is computed fast (rule-based, no HMM) from the session's candle
+        window so it reflects exactly what has happened up to this point in the
+        backtest / replay / paper session.
+
+        Regime → action:
+          high_vol + weak catalyst  → HOLD (news inaudible over volatility)
+          high_vol + strong catalyst → keep signal, confidence ×0.65
+          chop                       → confidence ×0.75  (directionless noise)
+          range                      → confidence ×0.85  (light discount)
+          trend (signal aligns)      → confidence ×1.05  (slight boost)
+          trend (signal opposes)     → confidence ×0.70  (fighting the tape)
+          unknown                    → no change
+        """
+        from .regime import quick_regime
+        regime = quick_regime(candles)
+        if regime == "unknown":
+            return signal
+
+        cat     = (signal.indicators or {}).get("catalyst_cat", "unknown")
+        price   = candles[-1]["close"]
+        closes  = [c["close"] for c in candles]
+        sma20   = sum(closes[-20:]) / 20 if len(closes) >= 20 else price
+        trend_up = price > sma20
+
+        mult  = 1.0
+        veto  = False
+        note  = ""
+
+        if regime == "high_vol":
+            if cat in self._STRONG_CATS:
+                mult = 0.65
+                note = f"high-vol regime, strong catalyst ({cat}) — confidence trimmed"
+            else:
+                veto = True
+                note = f"high-vol regime, weak catalyst ({cat}) — abstaining"
+        elif regime == "chop":
+            mult = 0.75
+            note = "chop regime — directionless noise, sentiment discounted"
+        elif regime == "range":
+            mult = 0.85
+            note = "range regime — bounded price action, light discount"
+        elif regime == "trend":
+            aligns = (signal.action == "BUY" and trend_up) or \
+                     (signal.action == "SELL" and not trend_up)
+            if aligns:
+                mult = 1.05
+                note = "trend regime — sentiment aligns with price direction"
+            else:
+                mult = 0.70
+                note = "trend regime — sentiment opposes price direction, discounted"
+
+        ind = dict(signal.indicators or {})
+        ind["regime"] = regime
+        ind["regime_note"] = note
+
+        if veto:
+            return AgentSignal(
+                agent_name=self.name, action="HOLD", confidence=0.35,
+                reasoning=f"Regime gate: {note}",
+                indicators=ind,
+            )
+
+        if mult == 1.0:
+            # regime-neutral — just annotate the indicators
+            return AgentSignal(
+                agent_name=self.name, action=signal.action,
+                confidence=signal.confidence,
+                reasoning=signal.reasoning,
+                indicators=ind,
+            )
+
+        ind["regime_mult"] = round(mult, 2)
+        new_conf = round(min(0.95, signal.confidence * mult), 3)
+        return AgentSignal(
+            agent_name=self.name, action=signal.action,
+            confidence=new_conf,
+            reasoning=f"{signal.reasoning}; {note}",
             indicators=ind,
         )
 

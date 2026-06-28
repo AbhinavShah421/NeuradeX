@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import NeuradeXLogo from './NeuradeXLogo';
 import GrowwStatusBadge from './GrowwStatusBadge';
 import FloatingSystemStatus from './FloatingSystemStatus';
+import CommandPalette from './CommandPalette';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { useAuthStore } from '../stores/authStore';
@@ -33,10 +34,9 @@ const NAV_LEFT = [
 const AI_ENGINE_ITEMS = [
   { to: '/ai-engine',               label: 'Live Analysis',  icon: 'psychology' },
   { to: '/ai-engine/agents',        label: 'AI Agents',      icon: 'smart_toy' },
-  { to: '/ai-engine/models-control', label: 'AI Models',      icon: 'model_training' },
   { to: '/ai-engine/backtest',      label: 'Backtesting',    icon: 'history_edu' },
   { to: '/ai-engine/paper-trading', label: 'Paper Trading',  icon: 'receipt_long' },
-  { to: '/ai-engine/memory',        label: 'Pattern Memory', icon: 'memory' },
+  { to: '/ai-engine/memory',        label: 'Agents & Memory', icon: 'memory' },
 ];
 
 // Main nav items (right of AI Engine)
@@ -422,6 +422,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       <main className="nd-main">{children}</main>
 
       <FloatingSystemStatus />
+      <CommandPalette />
 
       <footer className="nd-footer">
         NeuradeX © 2024 · AI-Powered Market Intelligence · For educational purposes only

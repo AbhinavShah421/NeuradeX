@@ -175,24 +175,31 @@ services:
       - "5000:5000"
     volumes:
       - mlflow_data:/mlflow
+    # Fewer gunicorn workers + a longer timeout stop the WORKER TIMEOUT → SIGKILL
+    # (OOM) loop: 4 default workers don't fit in the memory box, and the default
+    # 30s timeout is too short for SQLite-backed bursts when metrics are logged.
     command: >
       mlflow server
       --host 0.0.0.0
       --port 5000
       --backend-store-uri sqlite:////mlflow/mlflow.db
       --default-artifact-root /mlflow/artifacts
+      --workers 2
+      --gunicorn-opts "--timeout 120 --graceful-timeout 30"
+    # The mlflow image ships no curl — use Python (always present) to probe /health.
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:5000/health').status==200 else 1)"]
       interval: 15s
       timeout: 10s
       retries: 6
+      start_period: 30s
     networks:
       - stock-prediction-network
     deploy:
       resources:
         limits:
-          memory: 768M
-          cpus: '0.3'
+          memory: 1280M
+          cpus: '0.5'
 
   # ── Existing Backend (monolith, remains during transition) ────────────────────
 
@@ -222,10 +229,19 @@ services:
       NEWS_MIN_CONFIDENCE: "0.55"
       NEWS_MIN_SCORE: "0.3"
       BACKEND_ROLE: "api"       # HTTP-only: no session runner / ML sweeps here
+      CANDLE_STORE_DIR: /data/candles
     ports:
       - "8000:8000"
     volumes:
       - ./backend/app:/app/app
+      # Read access to the Docker Engine API powers the system-status panel
+      # (list containers, view logs, start/stop/restart). Operator-only.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Container json-log files, so the panel can truncate ("clear") a service's
+      # logs on demand (Docker has no API for this — the file must be truncated).
+      - /var/lib/docker/containers:/var/lib/docker/containers
+      # 1s tick-store dataset (shared with session-runner, which captures it)
+      - candle_data:/data/candles
     depends_on:
       postgres:
         condition: service_healthy
@@ -276,8 +292,10 @@ services:
       NEWS_MIN_CONFIDENCE: "0.55"
       NEWS_MIN_SCORE: "0.3"
       BACKEND_ROLE: "runner"    # session runner + ML sweeps only, no HTTP load
+      CANDLE_STORE_DIR: /data/candles
     volumes:
       - ./backend/app:/app/app
+      - candle_data:/data/candles      # 1s tick-store dataset (shared read/write)
     depends_on:
       postgres:
         condition: service_healthy
@@ -864,6 +882,7 @@ volumes:
   mlflow_data:
   finbert_cache:
   rl_models:
+  candle_data:        # 1-second tick-store dataset (our own real-data warehouse)
 
 networks:
   stock-prediction-network:

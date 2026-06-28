@@ -14,7 +14,7 @@ from app.config import settings
 from app.database.mongodb import init_mongodb, close_mongodb
 from app.database.postgres import init_postgres, close_postgres
 from app.utils.redis_client import init_redis, close_redis
-from app.api import stocks, predictions, portfolio, risk, orders, agent, backtest, auth, paper_trading, ai_engine, mlflow_proxy, sessions, user_settings, mutual_funds, delivery_paper, live_trading
+from app.api import stocks, predictions, portfolio, risk, orders, agent, backtest, auth, paper_trading, ai_engine, mlflow_proxy, sessions, user_settings, mutual_funds, delivery_paper, live_trading, system
 from app.websocket.socket_manager import sio
 from app.ml_core.initializer import initialize_ml_models
 from app.utils.groww_client import init_groww_client
@@ -98,6 +98,17 @@ async def lifespan(app: FastAPI):
             except Exception as exc:
                 logger.warning("Could not start session runner: %s", exc)
 
+            # Continuous 1-second tick capture → our own real-data dataset (Parquet).
+            # Single writer (runner/full role only) so there are no cross-container
+            # Parquet races.
+            try:
+                from app.data.candle_capture import candle_capture_loop
+                app.state.candle_capture_task = asyncio.create_task(candle_capture_loop())
+                logger.info("1s candle capture scheduled",
+                            extra={"log_type": "app_lifecycle", "event": "candle_capture_scheduled"})
+            except Exception as exc:
+                logger.warning("Could not start candle capture: %s", exc)
+
         if _role in ("full", "api"):
             # Delivery (multi-day) paper-trading autopilot — ticks once a day
             try:
@@ -149,8 +160,8 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down application", extra={"log_type": "app_lifecycle", "event": "shutdown"})
     try:
         for _attr in ("memory_sweep_task", "gbm_autotrain_task", "delivery_paper_task",
-                      "session_runner_task", "scanner_task", "autopilot_task", "angel_task",
-                      "live_squareoff_task"):
+                      "session_runner_task", "candle_capture_task", "scanner_task",
+                      "autopilot_task", "angel_task", "live_squareoff_task"):
             task = getattr(app.state, _attr, None)
             if task:
                 task.cancel()
@@ -217,6 +228,7 @@ app.include_router(user_settings.router, prefix="/api/settings", tags=["settings
 app.include_router(mutual_funds.router, prefix="/api/mutual-funds", tags=["mutual-funds"])
 app.include_router(delivery_paper.router, prefix="/api/delivery-paper", tags=["delivery-paper"])
 app.include_router(live_trading.router, prefix="/api/live-trading", tags=["live-trading"])
+app.include_router(system.router, prefix="/api/system", tags=["system"])
 
 # Socket.IO ASGI app
 app_sio = socketio.ASGIApp(sio, app)

@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import apiService from '../services/api';
 import ScanControl from '../components/ScanControl';
 import TradingChart from '../components/TradingChart';
+import MarketBoard from '../components/MarketBoard';
 import { useAppStore } from '../stores/appStore';
 
 const inr = (v: number) =>
@@ -1566,7 +1567,8 @@ const AiWatchlistTab: React.FC = () => {
     }
   }, [holdCap]);
 
-  const [wlMax, setWlMax] = useState<number>(6);
+  const [viewN, setViewN]   = useState<number>(15);   // how many intraday stocks to display
+  const [ranked, setRanked] = useState<any[]>([]);     // full ranked board (top viewN)
   const [wlSaving, setWlSaving] = useState(false);
   const load = useCallback(async () => {
     try { const r = await apiService.aiWatchlist(); setData((r as any).data); } catch {}
@@ -1574,15 +1576,25 @@ const AiWatchlistTab: React.FC = () => {
     try { const d = await apiService.scanDiff(); setDiff((d as any).data); } catch {}
   }, []);
   useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, [load]);
-  useEffect(() => { apiService.getWatchlistConfig().then(r => setWlMax((r as any).data?.max ?? 6)).catch(() => {}); }, []);
 
-  const changeWlMax = async (n: number) => {
-    setWlMax(n); setWlSaving(true);
-    try { await apiService.setWatchlistConfig(n); await apiService.scanWatchlist(); } catch {}
-    setTimeout(() => setWlSaving(false), 2000);
+  // Full ranked intraday board (lets the user view far more than the high-conviction
+  // tier). Refetches when the chosen count changes + on a 30s interval.
+  const loadRanked = useCallback(async (n: number) => {
+    try { const r = await apiService.getRanked(n); setRanked(((r as any).data?.items) ?? []); } catch {}
+  }, []);
+  useEffect(() => { loadRanked(viewN); const t = setInterval(() => loadRanked(viewN), 30000); return () => clearInterval(t); }, [viewN, loadRanked]);
+
+  const changeViewN = async (n: number) => {
+    setViewN(n); setWlSaving(true);
+    // Keep the high-conviction grading tier in step for small selections (its
+    // backend cap is 25); larger views just pull more of the ranked board.
+    try { if (n <= 25) { await apiService.setWatchlistConfig(n); await apiService.scanWatchlist(); } } catch {}
+    await loadRanked(n);
+    setTimeout(() => setWlSaving(false), 1500);
   };
 
-  const intraday: any[] = data?.intraday ?? data?.items ?? [];
+  // Intraday view: the top-N ranked scan (falls back to the high-conviction list).
+  const intraday: any[] = (ranked.length ? ranked : (data?.intraday ?? data?.items ?? [])).slice(0, viewN);
   const delivery: any[] = data?.delivery ?? [];
   const fno: any[]      = data?.fno ?? [];
 
@@ -1601,11 +1613,12 @@ const AiWatchlistTab: React.FC = () => {
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--nd-text-3)' }}>
           <span className="material-icons" style={{ fontSize: 15 }}>tune</span>
           Show top
-          <select value={wlMax} onChange={e => changeWlMax(Number(e.target.value))} className="nd-input"
-            style={{ width: 64, padding: '4px 6px' }}>
-            {[3, 5, 6, 8, 10, 15].map(n => <option key={n} value={n}>{n}</option>)}
+          <select value={viewN} onChange={e => changeViewN(Number(e.target.value))} className="nd-input"
+            style={{ width: 72, padding: '4px 6px' }}>
+            {[10, 15, 25, 50, 100, 200, 250].map(n => <option key={n} value={n}>{n}</option>)}
           </select>
-          most-convicted{wlSaving ? ' · rescanning…' : ''}
+          scanned{wlSaving ? ' · rescanning…' : ''}
+          {viewN > 25 && <span style={{ fontSize: 10.5, color: 'var(--nd-text-3)' }}> · top {Math.min(viewN, 25)} are the graded high-conviction tier</span>}
         </div>
         <div style={{ marginLeft: 'auto' }}><ScanControl align="right" /></div>
       </div>
@@ -2441,13 +2454,106 @@ const SESS_ACTION_COLOR: Record<string, string> = { BUY: '#22c55e', SELL: '#ef44
 const SESS_AGENT_COLOR: Record<string, string> = {
   technical: '#3b82f6', sentiment: '#06b6d4', macro: '#f59e0b', pattern: '#8b5cf6', rl: '#10b981',
   gbm: '#14b8a6', regime: '#a855f7', anomaly: '#ec4899', momentum: '#eab308', memory: '#64748b',
-  meanrev: '#f97316', volatility: '#ef4444',
+  meanrev: '#f97316', volatility: '#ef4444', day_structure: '#0ea5e9',
+};
+
+// ── Agent detail popup ────────────────────────────────────────────────────────
+
+const AGENT_DESCRIPTIONS: Record<string, string> = {
+  technical:  'RSI, VWAP, SMA, ATR — classic price/momentum indicators.',
+  sentiment:  'News LLM + FinBERT — real-time catalyst and sentiment scoring.',
+  macro:      'Market-regime, sector strength and macro-level breadth filters.',
+  pattern:    'Trained neural-network pattern recognition across the NSE universe.',
+  rl:         'Reinforcement-learning agent trained on live trade outcomes.',
+  gbm:        'Gradient-boosted tree ensemble (tabular features, probabilistic output).',
+  regime:     'HMM market-regime classifier — trend / chop / range / high-vol.',
+  anomaly:    'Statistical outlier detector — flags unusual price or volume behaviour.',
+  momentum:   'Short-window price momentum (5-min, 10-min slopes).',
+  memory:     'Pattern-memory bank — surfaces exact historical precedents.',
+  meanrev:       'Mean-reversion signal — Z-score distance from VWAP/SMA.',
+  volatility:    'ATR-based volatility filter — widens stops in high-vol regimes.',
+  day_structure: 'Intraday S/R levels, day-range position and R/R ratio — blocks entries near day highs.',
+};
+
+const AgentDetailModal: React.FC<{ agent: any; onClose: () => void }> = ({ agent, onClose }) => {
+  const name       = agent.agent || agent.agent_name || '';
+  const action     = agent.action ?? '—';
+  const conf       = agent.confidence != null ? (agent.confidence <= 1 ? agent.confidence * 100 : agent.confidence) : null;
+  const weight     = agent.weight != null ? Math.round(agent.weight * 100) : null;
+  const reasoning  = agent.reasoning ?? null;
+  const accentColor = SESS_AGENT_COLOR[name] ?? 'var(--nd-border)';
+  const actionColor = SESS_ACTION_COLOR[action] ?? 'var(--nd-text-1)';
+  const desc = AGENT_DESCRIPTIONS[name] ?? '';
+
+  return (
+    <div
+      onClick={e => { if (e.target === e.currentTarget) onClose(); }}
+      style={{ position: 'fixed', inset: 0, background: '#00000090', zIndex: 1100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}
+    >
+      <div style={{ background: 'var(--nd-bg)', border: `1px solid ${accentColor}60`, borderRadius: 14, width: '100%', maxWidth: 420, boxShadow: `0 16px 48px #00000070, 0 0 0 1px ${accentColor}20` }}>
+        {/* Header */}
+        <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--nd-border)', display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div style={{ width: 10, height: 10, borderRadius: '50%', background: accentColor, flexShrink: 0 }} />
+          <span style={{ fontSize: 15, fontWeight: 700, color: 'var(--nd-text-1)', textTransform: 'capitalize', flex: 1 }}>{name}</span>
+          <span style={{ fontSize: 9, fontWeight: 700, padding: '2px 7px', borderRadius: 4, background: `${actionColor}18`, color: actionColor, border: `1px solid ${actionColor}40`, letterSpacing: 0.5 }}>
+            {action}
+          </span>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', marginLeft: 4 }}>
+            <span className="material-icons" style={{ color: 'var(--nd-text-3)', fontSize: 18 }}>close</span>
+          </button>
+        </div>
+
+        <div style={{ padding: '14px 18px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {/* Description */}
+          {desc && (
+            <div style={{ fontSize: 11.5, color: 'var(--nd-text-3)', lineHeight: 1.5 }}>{desc}</div>
+          )}
+
+          {/* Metrics row */}
+          <div style={{ display: 'flex', gap: 10 }}>
+            {conf != null && (
+              <div style={{ flex: 1, background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 9, padding: '10px 12px' }}>
+                <div style={{ fontSize: 10, color: 'var(--nd-text-3)', marginBottom: 4 }}>CONFIDENCE</div>
+                <div style={{ fontSize: 22, fontWeight: 700, color: actionColor }}>{conf.toFixed(0)}%</div>
+                {/* confidence bar */}
+                <div style={{ marginTop: 5, height: 4, background: 'var(--nd-border)', borderRadius: 2 }}>
+                  <div style={{ height: '100%', width: `${conf}%`, background: actionColor, borderRadius: 2 }} />
+                </div>
+              </div>
+            )}
+            {weight != null && (
+              <div style={{ flex: 1, background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 9, padding: '10px 12px' }}>
+                <div style={{ fontSize: 10, color: 'var(--nd-text-3)', marginBottom: 4 }}>ENSEMBLE WEIGHT</div>
+                <div style={{ fontSize: 22, fontWeight: 700, color: accentColor }}>{weight}%</div>
+                <div style={{ marginTop: 5, height: 4, background: 'var(--nd-border)', borderRadius: 2 }}>
+                  <div style={{ height: '100%', width: `${Math.min(weight, 100)}%`, background: accentColor, borderRadius: 2 }} />
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Reasoning */}
+          {reasoning ? (
+            <div style={{ background: 'var(--nd-surface)', border: `1px solid ${accentColor}30`, borderRadius: 9, padding: '10px 12px' }}>
+              <div style={{ fontSize: 10, color: 'var(--nd-text-3)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>Reasoning</div>
+              <div style={{ fontSize: 12.5, color: 'var(--nd-text-1)', lineHeight: 1.6 }}>{reasoning}</div>
+            </div>
+          ) : (
+            <div style={{ fontSize: 11, color: 'var(--nd-text-3)', fontStyle: 'italic' }}>
+              Reasoning not captured — available for new sessions going forward.
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 };
 
 const SessionModal: React.FC<{ id: string; onClose: () => void }> = ({ id, onClose }) => {
   const { theme } = useAppStore();
   const [d, setD] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [selectedAgent, setSelectedAgent] = useState<any>(null);
 
   const load = useCallback(async () => {
     try { const r = await apiService.sessionGet(id); setD((r as any).data ?? null); }
@@ -2479,6 +2585,8 @@ const SessionModal: React.FC<{ id: string; onClose: () => void }> = ({ id, onClo
   );
 
   return (
+    <>
+    {selectedAgent && <AgentDetailModal agent={selectedAgent} onClose={() => setSelectedAgent(null)} />}
     <div onClick={e => { if (e.target === e.currentTarget) onClose(); }}
       style={{ position: 'fixed', inset: 0, background: '#000000aa', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 12 }}>
       <div style={{ background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 16, width: '100%', maxWidth: 840, maxHeight: '92vh', overflow: 'auto', boxShadow: '0 24px 64px #00000060' }}>
@@ -2549,10 +2657,15 @@ const SessionModal: React.FC<{ id: string; onClose: () => void }> = ({ id, onClo
                     {agents.map((a: any, i: number) => {
                       const name = a.agent || a.agent_name;
                       return (
-                        <div key={i} style={{ background: 'var(--nd-surface)', border: `1px solid ${(SESS_AGENT_COLOR[name] ?? 'var(--nd-border)')}40`, borderRadius: 8, padding: '6px 12px', display: 'flex', flexDirection: 'column', alignItems: 'center', minWidth: 88 }}>
+                        <div key={i} onClick={() => setSelectedAgent(a)}
+                          style={{ background: 'var(--nd-surface)', border: `1px solid ${(SESS_AGENT_COLOR[name] ?? 'var(--nd-border)')}40`, borderRadius: 8, padding: '6px 12px', display: 'flex', flexDirection: 'column', alignItems: 'center', minWidth: 88, cursor: 'pointer', transition: 'border-color 0.15s, background 0.15s' }}
+                          onMouseEnter={e => { (e.currentTarget as HTMLDivElement).style.borderColor = (SESS_AGENT_COLOR[name] ?? '#888') + 'aa'; (e.currentTarget as HTMLDivElement).style.background = 'var(--nd-bg)'; }}
+                          onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.borderColor = (SESS_AGENT_COLOR[name] ?? 'var(--nd-border)') + '40'; (e.currentTarget as HTMLDivElement).style.background = 'var(--nd-surface)'; }}
+                        >
                           <div style={{ fontSize: 10, color: 'var(--nd-text-3)', textTransform: 'capitalize' }}>{name}</div>
                           <div style={{ fontSize: 13, fontWeight: 700, color: SESS_ACTION_COLOR[a.action] ?? 'var(--nd-text-3)' }}>{a.action}</div>
                           {a.confidence != null && <div style={{ fontSize: 9.5, color: 'var(--nd-text-3)' }}>{(a.confidence * 100).toFixed(0)}%</div>}
+                          <span className="material-icons" style={{ fontSize: 10, color: 'var(--nd-text-3)', marginTop: 2 }}>info</span>
                         </div>
                       );
                     })}
@@ -2573,17 +2686,111 @@ const SessionModal: React.FC<{ id: string; onClose: () => void }> = ({ id, onClo
                 </Section>
               )}
 
-              {/* Recent decision log */}
-              {Array.isArray(d?.decisionLog) && d.decisionLog.length > 0 && (
-                <Section icon="history" color="#64748b" title="Recent Decisions">
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 220, overflow: 'auto' }}>
-                    {[...d.decisionLog].reverse().slice(0, 20).map((x: any, i: number) => (
-                      <div key={i} style={{ display: 'flex', gap: 10, padding: '6px 10px', background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 7, fontSize: 11.5 }}>
-                        <span style={{ color: 'var(--nd-text-3)', minWidth: 42 }}>{x.time}</span>
-                        <span style={{ fontWeight: 700, color: SESS_ACTION_COLOR[x.action] ?? 'var(--nd-text-3)', minWidth: 38 }}>{x.action}</span>
-                        <span style={{ color: 'var(--nd-text-2)', flex: 1, lineHeight: 1.4 }}>{x.reason}</span>
-                      </div>
-                    ))}
+              {/* Trade Decisions — ensemble + full agent breakdown at every BUY / SELL */}
+              {Array.isArray(d?.tradesList) && d.tradesList.length > 0 && (
+                <Section icon="swap_vert" color="#22c55e" title={`Trade Decisions (${d.tradesList.length})`}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxHeight: 480, overflowY: 'auto' }}>
+                    {[...d.tradesList].reverse().map((t: any, i: number) => {
+                      const isBuy = t.action === 'BUY';
+                      const accentColor = isBuy ? '#22c55e' : '#ef4444';
+                      // agents stored directly on trade (new sessions) or fallback from decisionLog
+                      const logEntry = (d.decisionLog || []).find((x: any) => x.time === t.time && x.executed);
+                      const agentVotes: any[] = (t.agents?.length ? t.agents : logEntry?.agents) || [];
+                      return (
+                        <div key={i} style={{
+                          background: 'var(--nd-surface)',
+                          border: `1px solid ${accentColor}30`,
+                          borderLeft: `3px solid ${accentColor}`,
+                          borderRadius: 10, padding: '12px 14px',
+                        }}>
+                          {/* ── Header: action · time · price · qty · pnl ── */}
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+                            <span style={{
+                              fontSize: 12, fontWeight: 700, padding: '3px 10px', borderRadius: 6,
+                              background: `${accentColor}20`, color: accentColor, letterSpacing: 0.5,
+                            }}>{t.action}</span>
+                            <span style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>{t.time}</span>
+                            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--nd-text-1)' }}>
+                              ₹{typeof t.price === 'number' ? t.price.toFixed(2) : t.price}
+                            </span>
+                            {t.quantity != null && (
+                              <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>× {t.quantity}</span>
+                            )}
+                            {t.pnl != null && (
+                              <span style={{ marginLeft: 'auto', fontSize: 13, fontWeight: 700, color: t.pnl >= 0 ? '#22c55e' : '#ef4444' }}>
+                                {t.pnl >= 0 ? '+' : ''}₹{t.pnl.toFixed(2)}
+                                {t.pnlPct != null && (
+                                  <span style={{ fontSize: 10, fontWeight: 400, marginLeft: 4, color: 'var(--nd-text-3)' }}>
+                                    ({t.pnlPct > 0 ? '+' : ''}{t.pnlPct}%)
+                                  </span>
+                                )}
+                              </span>
+                            )}
+                          </div>
+
+                          {/* ── Ensemble decision row ── */}
+                          <div style={{
+                            display: 'flex', alignItems: 'center', gap: 10,
+                            background: 'var(--nd-bg)', borderRadius: 7, padding: '7px 10px', marginBottom: 8,
+                          }}>
+                            <span className="material-icons" style={{ fontSize: 14, color: 'var(--nd-text-3)' }}>how_to_vote</span>
+                            <span style={{ fontSize: 11, color: 'var(--nd-text-3)', fontWeight: 600 }}>Ensemble</span>
+                            <span style={{ fontSize: 13, fontWeight: 700, color: SESS_ACTION_COLOR[t.action] ?? 'var(--nd-text-1)' }}>
+                              {t.action}
+                            </span>
+                            {t.confidence != null && (
+                              <span style={{
+                                fontSize: 11, fontWeight: 600, padding: '1px 7px', borderRadius: 4,
+                                background: `${accentColor}15`, color: accentColor,
+                              }}>{t.confidence}%</span>
+                            )}
+                            {t.reason && (
+                              <span style={{ fontSize: 10.5, color: 'var(--nd-text-2)', lineHeight: 1.4, flex: 1 }}>
+                                {t.reason}
+                              </span>
+                            )}
+                          </div>
+
+                          {/* ── Agent votes grid ── */}
+                          {agentVotes.length > 0 ? (
+                            <>
+                              <div style={{ fontSize: 10, color: 'var(--nd-text-3)', fontWeight: 600, marginBottom: 5, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                                Agent Votes
+                              </div>
+                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                                {agentVotes.map((a: any, j: number) => {
+                                  const name = a.agent || a.agent_name;
+                                  const borderColor = SESS_AGENT_COLOR[name] ?? 'var(--nd-border)';
+                                  return (
+                                    <div key={j} onClick={() => setSelectedAgent(a)}
+                                      style={{
+                                        background: 'var(--nd-bg)', border: `1px solid ${borderColor}50`,
+                                        borderRadius: 7, padding: '4px 10px',
+                                        display: 'flex', flexDirection: 'column', alignItems: 'center', minWidth: 72,
+                                        cursor: 'pointer', transition: 'border-color 0.15s, background 0.15s',
+                                      }}
+                                      onMouseEnter={e => { (e.currentTarget as HTMLDivElement).style.borderColor = borderColor + 'aa'; (e.currentTarget as HTMLDivElement).style.background = 'var(--nd-surface)'; }}
+                                      onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.borderColor = borderColor + '50'; (e.currentTarget as HTMLDivElement).style.background = 'var(--nd-bg)'; }}
+                                    >
+                                      <div style={{ fontSize: 9, color: 'var(--nd-text-3)', textTransform: 'capitalize', whiteSpace: 'nowrap' }}>{name}</div>
+                                      <div style={{ fontSize: 12, fontWeight: 700, color: SESS_ACTION_COLOR[a.action] ?? 'var(--nd-text-3)' }}>{a.action}</div>
+                                      {a.confidence != null && (
+                                        <div style={{ fontSize: 9, color: 'var(--nd-text-3)' }}>{(a.confidence * 100).toFixed(0)}%</div>
+                                      )}
+                                      <span className="material-icons" style={{ fontSize: 9, color: 'var(--nd-text-3)', marginTop: 1 }}>info</span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </>
+                          ) : (
+                            <div style={{ fontSize: 11, color: 'var(--nd-text-3)', fontStyle: 'italic' }}>
+                              Agent votes not recorded — start a new session to capture them.
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 </Section>
               )}
@@ -2592,6 +2799,7 @@ const SessionModal: React.FC<{ id: string; onClose: () => void }> = ({ id, onClo
         </div>
       </div>
     </div>
+    </>
   );
 };
 
@@ -2788,6 +2996,11 @@ const Dashboard: React.FC = () => {
 
       {/* Currently-running auto-trading sessions with open positions + P&L */}
       <LiveSessionsPanel />
+
+      {/* Dense terminal-style market board — scanner's high-conviction picks */}
+      <div style={{ marginBottom: 20 }}>
+        <MarketBoard />
+      </div>
 
       {/* Accuracy stat cards — click any to see the evidence */}
       {STAT_CARDS.length > 0 && (

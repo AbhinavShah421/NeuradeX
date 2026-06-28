@@ -31,10 +31,11 @@ DEFAULTS: dict[str, dict] = {
     "rl":         {"enabled": True, "weight": None},
     "memory":     {"enabled": True, "weight": None},
     # ── new independent models ───────────────────────────────────────────────
-    "meanrev":    {"enabled": True, "weight": 0.9},
-    "regime":     {"enabled": True, "weight": 0.6},
-    "anomaly":    {"enabled": True, "weight": 0.7},
-    "gbm":        {"enabled": True, "weight": 1.1},
+    "meanrev":       {"enabled": True, "weight": None},
+    "regime":        {"enabled": True, "weight": None},
+    "anomaly":       {"enabled": True, "weight": None},
+    "gbm":           {"enabled": True, "weight": None},
+    "day_structure": {"enabled": True, "weight": None},
 }
 
 # Human-facing metadata for the control panel.
@@ -50,6 +51,7 @@ META: dict[str, dict] = {
     "regime":     {"label": "Market-Regime Filter", "kind": "model", "desc": "Trend/chop/high-vol; reweights momentum vs mean-reversion."},
     "anomaly":    {"label": "Anomaly / Trap Detector", "kind": "model", "desc": "IsolationForest flags abnormal bars; vetoes risky entries."},
     "gbm":        {"label": "Gradient-Boosted P(up)", "kind": "learned", "desc": "Non-linear ML over the pattern fingerprint; learned, trainable."},
+    "day_structure": {"label": "Day Structure", "kind": "rule", "desc": "Intraday S/R levels, day-range position, R/R ratio — avoids buying near day highs."},
 }
 
 _cache: dict = {"data": None, "ts": 0.0}

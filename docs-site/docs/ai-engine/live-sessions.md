@@ -8,7 +8,7 @@ sidebar_label: Live Sessions
 
 AI Live Trading (historical replay) and Paper Trading (live market) run as
 **server-side, background-advancing sessions**. State lives in Redis and a
-background loop advances every running session with the full 7-agent ensemble —
+background loop advances every running session with the full 12-agent ensemble —
 so a session **survives a page refresh, keeps running in the background, runs
 alongside others, and can be reopened** as a live chart.
 
@@ -46,7 +46,7 @@ Browser  ──poll───▶  /api/sessions/{id}  ◀── live candles, tra
 ### Decision logic
 
 Each candle, the **intraday rule signal** times entries/exits (RSI/VWAP/momentum
-+ take-profit, stop-loss, end-of-day square-off) while the **7-agent ensemble +
++ take-profit, stop-loss, end-of-day square-off) while the **12-agent ensemble +
 memory gate** confirm or veto the trade and supply confidence. A BUY fires only
 if the rule signal triggers *and* the ensemble isn't bearish; the ensemble can
 also trigger an early exit.

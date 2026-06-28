@@ -4,7 +4,7 @@ An advanced AI-powered stock prediction system combining machine learning, deep 
 
 ## ✨ Key AI Capabilities
 
-NeuradeX runs a **7-agent ensemble** (technical · pattern · momentum · volatility · sentiment · RL · memory) that **learns continuously** from every trade.
+NeuradeX runs a **12-agent ensemble** (technical · pattern · momentum · volatility · sentiment · RL · memory · meanrev · regime · anomaly · gbm · day-structure) that **learns continuously** from every trade.
 
 | Capability | What it does |
 |---|---|

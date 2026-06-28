@@ -338,6 +338,29 @@ LLM-backed conversational analysis endpoint.
 | `GET` | `/` | [100](backend/app/main.py#L100) | Root — returns service name and version |
 | `GET` | `/health` | [105](backend/app/main.py#L105) | Health check — verifies DB and Redis connectivity |
 
+#### Docker control panel — `/api/system`
+
+**File:** [`backend/app/api/system.py`](backend/app/api/system.py)
+
+Powers the floating **system-status panel** in the frontend. Talks to the Docker
+Engine API over the mounted unix socket (`/var/run/docker.sock`) using an httpx
+UDS transport — no extra Python package. Scoped to project containers only
+(name prefix `stock-prediction-`).
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/system/services` | List every project container with `state`, `status`, `health`, live `cpu_pct` / `mem_used_mb`, and recent-log `log_severity` (`error`/`warning`/`ok`). Returns aggregate `totals`. **Stale-while-revalidate**: serves a cached snapshot instantly and refreshes in the background; `?fresh=true` forces a synchronous recompute (used by the manual Refresh). `?stats=false` returns the container list only (fast, no enrichment). |
+| `POST` | `/api/system/services/{name}/{action}` | `action` ∈ `start` \| `stop` \| `restart`. Refuses to stop/restart `stock-prediction-backend` (can't act on the container serving the request). |
+| `POST` | `/api/system/restart-all` | Restart all running project containers in parallel, skipping the backend. |
+| `GET` | `/api/system/services/{name}/logs?tail=N` | Interactive, self-contained HTML log viewer (opened in a new tab). Client-side filtering: search highlight, level chips (Error/Warning/Info/Trace), from/to time range, tail-size selector (200–5000), auto-refresh (Off–60s, persisted), Clear view, Reset, and **Delete logs**. |
+| `DELETE` | `/api/system/services/{name}/logs` | Truncate the container's json-log file(s) to zero bytes (non-disruptive "clear"). Once empty, the severity scan returns `ok` and the panel's logs icon turns green. |
+
+**Requirements (docker-compose `backend` service):**
+- `/var/run/docker.sock:/var/run/docker.sock` — Engine API access (list/logs/control/stats)
+- `/var/lib/docker/containers:/var/lib/docker/containers` — to truncate json-log files for the Delete-logs action
+
+> ⚠️ These endpoints are **unauthenticated** (same posture as `/api/agent/services/health`) and the Docker socket is root-equivalent on the host. Intended for the operator's own local/personal deployment.
+
 ---
 
 ### 3.12 WebSocket

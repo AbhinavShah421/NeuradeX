@@ -54,7 +54,7 @@ closed trade trains the agents** (weights + RL + pattern memory).
 During NSE market hours, each tick (`AUTOPILOT_TICK_SECS`, default 60s) opens a
 **live paper session for every watchlist stock** not already traded today (up to
 `AUTOPILOT_MAX_SESSIONS`, default 15 — the whole watchlist). Each runs on **real
-market data** through the full **7-agent ensemble**.
+market data** through the full **12-agent ensemble**.
 
 ### Backtest mode (1× replay, continuous)
 

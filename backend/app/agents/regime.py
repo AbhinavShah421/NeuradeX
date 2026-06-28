@@ -385,6 +385,7 @@ class RegimeFilterAgent(BaseAgent):
 
     @staticmethod
     def _adx_smoothed(highs: list, lows: list, closes: list, period: int = 14) -> float:
+        # kept here for clarity — also used by quick_regime() below
         """Wilder's smoothed ADX — replaces the old noisy single-period DX."""
         n = len(closes)
         if n < period + 2:
@@ -408,3 +409,35 @@ class RegimeFilterAgent(BaseAgent):
         dx    = np.where(denom > 1e-9, 100.0 * np.abs(pdi - mdi) / denom, 0.0)
         adx   = _wilder(dx, period)
         return float(adx[-1]) if adx[-1] > 0 else 0.0
+
+
+# ── Standalone helper (no HMM) ────────────────────────────────────────────────
+
+def quick_regime(candles: list[dict]) -> str:
+    """Fast rule-based regime label for agents that need regime context inline.
+
+    Skips the HMM (which needs ≥60 bars and EM fitting) and uses the same
+    rule-based classifier as the HMM fallback — adequate for a gating signal.
+    Returns one of: "trend", "chop", "range", "high_vol", "unknown".
+    """
+    closes  = [c["close"] for c in candles if c.get("close")]
+    highs   = [c.get("high",  c["close"]) for c in candles if c.get("close")]
+    lows    = [c.get("low",   c["close"]) for c in candles if c.get("close")]
+    if len(closes) < 30:
+        return "unknown"
+    price    = closes[-1]
+    atr      = RegimeFilterAgent._atr(highs, lows, closes, 14)
+    adx      = RegimeFilterAgent._adx_smoothed(highs, lows, closes, 14)
+    atr_pct  = (atr / price * 100) if price else 0.0
+    sma20    = sum(closes[-20:]) / 20
+    sma50    = sum(closes[-50:]) / 50 if len(closes) >= 50 else sma20
+    ma_aligned = (price > sma20 > sma50) or (price < sma20 < sma50)
+    prev_sma20 = sum(closes[-30:-10]) / 20 if len(closes) >= 30 else sma20
+    slope_pct  = (sma20 - prev_sma20) / prev_sma20 * 100 if prev_sma20 else 0.0
+    if atr_pct >= 4.0:
+        return "high_vol"
+    if adx >= 25 and ma_aligned and abs(slope_pct) >= 0.15:
+        return "trend"
+    if adx < 18 and atr_pct < 1.5:
+        return "range"
+    return "chop"

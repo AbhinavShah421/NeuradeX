@@ -980,41 +980,11 @@ async def day_autopilot(req: DayAutopilotRequest):
         raise HTTPException(400, "date must be a past trading day — historical data is not available for today or future dates")
 
     # Fetch real intraday data or simulate
-    candles = None
-    data_source = "simulated"
-    groww = get_groww_client()
-    if groww:
-        try:
-            trade_date = datetime.strptime(req.date, "%Y-%m-%d")
-            logger.info(
-                "Calling Groww get_historical for day autopilot",
-                extra={"log_type": "groww_call", "caller": "backtest.day_autopilot", "method": "get_historical", "symbol": symbol, "date": req.date, "interval_minutes": 5},
-            )
-            raw = await groww.get_historical(symbol, 5, trade_date, trade_date.replace(hour=23, minute=59))
-            if raw and len(raw) > 30:
-                parsed = []
-                for c in raw:
-                    if isinstance(c, list) and len(c) >= 6:
-                        ts = int(c[0])
-                        dt_ist = datetime.fromtimestamp(ts, tz=IST)
-                        parsed.append({
-                            "time":      dt_ist.strftime("%H:%M"),
-                            "timestamp": ts,
-                            "open":  float(c[1]), "high": float(c[2]),
-                            "low":   float(c[3]), "close": float(c[4]),
-                            "volume": int(c[5]),
-                        })
-                if parsed:
-                    candles = parsed
-                    data_source = "groww"
-        except Exception as exc:
-            logger.warning(
-                "Groww intraday fetch failed, using simulation",
-                extra={"log_type": "backtest_event", "event": "intraday_fallback", "error": str(exc)},
-            )
-
+    from app.data.providers import fetch_intraday
+    candles, data_source = await fetch_intraday(symbol, req.date, 5)
     if not candles:
         candles = _simulate_intraday_5min(symbol, req.date)
+        data_source = "simulated"
 
     # ── Start time → candle index ─────────────────────────────────────────────
     try:
@@ -1382,16 +1352,31 @@ def _prev_trading_day(d: datetime) -> datetime:
     return prev
 
 
-async def _fetch_full_day_candles(symbol: str, date_str: str) -> list[dict]:
-    """Fetch the complete trading-day candles for a date from any real provider.
-    Returns empty list silently on any failure — callers must tolerate missing data.
+async def _fetch_full_day_candles(symbol: str, date_str: str, bar_seconds: int = 60) -> tuple[list[dict], str]:
+    """Complete trading-day candles for a date.
+
+    Reads OUR OWN 1-second tick-store dataset FIRST (resampled to `bar_seconds`),
+    which is real data captured live — then falls back to the historical provider
+    only when the store has no coverage for that symbol/day. Returns (candles,
+    source); empty list + 'none' on total failure.
     """
+    # 1) Prefer the captured 1s tick dataset (resample to the requested bar size).
+    try:
+        from app.data.candle_store import read_bars
+        bars = read_bars(symbol, date_str, bar_seconds)
+        if len(bars) >= 30:                      # enough of a day to be useful
+            return bars, "tickstore"
+    except Exception:
+        pass
+    # 2) Fall back to the historical provider (1-min floor; we request 5-min bars).
     try:
         from app.data.providers import fetch_intraday
         candles, source = await fetch_intraday(symbol, date_str, 5)
-        return candles if source != "simulated" else []
+        if source == "simulated" or not candles:
+            return [], "none"
+        return candles, source
     except Exception:
-        return []
+        return [], "none"
 
 
 def _compute_metrics(cash: float, capital: float, trades: list[dict]) -> dict:
@@ -1454,7 +1439,7 @@ async def progressive_start(req: ProgressiveStartRequest):
     if req_date >= today_ist:
         raise HTTPException(
             400,
-            f"Groww historical API only provides data for completed trading days. "
+            f"Historical data is only available for completed past trading days. "
             f"Please select a past date (last trading day: {today_ist - timedelta(days=1 if today_ist.weekday() > 0 else 3)})."
         )
     if req_date.weekday() >= 5:
@@ -1472,7 +1457,7 @@ async def progressive_start(req: ProgressiveStartRequest):
     # Fetch previous trading day's full candles for background chart display only.
     # Failures are silent — an empty list is fine.
     prev_date_str = _prev_trading_day(datetime.strptime(req.date, "%Y-%m-%d")).strftime("%Y-%m-%d")
-    prev_day_candles = await _fetch_full_day_candles(symbol, prev_date_str)
+    prev_day_candles, _ = await _fetch_full_day_candles(symbol, prev_date_str)
 
     model = req.model or getattr(settings, "LLM_MODEL", "llama3.2")
     idx    = len(candles) - 1

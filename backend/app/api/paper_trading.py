@@ -147,6 +147,20 @@ def _accumulate_tick(symbol: str, ltp: float, ts: float) -> None:
     now_ist  = datetime.fromtimestamp(ts, tz=IST)
     cur_min  = now_ist.hour * 60 + now_ist.minute
 
+    # Spike filter: discard ticks that are >5% away from the most recent
+    # known price — protects tick candles from bad LTP values in the stream.
+    ref = 0.0
+    if symbol in _tick_minute:
+        _, prev_prices, _ = _tick_minute[symbol]
+        if prev_prices:
+            ref = prev_prices[-1]
+    if ref <= 0:
+        completed = _tick_candles.get(symbol, [])
+        if completed:
+            ref = completed[-1]["close"]
+    if ref > 0 and abs(ltp - ref) / ref > 0.05:
+        return  # discard spike
+
     if symbol not in _tick_minute:
         _tick_minute[symbol] = (cur_min, [ltp], ts)
         return
@@ -451,20 +465,19 @@ async def _get_yahoo_cached(symbol: str, up_to_time: str) -> list:
 def _get_merged_candles(symbol: str, ltp: float, ts: float) -> list[dict]:
     """Merge Yahoo Finance historical base with real Groww tick candles.
 
-    Yahoo Finance provides complete history from 09:15 IST.
-    Groww tick candles override any Yahoo bar for the same minute (more accurate).
-    Appends a live in-progress bar for the current minute using the latest LTP.
+    Yahoo Finance provides complete history from 09:15 IST and is the
+    authoritative source for completed minutes (same underlying data as
+    Groww's own charts). Tick candles only fill the 1-2 minute recency
+    gap that Yahoo hasn't published yet — they do NOT override Yahoo bars
+    for older minutes to avoid bad-tick contamination skewing the chart.
     """
     yahoo_base = (_yahoo_candles.get(symbol) or ([], 0))[0]
-    tick_done  = {c["time"]: c for c in _tick_candles.get(symbol, [])}
-
-    # Start from Yahoo base, replacing minutes where we have real Groww ticks
-    merged: list[dict] = []
-    for c in yahoo_base:
-        merged.append(tick_done.get(c["time"], c))
-
-    # Append any Groww tick candles whose time is beyond Yahoo's range
     yahoo_times = {c["time"] for c in yahoo_base}
+
+    # Yahoo is authoritative for all minutes it covers
+    merged: list[dict] = list(yahoo_base)
+
+    # Tick candles only fill the gap beyond Yahoo's range (recent 1-2 min)
     for c in _tick_candles.get(symbol, []):
         if c["time"] not in yahoo_times:
             merged.append(c)

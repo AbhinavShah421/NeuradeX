@@ -8,14 +8,14 @@ sidebar_position: 10
 
 **File:** [`backend/app/api/ai_engine.py`](https://github.com/AbhinavShah421/NeuradeX/blob/main/backend/app/api/ai_engine.py)
 
-The AI Engine API drives the **7-agent ensemble**, the **continuous learning
+The AI Engine API drives the **12-agent ensemble**, the **continuous learning
 loop**, the **AI watchlist + autopilot**, and **Pattern Memory**.
 
 ### Ensemble & learning
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api/ai-engine/analyze` | Run the 7-agent ensemble on a candle window; stores a prediction |
+| `POST` | `/api/ai-engine/analyze` | Run the 12-agent ensemble on a candle window; stores a prediction |
 | `POST` | `/api/ai-engine/outcome` | Record a trade outcome → trains agent weights + RL Q-table + memory |
 | `GET` | `/api/ai-engine/performance` | Per-agent weight + accuracy |
 | `GET` | `/api/ai-engine/learning-summary` | Totals, overall accuracy, per-agent stats, 24h activity, memory size |

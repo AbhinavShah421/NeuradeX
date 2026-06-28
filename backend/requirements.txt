@@ -21,6 +21,7 @@ kombu==5.3.4
 # ML & AI (lightweight - model inference is placeholder)
 numpy==1.24.3
 pandas==2.1.3
+pyarrow==14.0.2          # Parquet engine for the 1s tick-store dataset (candle_store.py)
 scikit-learn==1.3.2
 xgboost==2.0.3
 

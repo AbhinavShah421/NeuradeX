@@ -18,13 +18,6 @@ const SUB_NAV = [
     description: 'Agent health, weights & performance',
   },
   {
-    to: '/ai-engine/models-control',
-    exact: false,
-    label: 'AI Models',
-    icon: 'tune',
-    description: 'Enable/weight each model & train the GBM',
-  },
-  {
     to: '/ai-engine/backtest',
     exact: false,
     label: 'Backtesting',
@@ -41,9 +34,9 @@ const SUB_NAV = [
   {
     to: '/ai-engine/memory',
     exact: false,
-    label: 'Pattern Memory',
+    label: 'Agents & Memory',
     icon: 'memory',
-    description: 'What the system has learned from past patterns',
+    description: 'Agent controls, weights, GBM training & pattern memory bank',
   },
   {
     to: '/ai-engine/live-trading',

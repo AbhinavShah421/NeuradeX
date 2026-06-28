@@ -6,7 +6,18 @@ sidebar_label: AI Engine
 
 # AI Engine Section (`/ai-engine/*`)
 
-Four pages under the AI Engine nested layout, each exposing a different mode of AI-driven trading.
+Pages under the AI Engine nested layout (`frontend/src/pages/AIEngineLayout.tsx`), each exposing a different mode of AI-driven trading:
+
+| Tab | Route | File |
+|---|---|---|
+| Live Analysis | `/ai-engine` | `AIEngine.tsx` |
+| AI Agents | `/ai-engine/agents` | `AIAgent.tsx` |
+| Backtesting | `/ai-engine/backtest` | `Backtest.tsx` |
+| Paper Trading | `/ai-engine/paper-trading` | `PaperTrading.tsx` |
+| **Agents & Memory** | `/ai-engine/memory` | `PatternMemory.tsx` |
+| Live Trading | `/ai-engine/live-trading` | `LiveTrading.tsx` |
+
+> **Note:** the former standalone **AI Models** tab (`/ai-engine/models-control`) was merged into **Agents & Memory**; that route now redirects to `/ai-engine/memory`.
 
 ---
 
@@ -251,3 +262,70 @@ liveIndicators: Indicators | null
 position: Position | null
 closedTrades: Trade[]
 ```
+
+---
+
+## Agents & Memory (`/ai-engine/memory`)
+
+**File:** `frontend/src/pages/PatternMemory.tsx`
+
+The unified control + insight page for the **in-process ensemble** (the agents that
+power Live Analysis and paper/replay/backtest sessions). It merges what used to be
+two separate tabs — *AI Models* (enable/weight controls) and *Pattern Memory*
+(learning stats) — into one screen.
+
+### API Calls
+
+| # | Method | Endpoint | When | Purpose |
+|---|---|---|---|---|
+| 1 | GET | `/api/ai-engine/memory/stats` | On mount | Pattern-memory bank totals, by-action / by-source / top-symbols |
+| 2 | GET | `/api/ai-engine/learning/summary` | On mount | Per-agent accuracy + effective weight rankings |
+| 3 | GET | `/api/ai-engine/models` | On mount | Enable flag + weight override per agent (`apiService.aiModels()`) |
+| 4 | POST | `/api/ai-engine/models` | On toggle / weight change | Enable/disable or pin/clear an agent's weight (`apiService.setAiModel()`) |
+| 5 | POST | `/api/ai-engine/gbm/train` | On "Train GBM" | Train the Gradient-Boosting model on the memory bank |
+
+### Per-agent controls (in the ranking cards)
+
+- **Enable/disable toggle** — disabled agents are excluded from the ensemble vote on the next decision (optimistic UI, reverts + shows an error banner on failure).
+- **Weight input** — a number field with **no upper ceiling** (the old `0–2` slider cap was removed); type any value ≥ 0. Pinned weights show an orange badge.
+- **Auto** button — clears the manual override so the agent reverts to its learned/default weight. Appears only when a weight is actually pinned.
+- After any change the page re-reads `/api/ai-engine/models` so the displayed state matches the server (avoids the registry-vs-DB weight mismatch).
+
+### Weight stores (important)
+
+Two stores exist and are kept in sync at read time:
+- **Registry** (Redis `ai_engine:model_registry`) — what this page sets and what the ensemble uses live. `weight: null` = no override (use learned/default).
+- **DB** (`ai_engine_agent_weights`) — the learned weight. `/api/ai-engine/learning/summary` overlays the registry override onto the displayed weight and flags `weightPinned` / `weightLearned`.
+
+### The `day_structure` agent
+
+The ensemble is **12 agents** (was 11). The 12th, **Day Structure**
+(`backend/app/agents/day_structure.py`), reads the full day's candles to judge where
+price sits in the day's range and the risk/reward of a long entry. It also acts as an
+explicit **entry-gate veto** in sessions: a high-confidence SELL near the day high
+blocks new long entries regardless of the other agents. A new agent must be added to
+six frontend surfaces (color/icon/description dicts on Dashboard, AIEngine,
+PatternMemory `AGENT_META`, and `FloatingSystemStatus`) plus the registry/ensemble
+defaults to be fully visible.
+
+> **Deployment note:** the ensemble runs in **two** containers —
+> `stock-prediction-backend` (HTTP) and `stock-prediction-session-runner`
+> (advances sessions). A Python process loads agent code once at startup, so after
+> changing the agent roster **both** must be restarted:
+> `docker restart stock-prediction-backend stock-prediction-session-runner`.
+
+---
+
+## Floating System-Status Panel
+
+**File:** `frontend/src/components/FloatingSystemStatus.tsx`
+
+A draggable floating button (bottom-right) that expands into a live **Docker control
+panel**, backed by the [`/api/system`](../api/system) routes.
+
+- Lists every project container with a status dot, **CPU% and memory** per service, and aggregate **CPU / Mem totals**.
+- **Logs icon** per service, colour-coded by recent-log severity — 🔴 error, 🟡 warning, 🟢 clean. Clicking opens the interactive log viewer in a new tab.
+- Per-service **Restart / Stop / Start**, plus a header **Restart all** (skips the backend).
+- Polls every 30s; the endpoint is stale-while-revalidate so updates are instant after the first load. The manual Refresh sends `?fresh=true`.
+
+> **camelCase gotcha:** the axios interceptor camelCases all response keys, so backend `cpu_pct` / `mem_used_mb` / `log_severity` are read as `cpuPct` / `memUsedMb` / `logSeverity` in the component.

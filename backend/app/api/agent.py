@@ -565,6 +565,11 @@ _SERVICES = [
     {"name": "Ensemble Engine",  "host": "ensemble-engine",     "port": 8007},
     {"name": "Feedback Service", "host": "feedback-service",    "port": 8012},
     {"name": "Model Trainer",    "host": "model-trainer",       "port": 8013},
+    {"name": "Stock Scanner",    "host": "stock-scanner",       "port": 8014},
+    {"name": "Autopilot",        "host": "autopilot-service",   "port": 8015},
+    {"name": "Sentiment Service","host": "sentiment-service",   "port": 8016},
+    {"name": "Risk Engine",      "host": "risk-engine",         "port": 8010},
+    {"name": "Trade Executor",   "host": "trade-executor",      "port": 8011},
 ]
 
 # Cache: only run the actual health probe every 30s; all other callers get the

@@ -58,6 +58,7 @@ const sidebars = {
         'api/backtest',
         'api/paper-trading',
         'api/ai-engine',
+        'api/system',
       ],
     },
     {

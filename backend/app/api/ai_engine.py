@@ -133,6 +133,48 @@ async def get_performance():
     return await get_learning().get_performance()
 
 
+@router.get("/agent-action-trend")
+async def get_agent_action_trend(agent: str, action: str):
+    """Per-day accuracy trend for a specific agent + action (BUY/SELL/HOLD).
+
+    Returns a list of {date, total, correct, accuracy} sorted by date so the
+    frontend can plot a line chart showing how this agent's vote quality has
+    changed over time.
+    """
+    await _db_once()
+    try:
+        from sqlalchemy import text
+        from app.database.postgres import engine
+        async with engine.begin() as conn:
+            rows = (await conn.execute(text("""
+                SELECT
+                    DATE(p.created_at AT TIME ZONE 'UTC')            AS date,
+                    COUNT(*)::int                                     AS total,
+                    SUM(CASE WHEN o.outcome='correct' THEN 1 ELSE 0 END)::int AS correct
+                FROM ai_engine_predictions p
+                JOIN ai_engine_outcomes o USING (prediction_id)
+                CROSS JOIN LATERAL jsonb_array_elements(p.agent_signals::jsonb) AS sig
+                WHERE sig->>'agent' = :agent
+                  AND sig->>'action' = :action
+                GROUP BY DATE(p.created_at AT TIME ZONE 'UTC')
+                ORDER BY date ASC
+            """), {"agent": agent.lower(), "action": action.upper()})).fetchall()
+
+        points = []
+        for r in rows:
+            total   = r[1] or 0
+            correct = r[2] or 0
+            points.append({
+                "date":     str(r[0]),
+                "total":    total,
+                "correct":  correct,
+                "accuracy": round(correct / total, 3) if total > 0 else 0.0,
+            })
+        return {"status": "success", "data": {"agent": agent, "action": action.upper(), "points": points}}
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc), "data": {"agent": agent, "action": action.upper(), "points": []}}
+
+
 @router.get("/history")
 async def get_history(symbol: Optional[str] = None, limit: int = 20):
     """Recent predictions with outcomes."""

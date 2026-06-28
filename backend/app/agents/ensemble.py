@@ -15,8 +15,10 @@ logger = get_logger(__name__)
 # LearningSystem syncs per-agent weights to Redis after every closed trade.
 # The ensemble reads them here and uses them as the live decision weights,
 # so the system genuinely gets better with each trade outcome.
-_LEARNED_WEIGHTS_KEY = "ai_engine:agent_weights"
+_LEARNED_WEIGHTS_KEY  = "ai_engine:agent_weights"
+_ACTION_RATES_KEY     = "ai_engine:agent_action_rates"
 _lw_cache: dict = {"data": {}, "ts": 0.0}
+_ar_cache: dict = {"data": {}, "ts": 0.0}
 _LW_TTL = 30.0   # seconds between Redis refreshes
 
 
@@ -34,14 +36,33 @@ async def _get_learned_weights() -> dict[str, float]:
         pass
     return {}
 
+
+async def _get_action_rates() -> dict[str, dict[str, float]]:
+    """Return per-agent, per-action accuracy rates published by LearningSystem.
+    Shape: {agent_name: {BUY: 0.72, SELL: 0.61, HOLD: 0.29}}
+    Only populated once an action has >= _MIN_ACTION_SAMPLES outcomes."""
+    now = time.time()
+    if _ar_cache["data"] and (now - _ar_cache["ts"]) < _LW_TTL:
+        return _ar_cache["data"]
+    try:
+        from app.utils.redis_client import cache_get
+        raw = await cache_get(_ACTION_RATES_KEY)
+        if raw:
+            _ar_cache.update({"data": json.loads(raw), "ts": now})
+            return _ar_cache["data"]
+    except Exception:
+        pass
+    return {}
+
 DEFAULT_WEIGHTS: dict[str, float] = {
-    "technical":  1.0,
-    "pattern":    1.0,
-    "momentum":   1.0,
-    "volatility": 1.0,
-    "sentiment":  1.0,
-    "rl":         0.8,  # lower until RL proves itself
-    "memory":     1.3,  # historical precedent carries extra weight in the vote
+    "technical":     1.0,
+    "pattern":       1.0,
+    "momentum":      1.0,
+    "volatility":    1.0,
+    "sentiment":     1.0,
+    "rl":            0.8,  # lower until RL proves itself
+    "memory":        1.3,  # historical precedent carries extra weight in the vote
+    "day_structure": 1.2,  # structural R/R context — anchors the vote in price reality
 }
 
 # Agents that require real-time data with no historical equivalent.
@@ -55,10 +76,11 @@ _REPLAY_SKIP_AGENTS: frozenset[str] = frozenset()
 # purely from OHLCV data; keep sentiment at its normal weight since it now uses
 # date-specific news, not today's feed.
 _REPLAY_WEIGHT_BOOST: dict[str, float] = {
-    "pattern":   1.5,
-    "technical": 1.2,
-    "momentum":  1.1,
-    "gbm":       1.2,
+    "pattern":       1.5,
+    "technical":     1.2,
+    "momentum":      1.1,
+    "gbm":           1.2,
+    "day_structure": 1.3,  # pure OHLCV — fully valid in replay
 }
 
 # Evidence gate: a non-HOLD decision is only allowed to fire if the Pattern
@@ -106,7 +128,8 @@ class EnsembleEngine:
         independently enable/weight-controlled via the model registry."""
 
         reg = await get_registry()
-        learned = await _get_learned_weights()   # weights updated after every trade
+        learned      = await _get_learned_weights()   # overall weights, updated after every trade
+        action_rates = await _get_action_rates()       # per-action accuracy rates
         mode = context.get("mode", "paper")
         active = [a for a in self.agents if is_enabled(reg, a.name)]
         if mode in ("replay", "backtest"):
@@ -150,10 +173,28 @@ class EnsembleEngine:
         # mean-reversion in chop; damp directional voices in high-vol regimes.
         regime = self._apply_regime(signals)
 
-        # Weighted vote
+        # ── Action-specific weighted vote ───────────────────────────────────────
+        # Each agent's contribution is scaled by how accurate IT specifically is
+        # for the action it just voted — a BUY voter is weighted by its BUY rate,
+        # a SELL voter by its SELL rate.  Overall weight still anchors the scale;
+        # action rate shifts it up or down (rate=0.5 → 1.0×, 0.7 → 1.4×, 0.3 → 0.6×).
+        # Rates are only applied once an agent has ≥ _MIN_ACTION_SAMPLES outcomes for
+        # that action (see learning.py), so cold-start agents stay at 1.0×.
         vote: dict[str, float] = {"BUY": 0.0, "SELL": 0.0, "HOLD": 0.0}
         for s in signals:
-            vote[s.action] += s.confidence * s.weight
+            base_w = s.weight or 1.0
+            if s.action in ("BUY", "SELL"):
+                rate = action_rates.get(s.agent_name, {}).get(s.action)
+                # factor: maps accuracy rate [0,1] → multiplier centred at 0.5
+                #   rate 0.50 → 1.0×  (no change)
+                #   rate 0.70 → 1.4×  (33% accuracy edge → 40% weight boost)
+                #   rate 0.30 → 0.6×  (20% below random → 40% weight reduction)
+                action_factor = max(0.2, 2.0 * rate) if rate is not None else 1.0
+                effective_w   = base_w * action_factor
+            else:
+                effective_w = base_w   # HOLD: use base weight unchanged
+            s.weight = round(effective_w, 3)   # persist effective weight for logging/UI
+            vote[s.action] += s.confidence * effective_w
 
         total    = sum(vote.values()) or 1.0
         vote_pct = {k: v / total for k, v in vote.items()}
