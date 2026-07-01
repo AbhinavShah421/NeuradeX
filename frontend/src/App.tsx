@@ -16,6 +16,7 @@ import Backtest from './pages/Backtest';
 import PaperTrading from './pages/PaperTrading';
 import LiveTrading from './pages/LiveTrading';
 import PatternMemory from './pages/PatternMemory';
+import Recordings from './pages/Recordings';
 import ModelRegistry from './pages/ModelRegistry';
 import Orders from './pages/Orders';
 import Settings from './pages/Settings';
@@ -48,6 +49,7 @@ const App: React.FC = () => {
                     <Route path="agents" element={<AIAgent />} />
                     <Route path="models-control" element={<Navigate to="/ai-engine/memory" replace />} />
                     <Route path="backtest" element={<Backtest />} />
+                    <Route path="recordings" element={<Recordings />} />
                     <Route path="paper-trading" element={<PaperTrading />} />
                     <Route path="live-trading" element={<LiveTrading />} />
                     <Route path="memory" element={<PatternMemory />} />

@@ -1117,17 +1117,10 @@ async def start_session(req: StartSessionRequest):
             "date": _today_str(), "candles": candles, "prev_day_candles": [],
             "current_time": cur, "data_source": src,
         })
-        # Ensure this paper-traded symbol's 1s candles are ALSO captured into the
-        # dataset — add it to the capture allowlist and the feed subscription so the
-        # session runs on (and saves) real Groww stream data even if it isn't one of
-        # the baseline allowlisted symbols.
-        try:
-            from app.utils.redis_client import get_redis
-            from app.utils import groww_feed
-            await get_redis().sadd("candle_capture:symbols", symbol)
-            await groww_feed.request_symbols([symbol])
-        except Exception as exc:
-            logger.debug("paper capture-arm skipped for %s: %s", symbol, exc)
+        # NOTE: paper sessions no longer arm dataset capture. Recording which stocks
+        # to capture into the 1-second dataset is now a dedicated, explicit feature
+        # (see app/api/recordings.py) so the dataset only holds the stocks you chose
+        # to record, not incidental paper-traded symbols.
         # Let the background loop handle the first step to avoid blocking the response.
 
     await save_session(base)
