@@ -6,7 +6,6 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .consumer import run_consumer
@@ -19,6 +18,8 @@ from .trainers.calibration_trainer import train_calibrator
 from app.elk_logger import setup_logging, get_logger
 setup_logging()
 logger = get_logger(__name__)
+
+from app.cors import configure_cors
 
 _background_tasks: list[asyncio.Task] = []
 _last_train_time: datetime | None = None
@@ -97,12 +98,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="model-trainer", lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+configure_cors(app)
 
 
 @app.get("/health")

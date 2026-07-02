@@ -10,7 +10,6 @@ from datetime import datetime, timezone, date as date_type
 import aio_pika
 import asyncpg
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic_settings import BaseSettings
 from pydantic import model_validator
 
@@ -19,6 +18,8 @@ from app.weight_updater import compute_weight_updates, determine_outcome
 from app.elk_logger import setup_logging, get_logger
 setup_logging()
 logger = get_logger(__name__)
+
+from app.cors import configure_cors
 
 
 class Settings(BaseSettings):
@@ -240,7 +241,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="NeuradeX — Feedback Service", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+configure_cors(app)
 
 
 @app.get("/health")

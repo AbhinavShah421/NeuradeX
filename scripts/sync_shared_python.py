@@ -43,6 +43,20 @@ TARGETS = {
         "rl-agent",
         "ensemble-engine",
     ],
+    "cors.py": [
+        "technical-agent",
+        "pattern-agent",
+        "sentiment-agent",
+        "macro-agent",
+        "rl-agent",
+        "ensemble-engine",
+        "feedback-service",
+        "market-data-service",
+        "stock-scanner",
+        "model-trainer",
+        "sentiment-service",
+        "autopilot-service",
+    ],
 }
 
 

@@ -9,7 +9,6 @@ from contextlib import asynccontextmanager
 import os
 
 from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 
 from .scanner import (
     scanner_loop, schedule_loop, scan_once, evaluate_day,
@@ -21,6 +20,8 @@ from .universe import UNIVERSE
 from app.elk_logger import setup_logging, get_logger
 setup_logging()
 logger = get_logger("stock-scanner")
+
+from app.cors import configure_cors
 
 _tasks: list[asyncio.Task] = []
 _INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "")
@@ -46,7 +47,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="stock-scanner", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+configure_cors(app)
 
 
 @app.get("/health")

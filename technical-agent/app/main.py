@@ -4,7 +4,6 @@ from contextlib import asynccontextmanager
 
 import asyncpg
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.consumer import start_consuming
@@ -14,6 +13,7 @@ setup_logging()
 logger = get_logger(__name__)
 
 from app.agent_bootstrap import connect_with_retry, health_payload
+from app.cors import configure_cors
 
 _pool: asyncpg.Pool | None = None
 _consumer_task: asyncio.Task | None = None
@@ -46,7 +46,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="NeuradeX — Technical Agent", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+configure_cors(app)
 
 
 @app.get("/health")
