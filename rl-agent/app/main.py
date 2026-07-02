@@ -19,6 +19,8 @@ from app.elk_logger import setup_logging, get_logger
 setup_logging()
 logger = get_logger(__name__)
 
+from app.agent_bootstrap import connect_with_retry, health_payload
+
 
 class Settings(BaseSettings):
     SERVICE_PORT: int = 8006
@@ -153,12 +155,11 @@ async def _consumer_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _pool
-    for attempt in range(1, 11):
-        try:
-            _pool = await asyncpg.create_pool(settings.POSTGRES_URL, min_size=2, max_size=6)
-            break
-        except Exception:
-            await asyncio.sleep(min(2 ** attempt, 30))
+    _pool = await connect_with_retry(
+        lambda: asyncpg.create_pool(settings.POSTGRES_URL, min_size=2, max_size=6),
+        what="rl-agent postgres",
+        required=False,
+    )
     _tasks.append(asyncio.create_task(_consumer_loop(), name="rl-consumer"))
     logger.info("rl-agent ready")
     yield
@@ -176,4 +177,4 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 @app.get("/health")
 async def health():
     policy = get_policy(settings.MLFLOW_TRACKING_URI, settings.POLICY_MODEL_NAME)
-    return {"status": "ok", "service": "rl-agent", "policy_loaded": policy is not None}
+    return health_payload("rl-agent", policy_loaded=policy is not None, db_pool=_pool is not None)

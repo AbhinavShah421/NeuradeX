@@ -35,6 +35,14 @@ TARGETS = {
         "sentiment-service",
         "autopilot-service",
     ],
+    "agent_bootstrap.py": [
+        "technical-agent",
+        "pattern-agent",
+        "sentiment-agent",
+        "macro-agent",
+        "rl-agent",
+        "ensemble-engine",
+    ],
 }
 
 

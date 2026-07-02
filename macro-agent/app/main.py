@@ -19,6 +19,8 @@ from app.elk_logger import setup_logging, get_logger
 setup_logging()
 logger = get_logger(__name__)
 
+from app.agent_bootstrap import health_payload
+
 
 class Settings(BaseSettings):
     SERVICE_PORT: int = 8004
@@ -135,7 +137,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "macro-agent", "cached_indicators": bool(_macro_cache)}
+    return health_payload("macro-agent", cached_indicators=bool(_macro_cache))
 
 
 @app.get("/macro")

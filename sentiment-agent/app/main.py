@@ -15,6 +15,8 @@ from app.elk_logger import setup_logging, get_logger
 setup_logging()
 logger = get_logger(__name__)
 
+from app.agent_bootstrap import health_payload
+
 _consumer_task: asyncio.Task | None = None
 
 
@@ -45,7 +47,7 @@ class ScoreRequest(BaseModel):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": settings.SERVICE_NAME, "agent": "sentiment"}
+    return health_payload(settings.SERVICE_NAME, agent="sentiment")
 
 
 @app.post("/score")
