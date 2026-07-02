@@ -1,6 +1,6 @@
 import React from 'react';
 import apiService from '../../services/api';
-import { inr, ACTION_STYLE, CANCELLABLE } from './shared';
+import { ACTION_STYLE, CANCELLABLE } from './shared';
 
 interface OptimizeTabProps {
   optimization: any;

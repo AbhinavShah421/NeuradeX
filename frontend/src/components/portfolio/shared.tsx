@@ -1,4 +1,3 @@
-import React from 'react';
 import { PortfolioStock } from '../../types';
 
 export type SortKey = keyof Pick<PortfolioStock, 'symbol' | 'quantity' | 'purchasePrice' | 'currentPrice' | 'value' | 'gain' | 'gainPercent'>;
