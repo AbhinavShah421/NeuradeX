@@ -157,3 +157,6 @@ groww.txt
 
 # Claude Code agent worktrees (transient, per-session)
 .claude/worktrees/
+
+# graphify code-graph output (generated, regenerate with `graphify extract .`)
+graphify-out/
