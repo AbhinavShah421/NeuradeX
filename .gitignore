@@ -154,3 +154,6 @@ desktop.ini
 # ============================================================
 AbhinavNotes.txt
 groww.txt
+
+# Claude Code agent worktrees (transient, per-session)
+.claude/worktrees/
