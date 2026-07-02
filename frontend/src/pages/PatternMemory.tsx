@@ -7,6 +7,7 @@ import RefreshControl from '../components/pattern-memory/RefreshControl';
 import BreakdownPanel from '../components/pattern-memory/BreakdownPanel';
 import GbmTrainerCard from '../components/pattern-memory/GbmTrainerCard';
 import AgentDetailSheet from '../components/pattern-memory/AgentDetailSheet';
+import { LearningAgent } from '../components/pattern-memory/shared';
 
 const PatternMemory: React.FC = () => {
   const {
@@ -17,7 +18,7 @@ const PatternMemory: React.FC = () => {
     runSweep, runSeed,
   } = usePatternMemoryData();
 
-  const [agentPopup, setAgentPopup] = useState<{ agent: any; rank: number } | null>(null);
+  const [agentPopup, setAgentPopup] = useState<{ agent: LearningAgent; rank: number } | null>(null);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20, paddingBottom: 8 }}>

@@ -1,6 +1,7 @@
 import React from 'react';
 import apiService from '../../services/api';
 import { inr } from './shared';
+import { TradeLeg, InvestPick, InvestableBasket } from '../../types';
 
 type InvestSub = 'quick' | 'funds' | 'themes';
 
@@ -14,13 +15,13 @@ interface InvestTabProps {
   investData: any;
   investLoading: boolean;
   generateInvestPlan: () => void;
-  askInvestAll: (picks: any[]) => void;
-  askOrder: (spec: any) => void;
+  askInvestAll: (picks: InvestPick[]) => void;
+  askOrder: (spec: TradeLeg) => void;
 
   // Baskets (shared amount input between themes & funds)
   basketAmt: string;
   setBasketAmt: (v: string) => void;
-  askInvestBasket: (b: any) => void;
+  askInvestBasket: (b: InvestableBasket) => void;
 
   // AI Themes
   themes: any[];

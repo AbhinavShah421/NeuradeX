@@ -132,3 +132,31 @@ export const AGENT_META: Record<string, AgentMeta> = {
 };
 
 export interface ModelRow { name: string; label: string; kind: string; desc: string; enabled: boolean; weight: number | null; trained?: boolean; meta?: any; }
+
+// ── Agent learning summary (returned by /api/ai-engine/learning-summary) ──────
+export interface AgentActionStat {
+  action: string;
+  total: number;
+  correct?: number;
+  rate?: number;
+  avgPnl?: number;
+  avg_pnl?: number;
+}
+
+export interface LearningAgent {
+  agent: string;
+  accuracy: number;
+  weight: number;
+  weightLearned?: number;
+  correct?: number;
+  total?: number;
+  byAction?: AgentActionStat[];
+  by_action?: AgentActionStat[];
+}
+
+export interface LearningSummary {
+  agents?: LearningAgent[];
+  totals?: { recentOutcomes24h?: number; predictions?: number; outcomes?: number };
+  overallAccuracy?: number;
+  memoryCases?: number;
+}

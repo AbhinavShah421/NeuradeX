@@ -1,7 +1,8 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import apiService from '../services/api';
 import ScanControl from '../components/ScanControl';
-import { Portfolio, Performance } from '../types';
+import { Portfolio, Performance, Alert, OrderRecord, TradeLeg, PendingOrder, InvestableBasket, InvestPick, BasketInvestPick, RebalanceActionLike, AiSignalLike } from '../types';
+import { getErrorMessage } from '../utils/errors';
 import { inr, calcHHI, calcVaR, RISK_QUIZ, SortKey, SortDir, Tab, TABS } from '../components/portfolio/shared';
 import HoldingsTab from '../components/portfolio/HoldingsTab';
 import PerformanceTab from '../components/portfolio/PerformanceTab';
@@ -20,7 +21,7 @@ const PortfolioPage: React.FC = () => {
   const [portfolio,   setPortfolio]   = useState<Portfolio | null>(null);
   const [performance, setPerformance] = useState<Performance | null>(null);
   const [loading,     setLoading]     = useState(true);
-  const [alerts,      setAlerts]      = useState<any[]>([]);
+  const [alerts,      setAlerts]      = useState<Alert[]>([]);
   const [sortKey,     setSortKey]     = useState<SortKey>('value');
   const [sortDir,     setSortDir]     = useState<SortDir>('desc');
   const [activeTab,   setActiveTab]   = useState<Tab>('holdings');
@@ -29,7 +30,7 @@ const PortfolioPage: React.FC = () => {
 
   useEffect(() => { fetchPortfolioData(); }, []);
 
-  const [orders, setOrders] = useState<any[]>([]);
+  const [orders, setOrders] = useState<OrderRecord[]>([]);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
 
   // Load the persisted plan when the tab opens, then silently refresh while it's
@@ -54,7 +55,7 @@ const PortfolioPage: React.FC = () => {
   }, [activeTab]);
 
   const loadOrders = async () => {
-    try { const res = await apiService.listOrders(); setOrders(res.data || []); } catch { /* ignore */ }
+    try { const res = await apiService.listOrders(); setOrders((res.data as OrderRecord[]) || []); } catch { /* ignore */ }
   };
 
   const cancelPendingOrder = async (orderId: string, segment: string) => {
@@ -62,8 +63,8 @@ const PortfolioPage: React.FC = () => {
     try {
       const res = await apiService.cancelOrder(orderId, segment || 'CASH');
       setOrderMsg({ ok: res.status === 'success', text: res.status === 'success' ? `Order ${orderId} cancelled.` : (res.message || 'Cancel failed') });
-    } catch (e: any) {
-      setOrderMsg({ ok: false, text: e?.response?.data?.detail || e?.message || 'Cancel failed' });
+    } catch (e: unknown) {
+      setOrderMsg({ ok: false, text: getErrorMessage(e, 'Cancel failed') });
     } finally {
       setCancellingId(null);
       loadOrders();
@@ -95,28 +96,28 @@ const PortfolioPage: React.FC = () => {
   };
 
   // ── Direct Groww order placement (with confirmation) ──────────────────────
-  const [pendingOrder, setPendingOrder] = useState<any>(null);
+  const [pendingOrder, setPendingOrder] = useState<PendingOrder | null>(null);
   const [orderMsg, setOrderMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [placing, setPlacing] = useState(false);
 
   // Place one leg; never throws — returns {ok, text}.
-  const placeOne = async (spec: any): Promise<{ ok: boolean; text: string }> => {
+  const placeOne = async (spec: TradeLeg): Promise<{ ok: boolean; text: string }> => {
     try {
       const res = await apiService.placeOrder({
         symbol: spec.symbol,
         quantity: spec.quantity,
         transactionType: spec.transactionType,
-        orderType: spec.orderType || 'MARKET',
+        orderType: (spec.orderType as 'MARKET' | 'LIMIT') || 'MARKET',
         price: spec.price,
-        product: spec.product || 'CNC',
+        product: (spec.product as 'CNC' | 'INTRADAY') || 'CNC',
         exchange: spec.exchange || 'NSE',
-      } as any);
+      });
       const ok = res.status === 'success';
       return { ok, text: ok
         ? `${spec.transactionType} ${spec.quantity} ${spec.symbol} placed`
         : `${spec.symbol}: ${res.message || 'failed'}` };
-    } catch (e: any) {
-      return { ok: false, text: `${spec.transactionType} ${spec.symbol} failed: ${e?.response?.data?.detail || e?.message || 'error'}` };
+    } catch (e: unknown) {
+      return { ok: false, text: `${spec.transactionType} ${spec.symbol} failed: ${getErrorMessage(e)}` };
     }
   };
 
@@ -154,7 +155,7 @@ const PortfolioPage: React.FC = () => {
     }
   };
 
-  const askOrder = (spec: any) => {
+  const askOrder = (spec: TradeLeg) => {
     if (!spec?.quantity || spec.quantity <= 0) return;
     setOrderMsg(null);
     setPendingOrder(spec);
@@ -239,21 +240,21 @@ const PortfolioPage: React.FC = () => {
     } catch {} finally { setPlanning(false); }
   };
 
-  const askInvestBasket = async (b: any) => {
+  const askInvestBasket = async (b: InvestableBasket) => {
     const amt = parseFloat(basketAmt);
     if (!amt || amt <= 0) { setOrderMsg({ ok: false, text: 'Enter an amount to invest.' }); return; }
     try {
       const res = await apiService.investBasket(b.id, amt);
-      const picks = (res as any).data?.picks ?? [];
-      const legs = picks.filter((p: any) => p.trade && p.trade.quantity > 0).map((p: any) => ({
-        symbol: p.symbol, transactionType: 'BUY', quantity: p.trade.quantity,
-        orderType: p.trade.orderType, price: p.trade.limitPrice, exchange: p.trade.exchange,
-        product: p.trade.product, estValue: p.trade.estValue,
+      const picks: BasketInvestPick[] = (res.data as { picks?: BasketInvestPick[] })?.picks ?? [];
+      const legs: TradeLeg[] = picks.filter(p => p.trade && p.trade.quantity > 0).map(p => ({
+        symbol: p.symbol, transactionType: 'BUY', quantity: p.trade!.quantity,
+        orderType: p.trade!.orderType, price: p.trade!.limitPrice, exchange: p.trade!.exchange,
+        product: p.trade!.product, estValue: p.trade!.estValue,
       }));
       if (!legs.length) { setOrderMsg({ ok: false, text: 'Amount too small to buy any whole shares in this basket.' }); return; }
       setOrderMsg(null);
       setPendingOrder({ kind: 'basket', legs, label: `Invest ₹${amt.toLocaleString('en-IN')} in ${b.name}` });
-    } catch (e) {
+    } catch {
       setOrderMsg({ ok: false, text: 'Could not build the basket order.' });
     }
   };
@@ -272,8 +273,8 @@ const PortfolioPage: React.FC = () => {
     }
   };
 
-  const askInvestAll = (picks: any[]) => {
-    const legs = picks.filter(p => p.order && p.order.quantity > 0).map(p => ({
+  const askInvestAll = (picks: InvestPick[]) => {
+    const legs: TradeLeg[] = picks.filter(p => p.order && p.order.quantity > 0).map(p => ({
       symbol: p.symbol, transactionType: 'BUY', quantity: p.order.quantity,
       orderType: p.order.orderType, price: p.order.limitPrice, exchange: p.order.exchange,
       product: p.order.product, estValue: p.order.estValue,
@@ -283,10 +284,10 @@ const PortfolioPage: React.FC = () => {
     setPendingOrder({ kind: 'basket', legs, label: `Invest across ${legs.length} stocks` });
   };
 
-  const askSwap = (a: any, sig: any) => {
+  const askSwap = (a: RebalanceActionLike, sig: AiSignalLike | undefined) => {
     const o = a.alternative?.order;
     if (!a.trade || !o) return;
-    const alt = a.alternative;
+    const alt = a.alternative!;
     setOrderMsg(null);
     setPendingOrder({
       kind: 'swap',
@@ -322,7 +323,7 @@ const PortfolioPage: React.FC = () => {
       ]);
       if (portRes.data)  setPortfolio(portRes.data);
       if (perfRes.data)  setPerformance(perfRes.data);
-      if (alertRes.data) setAlerts(alertRes.data as any[]);
+      if (alertRes.data) setAlerts(alertRes.data as Alert[]);
     } catch (err) {
       console.error('Error fetching portfolio:', err);
     } finally {

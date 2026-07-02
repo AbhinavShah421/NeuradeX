@@ -1,16 +1,16 @@
 import React from 'react';
-import { ModelRow, accuracyColor, accuracyBg } from './shared';
+import { ModelRow, LearningAgent, LearningSummary, accuracyColor, accuracyBg } from './shared';
 
 interface AgentLearningCardProps {
-  learning: any;
+  learning: LearningSummary | null;
   models: ModelRow[];
   modelBusy: string | null;
   modelError: string | null;
   setModelError: (err: string | null) => void;
   toggleModel: (m: ModelRow) => void;
   setWeightOverride: (m: ModelRow, weight: number | null) => void;
-  sortedAgents: any[];
-  onSelectAgent: (agent: any, rank: number) => void;
+  sortedAgents: LearningAgent[];
+  onSelectAgent: (agent: LearningAgent, rank: number) => void;
 }
 
 const AgentLearningCard: React.FC<AgentLearningCardProps> = ({
@@ -34,7 +34,7 @@ const AgentLearningCard: React.FC<AgentLearningCardProps> = ({
             border: '1px solid rgba(0,179,134,0.25)',
             borderRadius: 20, padding: '2px 10px', whiteSpace: 'nowrap',
           }}>
-            ● {learning.totals.recentOutcomes24h} trained in last 24h
+            ● {learning.totals?.recentOutcomes24h} trained in last 24h
           </span>
         )}
       </div>
@@ -86,8 +86,8 @@ const AgentLearningCard: React.FC<AgentLearningCardProps> = ({
             </div>
           )}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {sortedAgents.map((a: any, i: number) => {
-              const acc = a.accuracy as number;
+            {sortedAgents.map((a, i: number) => {
+              const acc = a.accuracy;
               const pct = Math.round(acc * 100);
               const col = accuracyColor(acc);
               const bgCol = accuracyBg(acc);

@@ -1,13 +1,13 @@
 import React, { useState } from 'react';
 import ActionTrendChart from './ActionTrendChart';
-import { AGENT_META, accuracyColor, accuracyBg } from './shared';
+import { AGENT_META, accuracyColor, accuracyBg, LearningAgent, AgentActionStat } from './shared';
 
 // ── Agent detail bottom-sheet (proper component so it can hold state) ─────────
 
-const AgentDetailSheet: React.FC<{ agent: any; rank: number; onClose: () => void }> = ({ agent: a, rank, onClose }) => {
+const AgentDetailSheet: React.FC<{ agent: LearningAgent; rank: number; onClose: () => void }> = ({ agent: a, rank, onClose }) => {
   const [expandedAction, setExpandedAction] = useState<string | null>(null);
 
-  const acc   = a.accuracy as number;
+  const acc   = a.accuracy;
   const pct   = Math.round(acc * 100);
   const col   = accuracyColor(acc);
   const bgCol = accuracyBg(acc);
@@ -21,9 +21,9 @@ const AgentDetailSheet: React.FC<{ agent: any; rank: number; onClose: () => void
   const ACTION_COLOR: Record<string, string> = { BUY: '#22c55e', SELL: '#ef4444', HOLD: '#f59e0b' };
   const ACTION_BG:    Record<string, string> = { BUY: 'rgba(34,197,94,0.08)', SELL: 'rgba(239,68,68,0.08)', HOLD: 'rgba(245,158,11,0.08)' };
 
-  const byAction: any[] = a.byAction ?? a.by_action ?? [];
+  const byAction: AgentActionStat[] = a.byAction ?? a.by_action ?? [];
   const sortedActions   = [...byAction].sort((x, y) => ['BUY','SELL','HOLD'].indexOf(x.action) - ['BUY','SELL','HOLD'].indexOf(y.action));
-  const totalVotes      = sortedActions.reduce((s: number, x: any) => s + (x.total || 0), 0);
+  const totalVotes      = sortedActions.reduce((s: number, x) => s + (x.total || 0), 0);
 
   return (
     <>
@@ -111,7 +111,7 @@ const AgentDetailSheet: React.FC<{ agent: any; rank: number; onClose: () => void
               {/* Stacked proportion bar */}
               {totalVotes > 0 && (
                 <div style={{ display: 'flex', height: 8, borderRadius: 4, overflow: 'hidden', marginBottom: 12, gap: 1 }}>
-                  {sortedActions.map((x: any) => (
+                  {sortedActions.map((x) => (
                     <div key={x.action} title={`${x.action}: ${x.total} (${((x.total / totalVotes) * 100).toFixed(0)}%)`}
                       style={{ flex: x.total, background: ACTION_COLOR[x.action] ?? '#64748b', minWidth: x.total > 0 ? 2 : 0 }} />
                   ))}
@@ -120,11 +120,11 @@ const AgentDetailSheet: React.FC<{ agent: any; rank: number; onClose: () => void
 
               {/* Per-action cards — clickable for BUY/SELL */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                {sortedActions.map((x: any) => {
+                {sortedActions.map((x) => {
                   const sharePct  = totalVotes > 0 ? ((x.total / totalVotes) * 100).toFixed(0) : '0';
                   const correct   = x.correct ?? 0;
                   const wrongCnt  = x.total - correct;
-                  const ratePct   = x.total > 0 ? Math.round(x.rate * 100) : null;
+                  const ratePct   = x.total > 0 && x.rate != null ? Math.round(x.rate * 100) : null;
                   const avgPnl    = x.avgPnl ?? x.avg_pnl;
                   const acCol     = ACTION_COLOR[x.action] ?? '#94a3b8';
                   const acBg      = ACTION_BG[x.action]    ?? 'var(--nd-surface)';

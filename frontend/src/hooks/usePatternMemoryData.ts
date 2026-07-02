@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import apiService from '../services/api';
-import { MemStats, ModelRow } from '../components/pattern-memory/shared';
+import { MemStats, ModelRow, LearningAgent, LearningSummary } from '../components/pattern-memory/shared';
+import { getErrorMessage } from '../utils/errors';
 
 // Data-fetching / polling / mutation logic for the PatternMemory page.
 // Returns the same state shape the page component used to manage directly.
@@ -11,7 +12,7 @@ export function usePatternMemoryData() {
   const [seedMsg,       setSeedMsg]       = useState('');
   const [sweeping,      setSweeping]      = useState(false);
   const [lastSweep,     setLastSweep]     = useState<any>(null);
-  const [learning,      setLearning]      = useState<any>(null);
+  const [learning,      setLearning]      = useState<LearningSummary | null>(null);
   const [models,        setModels]        = useState<ModelRow[]>([]);
   const [modelBusy,     setModelBusy]     = useState<string | null>(null);
   const [training,      setTraining]      = useState(false);
@@ -38,9 +39,9 @@ export function usePatternMemoryData() {
     try {
       await apiService.setAiModel(m.name, { enabled: next });
       await loadModels();
-    } catch (err: any) {
+    } catch (err: unknown) {
       setModels(prev => prev.map(x => x.name === m.name ? { ...x, enabled: m.enabled } : x));
-      setModelError(`Failed to ${next ? 'enable' : 'disable'} ${m.name}: ${err?.response?.data?.detail ?? err?.message ?? 'unknown error'}`);
+      setModelError(`Failed to ${next ? 'enable' : 'disable'} ${m.name}: ${getErrorMessage(err, 'unknown error')}`);
     } finally { setModelBusy(null); }
   };
 
@@ -52,9 +53,9 @@ export function usePatternMemoryData() {
       if (weight === null) await apiService.setAiModel(m.name, { clearWeight: true });
       else await apiService.setAiModel(m.name, { weight });
       await loadModels(); // re-read true server state, not just optimistic guess
-    } catch (err: any) {
+    } catch (err: unknown) {
       setModels(prev => prev.map(x => x.name === m.name ? { ...x, weight: m.weight } : x));
-      setModelError(`Failed to set weight for ${m.name}: ${err?.response?.data?.detail ?? err?.message ?? 'unknown error'}`);
+      setModelError(`Failed to set weight for ${m.name}: ${getErrorMessage(err, 'unknown error')}`);
     } finally { setModelBusy(null); }
   };
 
@@ -75,12 +76,14 @@ export function usePatternMemoryData() {
     setLoading(true);
     try {
       const res = await apiService.memoryStats();
-      setStats((res as any).data ?? (res as any));
+      // Backend sometimes returns the raw stats object instead of the {data} envelope.
+      const typed = res as { data?: MemStats };
+      setStats(typed.data ?? (res as unknown as MemStats));
     } catch { setStats(null); }
     finally { setLoading(false); }
     try {
       const ls = await apiService.learningSummary();
-      setLearning((ls as any).data ?? null);
+      setLearning((ls.data as LearningSummary) ?? null);
     } catch { /* ignore */ }
   }, []);
 
@@ -110,11 +113,12 @@ export function usePatternMemoryData() {
     setSeedMsg('Replaying historical candles — this can take a minute…');
     try {
       const res = await apiService.memorySeed({ lookback_days: 365, horizon: 3, stride: 1 });
-      const d = (res as any).data ?? res;
+      const typed = res as { data?: { totalInserted?: number; symbolsProcessed?: number } };
+      const d = typed.data ?? {};
       setSeedMsg(`✓ Seeded ${d.totalInserted?.toLocaleString() ?? 0} cases across ${d.symbolsProcessed ?? 0} stocks.`);
       await load();
-    } catch (e: any) {
-      setSeedMsg(`✗ Seeding failed: ${e?.message ?? 'unknown error'}`);
+    } catch (e: unknown) {
+      setSeedMsg(`✗ Seeding failed: ${getErrorMessage(e)}`);
     } finally { setSeeding(false); }
   };
 
@@ -125,8 +129,8 @@ export function usePatternMemoryData() {
         Math.max(1, stats.byAction.reduce((s, a) => s + a.count, 0))
       : 0;
 
-  const sortedAgents: any[] = Array.isArray(learning?.agents)
-    ? [...learning.agents].sort((a: any, b: any) => b.weight - a.weight)
+  const sortedAgents: LearningAgent[] = Array.isArray(learning?.agents)
+    ? [...learning.agents].sort((a, b) => b.weight - a.weight)
     : [];
 
   return {

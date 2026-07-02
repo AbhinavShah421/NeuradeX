@@ -1,6 +1,8 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import apiService from '../../services/api';
 import ScanControl from '../ScanControl';
+import { WatchlistStock, WatchlistData, ScanEvaluation, ScanDiff, ScanDiffMove, ScanDiffEntry } from '../../types';
+import { getErrorMessage } from '../../utils/errors';
 
 // ── AI Watchlist tab (self-running scanner output + evidence) ──────────────────
 
@@ -9,7 +11,7 @@ const GRADE_COLOR: Record<string, string> = { A: '#22c55e', B: '#3b82f6', C: '#f
 // Hold-cap presets (minutes) for inline auto-trading of a watchlist stock
 const HOLD_CAPS = [15, 30, 60, 0] as const;   // 0 = no cap
 
-const SignalScorePanel: React.FC<{ ev: any }> = ({ ev }) => {
+const SignalScorePanel: React.FC<{ ev: ScanEvaluation | null }> = ({ ev }) => {
   const [open, setOpen] = useState(false);
   const latest = ev?.latest;
   const overall = ev?.overall;
@@ -22,9 +24,9 @@ const SignalScorePanel: React.FC<{ ev: any }> = ({ ev }) => {
       </div>
     );
   }
-  const acc = (latest?.accuracy ?? overall?.accuracy ?? 0) as number;
+  const acc = latest?.accuracy ?? overall?.accuracy ?? 0;
   const color = acc >= 0.6 ? 'var(--nd-green)' : acc >= 0.45 ? '#d98c00' : 'var(--nd-red)';
-  const results: any[] = latest?.results ?? [];
+  const results = latest?.results ?? [];
   return (
     <div style={{ border: '1px solid var(--nd-border)', borderRadius: 12, marginBottom: 12, overflow: 'hidden', background: 'var(--nd-surface)' }}>
       <div onClick={() => setOpen(o => !o)} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 14px', cursor: 'pointer' }}>
@@ -86,7 +88,7 @@ const GradeBadge: React.FC<{ grade?: string; winProb?: number }> = ({ grade, win
 };
 
 // ── Shared stock row used across all watchlist tabs ───────────────────────────
-const WatchlistRow: React.FC<{ w: any; i: number; onClick: () => void; badge?: React.ReactNode; onAutoTrade?: (sym: string) => void; tradingSym?: string | null }> = ({ w, i, onClick, badge, onAutoTrade, tradingSym }) => {
+const WatchlistRow: React.FC<{ w: WatchlistStock; i: number; onClick: () => void; badge?: React.ReactNode; onAutoTrade?: (sym: string) => void; tradingSym?: string | null }> = ({ w, i, onClick, badge, onAutoTrade, tradingSym }) => {
   const started = tradingSym === w.symbol;
   return (
   <div onClick={onClick}
@@ -130,7 +132,7 @@ const WatchlistRow: React.FC<{ w: any; i: number; onClick: () => void; badge?: R
 
 // What changed between the last two completed scans — rank moves, new entrants,
 // drop-offs, each with the reason derived from the scoring components.
-const ScanDiffPanel: React.FC<{ diff: any }> = ({ diff }) => {
+const ScanDiffPanel: React.FC<{ diff: ScanDiff | null }> = ({ diff }) => {
   const [open, setOpen] = useState(false);
   if (!diff) return null;
   if (!diff.available) {
@@ -140,16 +142,16 @@ const ScanDiffPanel: React.FC<{ diff: any }> = ({ diff }) => {
       </div>
     );
   }
-  const moved: any[] = diff.moved ?? [];
-  const entered: any[] = diff.entered ?? [];
-  const dropped: any[] = diff.dropped ?? [];
+  const moved: ScanDiffMove[] = diff.moved ?? [];
+  const entered: ScanDiffEntry[] = diff.entered ?? [];
+  const dropped: ScanDiffEntry[] = diff.dropped ?? [];
   const ups = moved.filter(m => m.direction === 'up');
   const downs = moved.filter(m => m.direction === 'down');
   const c = diff.counts ?? { moved: moved.length, entered: entered.length, dropped: dropped.length };
 
-  const Row: React.FC<{ m: any; kind: 'up' | 'down' | 'in' | 'out' }> = ({ m, kind }) => {
+  const Row: React.FC<{ m: ScanDiffMove | ScanDiffEntry; kind: 'up' | 'down' | 'in' | 'out' }> = ({ m, kind }) => {
     const color = kind === 'up' ? '#22c55e' : kind === 'down' ? '#ef4444' : kind === 'in' ? '#3b82f6' : '#94a3b8';
-    const badge = kind === 'up' ? `▲ ${m.delta}` : kind === 'down' ? `▼ ${Math.abs(m.delta)}` : kind === 'in' ? 'NEW' : 'OUT';
+    const badge = kind === 'up' ? `▲ ${(m as ScanDiffMove).delta}` : kind === 'down' ? `▼ ${Math.abs((m as ScanDiffMove).delta)}` : kind === 'in' ? 'NEW' : 'OUT';
     return (
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, padding: '4px 0', borderBottom: '1px solid var(--nd-border)' }}>
         <span style={{ fontSize: 10, fontWeight: 700, color, minWidth: 38 }}>{badge}</span>
@@ -196,10 +198,10 @@ const ScanDiffPanel: React.FC<{ diff: any }> = ({ diff }) => {
 };
 
 const AiWatchlistTab: React.FC = () => {
-  const [data, setData]         = useState<any>(null);
-  const [evalData, setEvalData] = useState<any>(null);
-  const [diff, setDiff]         = useState<any>(null);
-  const [sel, setSel]           = useState<any>(null);
+  const [data, setData]         = useState<WatchlistData | null>(null);
+  const [evalData, setEvalData] = useState<ScanEvaluation | null>(null);
+  const [diff, setDiff]         = useState<ScanDiff | null>(null);
+  const [sel, setSel]           = useState<WatchlistStock | null>(null);
   const [tab, setTab]           = useState<'intraday' | 'delivery' | 'fno'>('intraday');
   const [holdCap, setHoldCap]   = useState<number>(30);     // per-trade hold cap (min)
   const [tradingSym, setTradingSym] = useState<string | null>(null);
@@ -212,26 +214,29 @@ const AiWatchlistTab: React.FC = () => {
       setTradingSym(sym);
       setAutoMsg(`Auto paper-trading ${sym} — exits any position after ${holdCap ? `${holdCap}m` : 'EOD'}.`);
       setTimeout(() => setAutoMsg(null), 6000);
-    } catch (e: any) {
-      setAutoMsg(`Could not start auto-trade for ${sym}: ${e?.response?.data?.detail || e?.message || 'error'}`);
+    } catch (e: unknown) {
+      setAutoMsg(`Could not start auto-trade for ${sym}: ${getErrorMessage(e, 'error')}`);
       setTimeout(() => setAutoMsg(null), 6000);
     }
   }, [holdCap]);
 
   const [viewN, setViewN]   = useState<number>(15);   // how many intraday stocks to display
-  const [ranked, setRanked] = useState<any[]>([]);     // full ranked board (top viewN)
+  const [ranked, setRanked] = useState<WatchlistStock[]>([]);     // full ranked board (top viewN)
   const [wlSaving, setWlSaving] = useState(false);
   const load = useCallback(async () => {
-    try { const r = await apiService.aiWatchlist(); setData((r as any).data); } catch {}
-    try { const e = await apiService.scanEvaluation(); setEvalData((e as any).data); } catch {}
-    try { const d = await apiService.scanDiff(); setDiff((d as any).data); } catch {}
+    try { const r = await apiService.aiWatchlist(); setData(r.data as WatchlistData); } catch {}
+    try { const e = await apiService.scanEvaluation(); setEvalData(e.data as ScanEvaluation); } catch {}
+    try { const d = await apiService.scanDiff(); setDiff(d.data as ScanDiff); } catch {}
   }, []);
   useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, [load]);
 
   // Full ranked intraday board (lets the user view far more than the high-conviction
   // tier). Refetches when the chosen count changes + on a 30s interval.
   const loadRanked = useCallback(async (n: number) => {
-    try { const r = await apiService.getRanked(n); setRanked(((r as any).data?.items) ?? []); } catch {}
+    try {
+      const r = await apiService.getRanked(n);
+      setRanked((r.data as { items?: WatchlistStock[] })?.items ?? []);
+    } catch {}
   }, []);
   useEffect(() => { loadRanked(viewN); const t = setInterval(() => loadRanked(viewN), 30000); return () => clearInterval(t); }, [viewN, loadRanked]);
 
@@ -245,9 +250,9 @@ const AiWatchlistTab: React.FC = () => {
   };
 
   // Intraday view: the top-N ranked scan (falls back to the high-conviction list).
-  const intraday: any[] = (ranked.length ? ranked : (data?.intraday ?? data?.items ?? [])).slice(0, viewN);
-  const delivery: any[] = data?.delivery ?? [];
-  const fno: any[]      = data?.fno ?? [];
+  const intraday: WatchlistStock[] = (ranked.length ? ranked : (data?.intraday ?? data?.items ?? [])).slice(0, viewN);
+  const delivery: WatchlistStock[] = data?.delivery ?? [];
+  const fno: WatchlistStock[]      = data?.fno ?? [];
 
   const tabs = [
     { key: 'intraday', label: 'Best Intraday',  icon: 'bolt',       count: intraday.length },
@@ -308,7 +313,7 @@ const AiWatchlistTab: React.FC = () => {
 
       {/* Top Conviction Picks + auto-trade controls (intraday only) */}
       {tab === 'intraday' && intraday.length > 0 && (() => {
-        const top = intraday.filter((w: any) => w.grade === 'A' || w.grade === 'B').slice(0, 5);
+        const top = intraday.filter((w) => w.grade === 'A' || w.grade === 'B').slice(0, 5);
         return (
           <div style={{ border: '1px solid var(--nd-border)', borderRadius: 12, padding: '12px 14px', marginBottom: 12, background: 'linear-gradient(135deg, rgba(34,197,94,0.06), rgba(59,130,246,0.05))' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: top.length ? 10 : 0 }}>
@@ -334,7 +339,7 @@ const AiWatchlistTab: React.FC = () => {
             </div>
             {top.length > 0 ? (
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                {top.map((w: any) => (
+                {top.map((w) => (
                   <div key={w.symbol} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 8 }}>
                     <GradeBadge grade={w.grade} winProb={w.winProbability} />
                     <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--nd-text-1)' }}>{w.symbol}</span>
@@ -376,11 +381,11 @@ const AiWatchlistTab: React.FC = () => {
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column' }}>
-          {activeItems.map((w: any, i: number) => {
+          {activeItems.map((w, i: number) => {
             // ── Delivery badge ──────────────────────────────────────────────
-            const deliveryBadge = tab === 'delivery' && w.deliveryWeeks > 0 ? (
+            const deliveryBadge = tab === 'delivery' && (w.deliveryWeeks ?? 0) > 0 ? (
               <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 8, background: 'rgba(59,130,246,0.12)', color: 'var(--nd-blue)', flexShrink: 0 }}>
-                Safe ~{w.deliveryWeeks} wk{w.deliveryWeeks > 1 ? 's' : ''}
+                Safe ~{w.deliveryWeeks} wk{(w.deliveryWeeks ?? 0) > 1 ? 's' : ''}
               </span>
             ) : null;
 
@@ -412,10 +417,10 @@ const AiWatchlistTab: React.FC = () => {
       {activeItems.length > 0 && tab === 'delivery' && (
         <div style={{ marginTop: 12, padding: '8px 12px', background: 'var(--nd-bg)', borderRadius: 8, fontSize: 11, color: 'var(--nd-text-3)', display: 'flex', gap: 16, flexWrap: 'wrap' }}>
           <span>Avg holding: <strong style={{ color: 'var(--nd-text-2)' }}>
-            {Math.round(activeItems.reduce((s: number, i: any) => s + (i.deliveryWeeks || 0), 0) / activeItems.length)} wks
+            {Math.round(activeItems.reduce((s: number, i) => s + (i.deliveryWeeks || 0), 0) / activeItems.length)} wks
           </strong></span>
           <span>All in uptrend: <strong style={{ color: 'var(--nd-green)' }}>
-            {activeItems.filter((i: any) => i.metrics?.smaTrend === 'up').length}/{activeItems.length}
+            {activeItems.filter((i) => i.metrics?.smaTrend === 'up').length}/{activeItems.length}
           </strong></span>
         </div>
       )}
@@ -425,7 +430,7 @@ const AiWatchlistTab: React.FC = () => {
   );
 };
 
-const WatchlistEvidence: React.FC<{ stock: any; scannedAt?: string; onClose: () => void }> = ({ stock, scannedAt, onClose }) => (
+const WatchlistEvidence: React.FC<{ stock: WatchlistStock; scannedAt?: string; onClose: () => void }> = ({ stock, scannedAt, onClose }) => (
   <div onClick={e => { if (e.target === e.currentTarget) onClose(); }}
     style={{ position: 'fixed', inset: 0, background: '#00000080', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 12 }}>
     <div style={{ background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 16, width: '100%', maxWidth: 500, maxHeight: '88vh', overflow: 'auto', boxShadow: '0 24px 64px #00000060' }}>
@@ -501,7 +506,7 @@ const WatchlistEvidence: React.FC<{ stock: any; scannedAt?: string; onClose: () 
         </>)}
         {Array.isArray(stock.agents) && stock.agents.length > 0 && (<>
           <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--nd-text-3)', margin: '12px 0 8px' }}>AGENT BREAKDOWN</div>
-          {stock.agents.map((a: any) => (
+          {stock.agents.map((a) => (
             <div key={a.agent} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: '1px solid var(--nd-border)' }}>
               <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--nd-text-1)', textTransform: 'capitalize', width: 84 }}>{a.agent}</span>
               <span style={{ fontSize: 11, fontWeight: 700, color: ACTION_BG[a.action] ?? 'var(--nd-text-2)', width: 40 }}>{a.action}</span>

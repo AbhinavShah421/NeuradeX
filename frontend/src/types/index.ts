@@ -261,6 +261,89 @@ export interface RebalancingAction {
   estimatedValue: number;
 }
 
+// ── Portfolio actions: order placement, baskets, rebalancing ─────────────────
+
+/** A single buy/sell leg the UI is about to submit to /api/orders or /api/portfolio. */
+export interface TradeLeg {
+  kind?: 'single';
+  symbol: string;
+  transactionType: 'BUY' | 'SELL';
+  quantity: number;
+  orderType?: string;
+  price?: number;
+  exchange?: string;
+  product?: string;
+  estValue?: number;
+}
+
+export interface PendingBasketOrder { kind: 'basket'; legs: TradeLeg[]; label: string; }
+export interface PendingSwapOrder {
+  kind: 'swap';
+  sell: TradeLeg;
+  buy: TradeLeg;
+  basis: { sell: Record<string, unknown>; buy: Record<string, unknown> };
+}
+export type PendingOrder = TradeLeg | PendingBasketOrder | PendingSwapOrder;
+
+/** Minimal shape needed to invest a lump sum into an AI fund basket or theme basket. */
+export interface InvestableBasket { id: string; name: string; [key: string]: unknown; }
+
+/** One row of a Quick-Invest allocation plan (/api/portfolio/invest-plan). */
+export interface InvestPick {
+  symbol: string;
+  order: { quantity: number; orderType?: string; limitPrice?: number; exchange?: string; product?: string; estValue?: number };
+  [key: string]: unknown;
+}
+
+/** One row of a fund/theme basket allocation (/api/portfolio/fund-baskets/invest). */
+export interface BasketInvestPick {
+  symbol: string;
+  trade?: { quantity: number; orderType?: string; limitPrice?: number; exchange?: string; product?: string; estValue?: number };
+  [key: string]: unknown;
+}
+
+/** A trade leg as the AI optimizer returns it — note the backend uses `limitPrice`, not `price`. */
+export interface OptimizerTradeLeg {
+  quantity: number;
+  orderType?: string;
+  limitPrice?: number;
+  exchange?: string;
+  product?: string;
+  estValue?: number;
+}
+
+/** One row of an AI rebalancing plan (/api/portfolio/optimize), enough to drive a swap/order. */
+export interface RebalanceActionLike {
+  symbol: string;
+  action: string;
+  reason?: string;
+  currentWeightPct?: number;
+  targetWeightPct?: number;
+  pnlPct?: number;
+  trade?: OptimizerTradeLeg;
+  alternative?: {
+    symbol: string;
+    reason?: string;
+    grade?: string;
+    winProbability?: number;
+    sector?: string;
+    sameSector?: boolean;
+    scannerReasoning?: string;
+    price?: number;
+    order?: OptimizerTradeLeg;
+    buyQty?: number;
+  };
+}
+
+export interface AiSignalLike {
+  signal?: string;
+  health?: string;
+  rsi?: number;
+  momentumPct?: number;
+  smaTrend?: string;
+  atrPct?: number;
+}
+
 // ── Orders ───────────────────────────────────────────────────────────────────
 
 export interface OrderRequest {
@@ -271,6 +354,20 @@ export interface OrderRequest {
   price?: number;
   product?: 'CNC' | 'INTRADAY';
   exchange?: string;
+}
+
+/** A row from /api/orders/ (today's Groww order book) — looser than OrderResponse
+ *  since Groww's own field names (referenceId, segment, status) leak through. */
+export interface OrderRecord {
+  orderId?: string;
+  referenceId?: string;
+  symbol: string;
+  transactionType: string;
+  quantity: number;
+  orderType: string;
+  status: string;
+  segment?: string;
+  [key: string]: unknown;
 }
 
 export interface OrderResponse {
@@ -414,6 +511,118 @@ export interface LiveSignal {
   recentSignals: { date: string; signal: string; close: number }[];
   candleCount: number;
   generatedAt: string;
+}
+
+// ── AI Watchlist (self-running scanner) ────────────────────────────────────────
+
+export interface WatchlistNews {
+  action: string;
+  catalyst?: string;
+  summary?: string;
+  confidence?: number;
+  topHeadlines?: string[];
+  headlinesCount?: number;
+  updatedAt?: string;
+}
+
+export interface WatchlistMetrics {
+  avgVolume: number;
+  relVolume?: number;
+  atrPct: number;
+  rangePct: number;
+  smaTrend?: string;
+  sma20?: number;
+  macdHist?: number;
+  rsi: number;
+  momentumPct: number;
+  gapPct?: number;
+  distFromHighPct?: number;
+  marketRegime?: string;
+  liquidityScore: number;
+  volatilityScore: number;
+}
+
+export interface WatchlistAgentVote {
+  agent: string;
+  action: string;
+  reasoning: string;
+}
+
+export interface FnoRecommendation {
+  optionType: string;
+  strike: number | string;
+  expiry: string;
+  safeDays: number;
+  rationale?: string;
+}
+
+export interface WatchlistStock {
+  symbol: string;
+  name?: string;
+  price?: number;
+  grade?: string;
+  winProbability?: number;
+  confidence: number;
+  action: string;
+  deliveryWeeks?: number;
+  fnoRecommendation?: FnoRecommendation;
+  news?: WatchlistNews;
+  metrics?: WatchlistMetrics;
+  agents?: WatchlistAgentVote[];
+  signalScore?: number;
+  reasoning?: string;
+}
+
+export interface WatchlistData {
+  intraday?: WatchlistStock[];
+  delivery?: WatchlistStock[];
+  fno?: WatchlistStock[];
+  items?: WatchlistStock[];
+  gradeCounts?: { A?: number; B?: number; C?: number; D?: number };
+  updatedAt?: string;
+}
+
+export interface ScanEvalResult {
+  symbol: string;
+  correct: boolean;
+  action: string;
+  dayReturnPct: number;
+}
+
+export interface ScanEvaluation {
+  latest?: {
+    date?: string;
+    accuracy?: number;
+    picks?: number;
+    results?: ScanEvalResult[];
+    avgRealizedReturnPct?: number;
+  };
+  overall?: { accuracy?: number; days?: number; picks?: number };
+}
+
+export interface ScanDiffMove {
+  symbol: string;
+  direction: 'up' | 'down';
+  delta: number;
+  prevRank?: number;
+  rank?: number;
+  reason?: string;
+}
+
+export interface ScanDiffEntry {
+  symbol: string;
+  rank?: number;
+  prevRank?: number;
+  reason?: string;
+}
+
+export interface ScanDiff {
+  available: boolean;
+  message?: string;
+  moved?: ScanDiffMove[];
+  entered?: ScanDiffEntry[];
+  dropped?: ScanDiffEntry[];
+  counts?: { moved: number; entered: number; dropped: number };
 }
 
 export interface OptimizationResult {
