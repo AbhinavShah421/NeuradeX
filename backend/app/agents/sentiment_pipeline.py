@@ -264,6 +264,7 @@ async def run_pipeline_for_date(symbol: str, date: str, force: bool = False) -> 
     try:
         from app.utils.redis_client import cache_get, cache_set
     except Exception:
+        logger.error("redis_client import failed; historical sentiment unavailable", exc_info=True)
         return {"status": "error", "detail": "redis unavailable"}
 
     if not force:
@@ -272,7 +273,7 @@ async def run_pipeline_for_date(symbol: str, date: str, force: bool = False) -> 
             if raw:
                 return json.loads(raw)
         except Exception:
-            pass
+            logger.debug("historical sentiment cache_get failed for %s/%s", sym, date, exc_info=True)
 
     headlines, provider = await fetch_headlines_for_date(sym, date)
 
@@ -286,7 +287,7 @@ async def run_pipeline_for_date(symbol: str, date: str, force: bool = False) -> 
         try:
             await cache_set(redis_key, json.dumps(result), expire=_HIST_CACHE_TTL)
         except Exception:
-            pass
+            logger.debug("historical sentiment cache_set (empty result) failed for %s/%s", sym, date, exc_info=True)
         return result
 
     # Run LLM and FinBERT in parallel — both score the same headlines independently.
@@ -390,6 +391,7 @@ async def run_pipeline(symbol: str, force: bool = False) -> dict:
     try:
         from app.utils.redis_client import cache_get, cache_set
     except Exception:
+        logger.error("redis_client import failed; sentiment pipeline unavailable", exc_info=True)
         return {"status": "error", "detail": "redis unavailable"}
 
     # Check existing cache
@@ -404,7 +406,7 @@ async def run_pipeline(symbol: str, force: bool = False) -> dict:
                 if age < _MIN_REFRESH:
                     return d     # don't hammer even if stale
         except Exception:
-            pass
+            logger.debug("sentiment cache_get failed for %s", sym, exc_info=True)
 
     # Fetch headlines
     headlines, provider = await fetch_headlines(sym)
@@ -425,7 +427,7 @@ async def run_pipeline(symbol: str, force: bool = False) -> dict:
         try:
             await cache_set(redis_key, json.dumps(result), expire=_CACHE_TTL)
         except Exception:
-            pass
+            logger.debug("sentiment cache_set (empty result) failed for %s", sym, exc_info=True)
         return result
 
     # Run LLM and FinBERT in parallel — both score the same headlines independently.
