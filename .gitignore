@@ -160,3 +160,11 @@ groww.txt
 
 # graphify code-graph output (generated, regenerate with `graphify extract .`)
 graphify-out/
+
+# ============================================================
+# Java / Maven (risk-engine, trade-executor)
+# ============================================================
+target/
+*.class
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
