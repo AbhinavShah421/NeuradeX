@@ -102,7 +102,7 @@ class PatternRecognitionModel:
                 async with engine.begin() as conn:
                     await conn.execute(text(stmt))
             except Exception:
-                pass
+                logger.debug("pattern_model schema migration statement skipped (likely already applied): %s", stmt, exc_info=True)
         async with engine.begin() as conn:
             row = (await conn.execute(text(
                 "SELECT weights, bias, n_samples, n_correct, ema_accuracy, hc_samples, hc_correct "
@@ -355,6 +355,7 @@ async def train_pattern_model(symbols: list[str] | None = None, lookback_days: i
             try:
                 offset = int(await cache_get(_UNIVERSE_OFFSET_KEY) or 0) % max(1, total)
             except Exception:
+                logger.debug("Failed to read pattern-model universe offset from cache; starting at 0", exc_info=True)
                 offset = 0
             if max_symbols and max_symbols < total:
                 syms = [universe[(offset + i) % total] for i in range(max_symbols)]
@@ -365,7 +366,7 @@ async def train_pattern_model(symbols: list[str] | None = None, lookback_days: i
             try:
                 await cache_set(_UNIVERSE_OFFSET_KEY, str(new_off), expire=86400 * 30)
             except Exception:
-                pass
+                logger.debug("Failed to persist pattern-model universe offset to cache", exc_info=True)
             covered_note = f"{len(syms)}/{total} (offset {offset}→{new_off})"
 
         end = datetime.now()
@@ -378,6 +379,7 @@ async def train_pattern_model(symbols: list[str] | None = None, lookback_days: i
             try:
                 candles, _ = await _fetch_candles(sym, start, end)
             except Exception:
+                logger.debug("candle fetch failed for %s during pattern-model training", sym, exc_info=True)
                 fail += 1
                 continue
             if not candles or len(candles) < 20 + horizon:
@@ -440,6 +442,7 @@ async def train_gbm_model(symbols: list[str] | None = None, lookback_days: int =
             try:
                 offset = int(await cache_get(_GBM_OFFSET_KEY) or 0) % max(1, total)
             except Exception:
+                logger.debug("Failed to read GBM universe offset from cache; starting at 0", exc_info=True)
                 offset = 0
             if max_symbols and max_symbols < total:
                 syms = [universe[(offset + i) % total] for i in range(max_symbols)]
@@ -449,7 +452,7 @@ async def train_gbm_model(symbols: list[str] | None = None, lookback_days: int =
             try:
                 await cache_set(_GBM_OFFSET_KEY, str(new_off), expire=86400 * 30)
             except Exception:
-                pass
+                logger.debug("Failed to persist GBM universe offset to cache", exc_info=True)
             covered = f"{len(syms)}/{total} (offset {offset}→{new_off})"
 
         end = datetime.now()
@@ -461,6 +464,7 @@ async def train_gbm_model(symbols: list[str] | None = None, lookback_days: int =
             try:
                 candles, _ = await _fetch_candles(sym, start, end)
             except Exception:
+                logger.debug("candle fetch failed for %s during GBM training", sym, exc_info=True)
                 fail += 1
                 continue
             if not candles or len(candles) < 20 + horizon:

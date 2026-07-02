@@ -154,3 +154,17 @@ desktop.ini
 # ============================================================
 AbhinavNotes.txt
 groww.txt
+
+# Claude Code agent worktrees (transient, per-session)
+.claude/worktrees/
+
+# graphify code-graph output (generated, regenerate with `graphify extract .`)
+graphify-out/
+
+# ============================================================
+# Java / Maven (risk-engine, trade-executor)
+# ============================================================
+target/
+*.class
+*.jar
+!.mvn/wrapper/maven-wrapper.jar

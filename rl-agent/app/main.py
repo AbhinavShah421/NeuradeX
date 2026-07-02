@@ -9,7 +9,6 @@ import aio_pika
 import asyncpg
 import numpy as np
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic_settings import BaseSettings
 from pydantic import model_validator
 
@@ -18,6 +17,9 @@ from app.policy import get_policy, predict_action
 from app.elk_logger import setup_logging, get_logger
 setup_logging()
 logger = get_logger(__name__)
+
+from app.agent_bootstrap import connect_with_retry, health_payload
+from app.cors import configure_cors
 
 
 class Settings(BaseSettings):
@@ -153,12 +155,11 @@ async def _consumer_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _pool
-    for attempt in range(1, 11):
-        try:
-            _pool = await asyncpg.create_pool(settings.POSTGRES_URL, min_size=2, max_size=6)
-            break
-        except Exception:
-            await asyncio.sleep(min(2 ** attempt, 30))
+    _pool = await connect_with_retry(
+        lambda: asyncpg.create_pool(settings.POSTGRES_URL, min_size=2, max_size=6),
+        what="rl-agent postgres",
+        required=False,
+    )
     _tasks.append(asyncio.create_task(_consumer_loop(), name="rl-consumer"))
     logger.info("rl-agent ready")
     yield
@@ -170,10 +171,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="NeuradeX — RL Agent", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+configure_cors(app)
 
 
 @app.get("/health")
 async def health():
     policy = get_policy(settings.MLFLOW_TRACKING_URI, settings.POLICY_MODEL_NAME)
-    return {"status": "ok", "service": "rl-agent", "policy_loaded": policy is not None}
+    return health_payload("rl-agent", policy_loaded=policy is not None, db_pool=_pool is not None)

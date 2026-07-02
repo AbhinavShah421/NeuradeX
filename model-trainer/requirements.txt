@@ -13,5 +13,5 @@ stable-baselines3==2.2.1
 gymnasium==0.29.1
 python-dotenv==1.0.0
 lightgbm==4.3.0
-requests==2.31.0
+requests==2.32.3
 python-json-logger==2.0.7

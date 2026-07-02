@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 import aio_pika
 import asyncpg
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic_settings import BaseSettings
 from pydantic import model_validator
 
@@ -17,6 +16,9 @@ from app.pattern_detector import generate_pattern_signal
 from app.elk_logger import setup_logging, get_logger
 setup_logging()
 logger = get_logger(__name__)
+
+from app.agent_bootstrap import connect_with_retry, health_payload
+from app.cors import configure_cors
 
 
 class Settings(BaseSettings):
@@ -106,18 +108,11 @@ async def _consumer_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _pool
-    for attempt in range(1, 11):
-        try:
-            _pool = await asyncpg.create_pool(settings.POSTGRES_URL, min_size=2, max_size=6)
-            logger.info("DB pool created on attempt %d", attempt)
-            break
-        except Exception as exc:
-            logger.warning("DB pool attempt %d/10 failed: %s — retrying in %ds", attempt, exc, min(2 ** attempt, 30))
-            await asyncio.sleep(min(2 ** attempt, 30))
-    else:
-        # All 10 attempts exhausted — crash so the container restarts rather than
-        # silently running in a state where every message is dropped.
-        raise RuntimeError("pattern-agent: could not connect to Postgres after 10 attempts — crashing for container restart")
+    _pool = await connect_with_retry(
+        lambda: asyncpg.create_pool(settings.POSTGRES_URL, min_size=2, max_size=6),
+        what="pattern-agent postgres",
+        required=True,
+    )
 
     _tasks.append(asyncio.create_task(_consumer_loop(), name="pattern-consumer"))
     logger.info("pattern-agent ready")
@@ -130,10 +125,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="NeuradeX — Pattern Agent", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+configure_cors(app)
 
 
 @app.get("/health")
 async def health():
     db_ok = _pool is not None and not _pool._closed
-    return {"status": "ok" if db_ok else "degraded", "service": "pattern-agent", "db_pool": db_ok}
+    return health_payload("pattern-agent", db_pool=db_ok)

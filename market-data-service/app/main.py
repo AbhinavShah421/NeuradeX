@@ -5,7 +5,6 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import settings
@@ -21,6 +20,8 @@ from app.services.ingestion_loop import run_tick_loop, run_news_loop, run_histor
 from app.elk_logger import setup_logging, get_logger
 setup_logging()
 logger = get_logger(__name__)
+
+from app.cors import configure_cors
 
 _groww = GrowwSource(settings.GROWW_API_KEY, settings.GROWW_API_SECRET)
 _yahoo = YahooSource()
@@ -74,7 +75,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="NeuradeX — Market Data Service", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+configure_cors(app)
 
 
 @app.get("/health")

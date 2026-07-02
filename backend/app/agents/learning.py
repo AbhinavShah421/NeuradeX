@@ -300,6 +300,7 @@ class LearningSystem:
                 )).fetchall()
             return {r[0]: float(r[1]) for r in rows}
         except Exception:
+            logger.debug("Failed to load agent weights from DB", exc_info=True)
             return {}
 
     async def _sync_weights_to_redis(self) -> None:
@@ -410,7 +411,7 @@ class LearningSystem:
                     if ov is not None:
                         registry_overrides[agent_name] = ov
             except Exception:
-                pass
+                logger.debug("Failed to load registry weight overrides", exc_info=True)
 
             result = []
             for r in rows:
