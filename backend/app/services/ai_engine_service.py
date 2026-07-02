@@ -561,7 +561,6 @@ async def scan_status():
 #      time (complements the quantitative pattern-memory veto already in the
 #      ensemble).
 
-_FEEDBACK_URL = "http://feedback-service:8012"
 _ACTIVE_LESSONS_KEY = "ai_engine:active_lessons"
 
 _POSTMORTEM_DDL = """
@@ -699,11 +698,12 @@ async def loss_learning_run(limit: int = 60, max_new: int = 15):
     import httpx, json as _json
     from sqlalchemy import text
     from app.database.postgres import engine
+    from app.config import settings
 
     # 1. Pull losing trades from the feedback-service.
     try:
         async with httpx.AsyncClient(timeout=10.0) as c:
-            r = await c.get(f"{_FEEDBACK_URL}/trades", params={"limit": limit})
+            r = await c.get(f"{settings.FEEDBACK_SERVICE_URL}/trades", params={"limit": limit})
             trades = r.json() if r.status_code == 200 else []
     except Exception as exc:
         logger.warning("loss-learning: could not read feedback trades: %s", exc)

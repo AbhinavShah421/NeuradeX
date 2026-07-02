@@ -1045,14 +1045,11 @@ async def session_runner_loop() -> None:
         await asyncio.sleep(_TICK_SECONDS)
 
 
-_FEEDBACK_BASE = "http://feedback-service:8012"
-
-
 async def _already_backtested(symbol: str, date: str) -> bool:
     """Return True if symbol has any recorded BACKTEST or REPLAY trade on `date`."""
     try:
         async with httpx.AsyncClient(timeout=4.0) as c:
-            r = await c.get(f"{_FEEDBACK_BASE}/trades/exists", params={"symbol": symbol, "date": date})
+            r = await c.get(f"{settings.FEEDBACK_SERVICE_URL}/trades/exists", params={"symbol": symbol, "date": date})
             if r.status_code == 200:
                 return r.json().get("exists", False)
     except Exception:
