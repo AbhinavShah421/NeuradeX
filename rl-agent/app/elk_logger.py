@@ -1,10 +1,13 @@
+# Canonical source for every service's app/elk_logger.py.
+# Do not edit the per-service copies directly — edit this file, then run
+# `python scripts/sync_shared_python.py` to propagate the change.
 import json, logging, os, queue, threading, time, traceback
 from datetime import datetime, timezone
 from typing import Optional
 import requests as _requests
 from pythonjsonlogger import jsonlogger
 
-_SERVICE_NAME = os.getenv("SERVICE_NAME", "rl-agent")
+_SERVICE_NAME = os.getenv("SERVICE_NAME", "unknown-service")
 _INDEX_PREFIX = "neuradex-logs"
 _FLUSH_INTERVAL = 2.0
 _BATCH_SIZE = 50
