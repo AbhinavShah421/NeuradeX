@@ -487,3 +487,12 @@ async def sentiment_historical_read(symbol: str, date: str):
 async def sentiment_read(symbol: str):
     """Read the current cached sentiment for a symbol (no re-fetch)."""
     return await service.sentiment_read(symbol)
+
+
+@router.get("/exit-variants")
+async def exit_variants(days: int = 14):
+    """Exit-policy A/B results: every EXIT_VARIANT simulated nightly on the same
+    entry population against the recorded tick data (see agents/counterfactual).
+    This is the evidence table for changing the live exit policy."""
+    from app.agents.counterfactual import exit_ab_report
+    return {"status": "success", "data": await exit_ab_report(days)}

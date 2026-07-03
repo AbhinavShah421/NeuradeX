@@ -60,37 +60,86 @@ TRADE_GATE_KEY = "ai_engine:trade_gate"
 # (win-rate 16% at >0.90 vs 40% at 0.50–0.60). So disciplined gates also skip
 # OVER-confident setups. Expectancy on the [floor, ceiling] band is positive
 # where the unbounded gate was negative. "loose" stays uncapped by design.
-# Agents whose BUY vote is genuinely predictive (post-trade analysis of 10k+
-# closed trades): sentiment ~58% win, pattern ~57%, memory carries precedent.
-# technical/rl BUYs are ~31% (no edge). A quality BUY must include one of these.
-_RELIABLE_BUY_AGENTS = frozenset({"sentiment", "pattern", "memory", "gbm"})
+# Agents whose BUY vote is genuinely predictive. Forensics over the full 14k
+# round-trip history (intraday, WIN/LOSS): pattern BUY 48.2% win / +0.38% avg,
+# sentiment BUY 44.1% / +0.27% — the only two positive-EV BUY voters. memory
+# (21.8%) and gbm (~base-rate) were previously in this set on older, smaller
+# analysis and are removed: their BUYs showed no edge at scale.
+_RELIABLE_BUY_AGENTS = frozenset({"sentiment", "pattern"})
 
 # Trade-gate tuning is data-driven (see analysis):
 #   • BUY-vote count predicts win-rate: 1→21%, 2→41%, 3→50% (real ensemble tops
 #     out ~2-3 BUYs, so 2 is the practical consensus floor).
-#   • Ensemble confidence is ANTI-predictive above ~0.72 — but the confidence
-#     band is only meaningful for a BUY decision, so it's applied ONLY when the
+#   • Ensemble confidence is ANTI-predictive, monotonically: 39% win at 0.5-0.6,
+#     34.6% at 0.6-0.7, then a cliff — 25.3% at 0.7-0.8, 16.3% above 0.9
+#     (12.6k trades). Ceilings sit under the 0.70 cliff. The confidence band is
+#     only meaningful for a BUY decision, so it's applied ONLY when the
 #     ensemble's winning action is BUY (gating it on a HOLD-consensus confidence
 #     froze trading entirely).
-#   • need_reliable: a BUY must include a high-precision agent (sentiment/pattern/
-#     memory/gbm). Required only on "strict" — in replay these agents abstain
-#     often, so requiring it on the default gate starves training.
+#   • need_reliable: a BUY must include a proven-positive voter (pattern/
+#     sentiment). Now required on "gentle" too: 7.6k sub-30-min churn trades at
+#     ~15% win all passed a 2-generic-vote bar that pattern/sentiment mostly
+#     didn't co-sign. "loose" stays permissive for training volume.
 TRADE_GATES = {
     # override_ceiling: when the ensemble's winning action is NOT BUY but it is
     # *confident* (>= this), don't override it into a long. Post-trade data shows
     # entry-confidence is strongly anti-predictive — win-rate falls 38% (conf 0.6)
     # → 24% (0.8) → 13% (1.0). The worst losers are confident-HOLD overrides.
-    "strict": {"label": "Strict", "require_buy": True,  "min_conf": 0.50, "max_conf": 0.70, "override_ceiling": 0.74,
+    "strict": {"label": "Strict", "require_buy": True,  "min_conf": 0.50, "max_conf": 0.68, "override_ceiling": 0.74,
                "min_buy": 3, "need_reliable": True, "min_grade": "B",
-               "desc": "Needs 3+ agents (incl. a high-precision one) voting BUY, in the 50-70% confidence sweet-spot, with a B+ pattern. Fewest, highest win-rate trades."},
-    "gentle": {"label": "Gentle", "require_buy": False, "min_conf": 0.50, "max_conf": 0.74, "override_ceiling": 0.78,
-               "min_buy": 2, "need_reliable": False, "min_grade": "C",
-               "desc": "Needs 2+ agents voting BUY (or a high-precision agent) and a non-bearish ensemble, with a C+ pattern. Balanced."},
+               "desc": "Needs 3+ agents (incl. pattern/sentiment) voting BUY, in the 50-68% confidence sweet-spot, with a B+ pattern. Fewest, highest win-rate trades."},
+    "gentle": {"label": "Gentle", "require_buy": False, "min_conf": 0.50, "max_conf": 0.68, "override_ceiling": 0.78,
+               "min_buy": 2, "need_reliable": True, "min_grade": "C",
+               "desc": "Needs 2+ agents voting BUY including pattern or sentiment (the proven BUY voters), a non-bearish ensemble, and a C+ pattern. Balanced."},
     "loose":  {"label": "Loose",  "require_buy": False, "min_conf": 0.0,  "max_conf": 1.01, "override_ceiling": 1.01,
                "min_buy": 2, "need_reliable": False, "min_grade": "D", "reliable_single": True,
                "desc": "Needs 2 BUY votes OR one high-precision agent; pattern grade not enforced. Most trades — for training volume (lower win-rate)."},
 }
 _gate_cache = {"mode": "", "ts": 0.0}
+
+# ── Per-symbol cold-streak throttle ───────────────────────────────────────────
+# Chronic losers keep losing: CGCL won 17% over 123 trades, PNB 20% over 234,
+# WIPRO 21% over 114 — while the fleet average is ~28%. A symbol whose recent
+# record is that bad gets blocked from NEW entries until its record recovers
+# (exits are never blocked). Thresholds are deliberately below base-rate noise:
+# with 50 trades the base rate's std-err is ~6pts, so <22% over 30+ is signal.
+_SYMBOL_THROTTLE_MIN_TRADES = 30     # need at least this many recent round trips
+_SYMBOL_THROTTLE_WIN_BELOW  = 0.22   # block entries while rolling win-rate < this
+_SYMBOL_THROTTLE_WINDOW     = 50     # rolling window (most recent trades)
+_SYMBOL_THROTTLE_TTL        = 600.0  # per-symbol cache seconds
+_symbol_throttle_cache: dict[str, tuple[float, Optional[str]]] = {}   # sym → (ts, reason|None)
+
+
+async def _symbol_throttle_reason(symbol: str) -> Optional[str]:
+    """Block-reason if this symbol is on a cold streak (rolling win-rate below
+    _SYMBOL_THROTTLE_WIN_BELOW over its last _SYMBOL_THROTTLE_WINDOW round trips),
+    else None. Cached per symbol; fails open on any DB error."""
+    import time as _time
+    now = _time.monotonic()
+    hit = _symbol_throttle_cache.get(symbol)
+    if hit and (now - hit[0]) < _SYMBOL_THROTTLE_TTL:
+        return hit[1]
+    reason: Optional[str] = None
+    try:
+        from sqlalchemy import text
+        from app.database.postgres import engine
+        async with engine.begin() as conn:
+            row = (await conn.execute(text("""
+                SELECT COUNT(*)::int,
+                       SUM(CASE WHEN outcome = 'WIN' THEN 1 ELSE 0 END)::int
+                FROM (SELECT outcome FROM trade_records
+                      WHERE symbol = :sym AND outcome IN ('WIN','LOSS')
+                      ORDER BY created_at DESC
+                      LIMIT :win) recent
+            """), {"sym": symbol.upper(), "win": _SYMBOL_THROTTLE_WINDOW})).fetchone()
+        n, wins = (row[0] or 0), (row[1] or 0)
+        if n >= _SYMBOL_THROTTLE_MIN_TRADES and (wins / n) < _SYMBOL_THROTTLE_WIN_BELOW:
+            reason = (f"symbol cold-streak: {wins}/{n} recent trades won "
+                      f"({wins / n:.0%} < {_SYMBOL_THROTTLE_WIN_BELOW:.0%}) — entries throttled")
+    except Exception as exc:
+        logger.debug("symbol throttle check skipped for %s: %s", symbol, exc)
+    _symbol_throttle_cache[symbol] = (now, reason)
+    return reason
 
 
 def _min_pattern_grade(mode: str) -> str:
@@ -105,7 +154,10 @@ def _min_pattern_grade(mode: str) -> str:
 
 # ── Paper trading time config ─────────────────────────────────────────────────
 _PAPER_CONFIG_KEY     = "paper_trading:config"
-_PAPER_CONFIG_DEFAULT = {"no_entry_after": "14:00", "squareoff_after": "14:30"}
+# Entry cutoff 13:30 (was 14:00): entries in the 14:00 hour win 23.6% and the
+# 15:00 hour 21.5%, vs ~30-31% before noon (12.6k-trade forensics). The last
+# pre-cutoff hour (13:00) still wins 30.4% — the cliff is at 14:00.
+_PAPER_CONFIG_DEFAULT = {"no_entry_after": "13:30", "squareoff_after": "14:30"}
 _paper_cfg_cache: dict = {}
 _paper_cfg_ts: float = 0.0
 
@@ -411,9 +463,11 @@ _PAPER_DROP_CANDLES = 6     # N consecutive lower closes = drop pattern (3 was t
 _LOSS_COOLDOWN_MIN  = 10    # after a losing exit, block new entries for this many minutes
                             # (stops the system re-scalping the same chop range — the
                             #  TITAN-style 6-losing-round-trips-in-an-afternoon pattern)
-_LATE_ENTRY_CUTOFF_MIN = 14 * 60   # 14:00 IST — no new entries after this in replay/
-                                   # backtest (paper uses its own configurable cutoff).
-                                   # Afternoon win-rate is 22-24% vs ~31% in the morning.
+_LATE_ENTRY_CUTOFF_MIN = 13 * 60 + 30   # 13:30 IST — no new entries after this in
+                                        # replay/backtest (paper uses its own
+                                        # configurable cutoff). 14:00-hour entries win
+                                        # 23.6% and 15:00-hour 21.5% vs ~30-31% before
+                                        # noon; 13:00-hour still wins 30.4%.
 _MARKET_CLOSE_MINUTES = 15 * 60 + 30   # 15:30 IST NSE close — after this, today's
                                        # session is finished and backtestable.
 
@@ -498,8 +552,22 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
                 blocked.append("ensemble is bearish (SELL)")
             elif not support_ok:
                 blocked.append(f"insufficient BUY consensus: {buy_votes} agents voted BUY (need {min_buy}+)")
+        # Reliable-voter requirement (was declared on the gate but never enforced):
+        # a consensus made only of generic voters (technical/rl/momentum/...) wins
+        # ~15-29% historically; pattern (48%) or sentiment (44%) must co-sign.
+        if need_reliable and support_ok and not has_reliable_buy:
+            support_ok = False
+            blocked.append("no proven BUY voter (pattern/sentiment) co-signed — "
+                           "generic consensus alone historically loses")
         if tsig == -1:
             blocked.append("intraday signal bearish (downtrend) — skipping entry")
+        # ── Cold-streak symbol throttle ───────────────────────────────────────
+        # Chronic losers stay losers (CGCL 17% over 123, PNB 20% over 234): a
+        # symbol with a rolling win-rate this far below base gets no NEW entries
+        # until its record recovers. Cheap: cached per symbol for 10 min.
+        throttle = await _symbol_throttle_reason(symbol)
+        if throttle:
+            blocked.append(throttle)
         # ── Direction filter (Lever 1) ────────────────────────────────────────
         # We are long-only. Post-trade analysis showed 78% of losers were longs
         # opened counter-trend (price below VWAP / SMA5<SMA20) — falling knives.

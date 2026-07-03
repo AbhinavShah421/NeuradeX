@@ -87,15 +87,54 @@ async def init_schema() -> None:
         logger.warning("counterfactual schema init failed: %s", exc)
 
 
-# ── Trade simulation (mirrors the live LONG exit policy) ─────────────────────
+# ── Trade simulation (policy-parameterised LONG exit engine) ─────────────────
+# The baseline policy replicates `_tech_signal`'s live LONG rules exactly; the
+# other variants are the exit-policy A/B candidates evaluated nightly on the
+# same entries (see run_exit_ab). Forensic motivation: 7.6k trades exited inside
+# 30 minutes won 15% (avg -0.23 to -0.32%), hold-cap exits won 30%, and trades
+# that survived past 31 minutes won 48.9% (+0.16%) — the tight stop / fast-cut /
+# SMA5-trail cluster crystallises 1-minute noise as losses.
 
-def _simulate_long(bars: list[dict], entry_idx: int, max_hold_minutes: int = 30) -> Optional[float]:
-    """Simulate the long the system declined: enter at bars[entry_idx]'s open
-    (buy-side slippage), exit per the same rules `_tech_signal` applies to a live
-    LONG (ATR-scaled stop/target, profit-lock trail, fast cut, square-off), or at
-    the hold cap. Returns net pnl% including round-trip costs, or None if the
-    day's data can't support a simulation (entry at/after the end of bars)."""
-    from app.services.backtest_service import _intraday_indicators, _tech_signal
+BASELINE_POLICY: dict = {
+    "stop_atr_mult": 0.9,  "stop_floor": 1.0,     # stop  = -max(floor, mult×ATR%)
+    "take_atr_mult": 1.8,  "take_floor": 2.5,     # take  = +max(floor, mult×ATR%)
+    "lock_gain": 1.2,      "trail": "sma5",        # profit-lock trail type
+    "fast_cut": True,       "rsi_exit": True,      # momentum cut / overbought exit
+    "grace_min": 0,                                # stop active immediately
+    "hold_cap": 30,                                # minutes
+}
+
+EXIT_VARIANTS: dict[str, dict] = {
+    "baseline":    BASELINE_POLICY,
+    # Wider stop + entry grace, no noise-cuts — "let it breathe" at the same cap.
+    "wide_stop":   {**BASELINE_POLICY, "stop_atr_mult": 1.5, "stop_floor": 1.5,
+                    "fast_cut": False, "grace_min": 10},
+    # Same exits, double the runway.
+    "hold60":      {**BASELINE_POLICY, "hold_cap": 60},
+    # Both: wide stop + 60-min runway.
+    "wide_hold60": {**BASELINE_POLICY, "stop_atr_mult": 1.5, "stop_floor": 1.5,
+                    "fast_cut": False, "grace_min": 10, "hold_cap": 60},
+    # High-water-mark ATR trail instead of the SMA5 touch, no cuts, 60 min.
+    "hwm_trail60": {**BASELINE_POLICY, "trail": "hwm_atr", "fast_cut": False,
+                    "rsi_exit": False, "grace_min": 10, "hold_cap": 60},
+    # Isolate the fast-cut/rsi effect: baseline stops, no cuts, same 30-min cap.
+    "no_cut30":    {**BASELINE_POLICY, "fast_cut": False, "rsi_exit": False},
+}
+
+
+def _day_indicators(bars: list[dict]) -> list[dict]:
+    """Precompute _intraday_indicators for every bar index once — shared across
+    all decisions and variants of a symbol-day (turns the A/B sweep from
+    O(decisions × variants × bars²) into O(bars²) per symbol-day)."""
+    from app.services.backtest_service import _intraday_indicators
+    return [_intraday_indicators(bars, i) for i in range(len(bars))]
+
+
+def _simulate_policy(bars: list[dict], inds: list[dict], entry_idx: int,
+                     policy: dict) -> Optional[float]:
+    """Simulate a long entered at bars[entry_idx].open under `policy`. Baseline
+    knobs replicate _tech_signal's live LONG rules bar-for-bar. Returns net pnl%
+    including slippage + charges, or None if unsimulatable."""
     from app.utils.trade_costs import buy_fill, sell_fill, charges
 
     if entry_idx >= len(bars):
@@ -105,22 +144,59 @@ def _simulate_long(bars: list[dict], entry_idx: int, max_hold_minutes: int = 30)
         return None
     qty = max(1, int(50_000 / entry))          # session-default sizing; pnl% is size-invariant
 
+    hold_cap  = int(policy.get("hold_cap", 30))
+    grace_min = int(policy.get("grace_min", 0))
+    trail     = policy.get("trail")
+    hwm       = entry
+
     exit_price: Optional[float] = None
     last_i = entry_idx
     for i in range(entry_idx, len(bars)):
         last_i = i
         c = bars[i]
-        held_min = i - entry_idx
+        price = c["close"]
+        hwm   = max(hwm, price)
+        held  = i - entry_idx
         try:
             h, m = int(c["time"].split(":")[0]), int(c["time"].split(":")[1])
         except (KeyError, ValueError, IndexError):
             h, m = 0, 0
-        if held_min >= max_hold_minutes or (h * 60 + m) >= _SQUAREOFF_MIN:
-            exit_price = sell_fill(c["close"])
+        if held >= hold_cap or (h * 60 + m) >= _SQUAREOFF_MIN:
+            exit_price = sell_fill(price)
             break
-        ind = _intraday_indicators(bars, i)
-        if _tech_signal(ind, "LONG", c, entry) == -1:
-            exit_price = sell_fill(c["close"])
+
+        ind      = inds[i]
+        gain     = (price - entry) / entry * 100
+        atr_pct  = max(0.5, min(2.5, (ind.get("atr", 0.0) / price * 100) if price else 0.8))
+        stop     = -max(policy["stop_floor"], policy["stop_atr_mult"] * atr_pct)
+        take     = max(policy["take_floor"], policy["take_atr_mult"] * atr_pct)
+        sma5, sma20, mom5 = ind.get("sma5", 0.0), ind.get("sma20", 0.0), ind.get("mom5", 0.0)
+
+        if held < grace_min:
+            # Grace period: only a disaster stop (2×) can fire — everything else
+            # waits for the position to establish (1-min noise wicks out normal
+            # stops in the first minutes).
+            if gain <= 2 * stop:
+                exit_price = sell_fill(price)
+                break
+            continue
+        if gain <= stop or gain >= take:
+            exit_price = sell_fill(price)
+            break
+        if trail == "sma5":
+            if gain >= policy["lock_gain"] and price < sma5:
+                exit_price = sell_fill(price)
+                break
+        elif trail == "hwm_atr":
+            if gain >= policy["lock_gain"] and price < hwm * (1 - atr_pct / 100):
+                exit_price = sell_fill(price)
+                break
+        if policy.get("fast_cut") and gain < 0.5:
+            if (sma5 < sma20 and mom5 < -0.15) or mom5 < -0.30:
+                exit_price = sell_fill(price)
+                break
+        if policy.get("rsi_exit") and ind.get("rsi", 50.0) > 75 and mom5 < 0:
+            exit_price = sell_fill(price)
             break
     if exit_price is None:                      # ran off the end of the day's bars
         exit_price = sell_fill(bars[last_i]["close"])
@@ -128,6 +204,14 @@ def _simulate_long(bars: list[dict], entry_idx: int, max_hold_minutes: int = 30)
     fees = charges(entry, exit_price, qty)
     pnl  = qty * (exit_price - entry) - fees
     return round(pnl / (qty * entry) * 100, 3)
+
+
+def _simulate_long(bars: list[dict], entry_idx: int, max_hold_minutes: int = 30) -> Optional[float]:
+    """Live-policy simulation (the CF label): the baseline policy at the given
+    hold cap — this is what the running sessions would actually have done."""
+    policy = BASELINE_POLICY if max_hold_minutes == BASELINE_POLICY["hold_cap"] \
+        else {**BASELINE_POLICY, "hold_cap": max_hold_minutes}
+    return _simulate_policy(bars, _day_indicators(bars), entry_idx, policy)
 
 
 def _bar_index_for_time(bars: list[dict], hhmm: str) -> Optional[int]:
@@ -181,6 +265,8 @@ async def label_pending(max_days: int = _LABEL_BATCH_DAYS) -> dict:
         cov = await asyncio.to_thread(day_coverage, symbol, day)
         bars = (await asyncio.to_thread(read_bars, symbol, day, 60)) \
             if cov.get("ticks", 0) >= _MIN_DAY_TICKS else []
+        # Indicators once per symbol-day, shared by every decision's simulation.
+        inds = (await asyncio.to_thread(_day_indicators, bars)) if bars else []
 
         updates = []
         for r in day_rows:
@@ -190,7 +276,7 @@ async def label_pending(max_days: int = _LABEL_BATCH_DAYS) -> dict:
                 if idx is not None and idx + 1 < len(bars):
                     # Enter at the NEXT bar's open — the decision is made on the
                     # closed candle, exactly like the live entry path.
-                    cf = _simulate_long(bars, idx + 1)
+                    cf = _simulate_policy(bars, inds, idx + 1, BASELINE_POLICY)
             updates.append({"id": r[0], "cf": cf})
             if cf is None:
                 skipped += 1
@@ -351,6 +437,137 @@ async def promote_memory_phantoms(day: str) -> int:
     return promoted
 
 
+# ── Exit-policy A/B evaluation ────────────────────────────────────────────────
+
+_AB_TRAINED_KEY   = "counterfactual:ab_trained:"    # + date → dedupe flag
+_AB_MAX_PER_DAY   = 4000                            # decision sample cap per day
+
+_AB_DDL = """CREATE TABLE IF NOT EXISTS cf_exit_ab (
+    day         TEXT NOT NULL,
+    variant     TEXT NOT NULL,
+    n           INTEGER,
+    wins        INTEGER,
+    avg_pnl_pct DOUBLE PRECISION,
+    updated_at  TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (day, variant)
+)"""
+
+
+async def run_exit_ab(day: str) -> dict:
+    """Evaluate every EXIT_VARIANT on the SAME entry population — the day's
+    labeled decisions — against the recorded bars, and store per-variant
+    aggregates in cf_exit_ab. This is the offline policy evaluation that decides
+    the live exit-policy change with data instead of intuition. Idempotent per
+    day. Returns {variant: {n, wins, avg_pnl_pct}}."""
+    from sqlalchemy import text
+    from app.database.postgres import engine
+    from app.utils.redis_client import get_redis
+    from app.data.candle_store import read_bars
+
+    r = get_redis()
+    flag = _AB_TRAINED_KEY + day
+    if await r.get(flag):
+        return {}
+
+    async with engine.begin() as conn:
+        await conn.execute(text(_AB_DDL))
+        rows = (await conn.execute(text("""
+            SELECT d.symbol, d.candle_time
+            FROM session_decisions d
+            LEFT JOIN session_metadata sm ON sm.session_id = d.session_id
+            WHERE d.cf_pnl_pct IS NOT NULL
+              AND COALESCE(sm.date,
+                           (d.created_at AT TIME ZONE 'Asia/Kolkata')::date::text) = :day
+            ORDER BY d.id
+        """), {"day": day})).fetchall()
+    if not rows:
+        return {}
+    if len(rows) > _AB_MAX_PER_DAY:              # even stride-sample, stable per day
+        step = len(rows) / _AB_MAX_PER_DAY
+        rows = [rows[int(i * step)] for i in range(_AB_MAX_PER_DAY)]
+
+    bars_cache: dict[str, tuple[list[dict], list[dict]]] = {}
+    stats: dict[str, list[float]] = {v: [] for v in EXIT_VARIANTS}
+    for sym, hhmm in rows:
+        sym = sym.upper()
+        if sym not in bars_cache:
+            bars = await asyncio.to_thread(read_bars, sym, day, 60)
+            inds = (await asyncio.to_thread(_day_indicators, bars)) if bars else []
+            bars_cache[sym] = (bars, inds)
+        bars, inds = bars_cache[sym]
+        if not bars:
+            continue
+        idx = _bar_index_for_time(bars, hhmm)
+        if idx is None or idx + 1 >= len(bars):
+            continue
+        for name, policy in EXIT_VARIANTS.items():
+            pnl = _simulate_policy(bars, inds, idx + 1, policy)
+            if pnl is not None:
+                stats[name].append(pnl)
+
+    out: dict[str, dict] = {}
+    async with engine.begin() as conn:
+        for name, pnls in stats.items():
+            if not pnls:
+                continue
+            agg = {"n": len(pnls),
+                   "wins": sum(1 for p in pnls if p >= 0),
+                   "avg": round(sum(pnls) / len(pnls), 4)}
+            out[name] = agg
+            await conn.execute(text("""
+                INSERT INTO cf_exit_ab (day, variant, n, wins, avg_pnl_pct, updated_at)
+                VALUES (:day, :v, :n, :w, :avg, NOW())
+                ON CONFLICT (day, variant) DO UPDATE SET
+                    n = EXCLUDED.n, wins = EXCLUDED.wins,
+                    avg_pnl_pct = EXCLUDED.avg_pnl_pct, updated_at = NOW()
+            """), {"day": day, "v": name, "n": agg["n"], "w": agg["wins"], "avg": agg["avg"]})
+
+    await r.set(flag, "1", ex=86400 * 7)
+    logger.info("exit A/B evaluated for %s: %s", day,
+                {k: f"{v['wins']}/{v['n']} ({v['avg']:+.3f}%)" for k, v in out.items()},
+                extra={"log_type": "ai_engine", "event": "cf_exit_ab", "day": day})
+    return out
+
+
+async def exit_ab_report(days: int = 14) -> dict:
+    """Aggregated A/B results for the API: per-variant totals over the last N
+    days plus the per-day rows — the evidence table for changing the live exit
+    policy."""
+    from sqlalchemy import text
+    from app.database.postgres import engine
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text(_AB_DDL))
+            daily = (await conn.execute(text("""
+                SELECT day, variant, n, wins, avg_pnl_pct
+                FROM cf_exit_ab
+                WHERE day >= (NOW() AT TIME ZONE 'Asia/Kolkata' - make_interval(days => :d))::date::text
+                ORDER BY day DESC, avg_pnl_pct DESC
+            """), {"d": days})).fetchall()
+        totals: dict[str, dict] = {}
+        for day, variant, n, wins, avg in daily:
+            t = totals.setdefault(variant, {"n": 0, "wins": 0, "pnl_sum": 0.0})
+            t["n"] += n or 0
+            t["wins"] += wins or 0
+            t["pnl_sum"] += (avg or 0.0) * (n or 0)
+        summary = [
+            {"variant": v, "n": t["n"],
+             "win_rate": round(t["wins"] / t["n"], 3) if t["n"] else 0.0,
+             "avg_pnl_pct": round(t["pnl_sum"] / t["n"], 4) if t["n"] else 0.0,
+             "policy": EXIT_VARIANTS.get(v, {})}
+            for v, t in totals.items()
+        ]
+        summary.sort(key=lambda x: x["avg_pnl_pct"], reverse=True)
+        return {
+            "summary": summary,
+            "daily": [{"day": d, "variant": v, "n": n, "wins": w, "avg_pnl_pct": a}
+                      for d, v, n, w, a in daily],
+        }
+    except Exception as exc:
+        logger.warning("exit_ab_report failed: %s", exc)
+        return {"summary": [], "daily": []}
+
+
 # ── Background loop (runner/full role) ────────────────────────────────────────
 
 def _market_hours() -> bool:
@@ -390,6 +607,7 @@ async def counterfactual_loop() -> None:
                 day = _last_completed_trading_day(datetime.now(IST))
                 await train_rl_from_labels(day)
                 await promote_memory_phantoms(day)
+                await run_exit_ab(day)
         except Exception as exc:
             logger.warning("counterfactual sweep failed: %s", exc)
         await asyncio.sleep(60)
