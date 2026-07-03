@@ -1,0 +1,10 @@
+# Never copy the host's (Windows/native) install into the Linux build image —
+# it overwrites the container's `npm install` and breaks platform-specific
+# binaries (e.g. rollup's native module → "Cannot find module @rollup/rollup-*").
+node_modules
+dist
+.vite
+npm-debug.log*
+.DS_Store
+.env
+.env.*
