@@ -11,6 +11,7 @@ _WEIGHTS_KEY      = "ai_engine:agent_weights"
 _ACTION_RATES_KEY = "ai_engine:agent_action_rates"
 _MIN_ACTION_SAMPLES = 20   # minimum decisions before we trust action-specific rate
 _SHRINK_K           = 20   # Bayesian shrinkage prior weight (in pseudo-samples)
+_CF_RATE_WEIGHT     = 0.5  # counterfactual samples count at half a real outcome
 
 # Weight decay/normalization (see record_outcome). Additive weight updates with a
 # [0.3, 3.0] clamp and no decay saturated 9 of 12 agents at the ceiling — learned
@@ -376,6 +377,12 @@ class LearningSystem:
         vote by its LIFT over that baseline, not vs a fixed 0.5 — with a ~28% base
         win rate, comparing to 0.5 was silently halving every directional vote.
 
+        Counterfactual outcomes (session decisions the system declined, labeled
+        against the recorded tick data — see agents/counterfactual.py) are merged
+        in at _CF_RATE_WEIGHT per sample, so the rates keep calibrating even on
+        days the gates allow zero real trades, without simulated labels ever
+        outvoting real ones.
+
         Published shape:
             {"base": {"BUY": 0.28, "SELL": 0.72, "HOLD": 0.72},
              "rates": {agent: {action: shrunk_correct_rate}}}
@@ -406,15 +413,56 @@ class LearningSystem:
                     GROUP BY sig->>'agent', sig->>'action'
                 """))).fetchall()
 
-            n_out, n_win = (base_row[0] or 0), (base_row[1] or 0)
+                # Counterfactual base + per-agent counts. Guarded: the cf columns
+                # only exist once the counterfactual module has initialised.
+                cf_base_row, cf_rows = None, []
+                try:
+                    cf_base_row = (await conn.execute(text("""
+                        SELECT COUNT(*)::int,
+                               SUM(CASE WHEN cf_pnl_pct >= 0 THEN 1 ELSE 0 END)::int
+                        FROM session_decisions
+                        WHERE cf_pnl_pct IS NOT NULL AND executed = FALSE
+                    """))).fetchone()
+                    cf_rows = (await conn.execute(text("""
+                        SELECT
+                            sig->>'agent'  AS agent_name,
+                            sig->>'action' AS action,
+                            COUNT(*)::int  AS total,
+                            SUM(CASE
+                                  WHEN sig->>'action' = 'BUY'
+                                       THEN CASE WHEN d.cf_pnl_pct >= 0 THEN 1 ELSE 0 END
+                                  ELSE CASE WHEN d.cf_pnl_pct >= 0 THEN 0 ELSE 1 END
+                                END)::int AS correct
+                        FROM session_decisions d
+                        CROSS JOIN LATERAL jsonb_array_elements(d.agents) AS sig
+                        WHERE d.cf_pnl_pct IS NOT NULL AND d.executed = FALSE
+                          AND sig->>'agent' IS NOT NULL
+                        GROUP BY sig->>'agent', sig->>'action'
+                    """))).fetchall()
+                except Exception:
+                    cf_base_row, cf_rows = None, []   # cf schema not initialised yet
+
+            # Merged base rate: real outcomes at full weight, cf at _CF_RATE_WEIGHT.
+            n_out, n_win = float(base_row[0] or 0), float(base_row[1] or 0)
+            if cf_base_row:
+                n_out += _CF_RATE_WEIGHT * float(cf_base_row[0] or 0)
+                n_win += _CF_RATE_WEIGHT * float(cf_base_row[1] or 0)
             base_win = (n_win / n_out) if n_out > 0 else 0.5
             base = {"BUY": round(base_win, 3),
                     "SELL": round(1.0 - base_win, 3),
                     "HOLD": round(1.0 - base_win, 3)}
 
-            rates: dict[str, dict[str, float]] = {}
+            # Merged per-agent counts.
+            counts: dict[tuple[str, str], list[float]] = {}
             for r in rows:
-                agent, action, total, correct = r[0], r[1], r[2] or 0, r[3] or 0
+                counts[(r[0], r[1])] = [float(r[2] or 0), float(r[3] or 0)]
+            for r in cf_rows:
+                cur = counts.setdefault((r[0], r[1]), [0.0, 0.0])
+                cur[0] += _CF_RATE_WEIGHT * float(r[2] or 0)
+                cur[1] += _CF_RATE_WEIGHT * float(r[3] or 0)
+
+            rates: dict[str, dict[str, float]] = {}
+            for (agent, action), (total, correct) in counts.items():
                 if total >= _MIN_ACTION_SAMPLES and action in base:
                     rates.setdefault(agent, {})[action] = round(
                         _shrunk_rate(correct, total, base[action]), 3)
