@@ -10,7 +10,6 @@ import aio_pika
 import redis.asyncio as redis_async
 import asyncpg
 from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic_settings import BaseSettings
 from pydantic import model_validator
 
@@ -22,6 +21,9 @@ from app.calibrator import calibrate_confidence, load_calibrator
 from app.elk_logger import setup_logging, get_logger
 setup_logging()
 logger = get_logger(__name__)
+
+from app.agent_bootstrap import connect_with_retry, health_payload
+from app.cors import configure_cors
 
 
 class Settings(BaseSettings):
@@ -213,23 +215,19 @@ async def on_all_signals_received(symbol: str, agent_signals: dict) -> None:
 async def lifespan(app: FastAPI):
     global _pool, _redis, _publisher
 
-    for attempt in range(1, 11):
-        try:
-            _pool = await asyncpg.create_pool(settings.POSTGRES_URL, min_size=2, max_size=6)
-            break
-        except Exception:
-            await asyncio.sleep(min(2 ** attempt, 30))
+    _pool = await connect_with_retry(
+        lambda: asyncpg.create_pool(settings.POSTGRES_URL, min_size=2, max_size=6),
+        what="ensemble-engine postgres",
+        required=False,
+    )
 
     _redis = redis_async.from_url(settings.REDIS_URL, decode_responses=True)
 
-    for attempt in range(1, 11):
-        try:
-            _publisher = await aio_pika.connect_robust(settings.RABBITMQ_URL)
-            break
-        except Exception:
-            if attempt == 10:
-                raise
-            await asyncio.sleep(min(2 ** attempt, 30))
+    _publisher = await connect_with_retry(
+        lambda: aio_pika.connect_robust(settings.RABBITMQ_URL),
+        what="ensemble-engine rabbitmq",
+        required=True,
+    )
 
     collector = AgentSignalCollector(timeout_seconds=settings.AGENT_SIGNAL_TIMEOUT_SECONDS)
     collector.on_decision_ready(on_all_signals_received)
@@ -257,12 +255,12 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="NeuradeX — Ensemble Engine", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+configure_cors(app)
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": settings.SERVICE_NAME}
+    return health_payload(settings.SERVICE_NAME, db_pool=_pool is not None)
 
 
 @app.get("/decision/{symbol}")

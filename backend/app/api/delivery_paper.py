@@ -26,6 +26,10 @@ _PF_KEY = "delivery_paper:portfolios"
 _FLAG = "delivery_paper:enabled"
 _LAST_TICK = "delivery_paper:last_tick"
 
+# Default starting capital (INR) for a new delivery paper-trading portfolio,
+# used as the fallback when no explicit capital is supplied.
+DEFAULT_PAPER_CAPITAL = 200000.0
+
 DEFAULT_CONFIG = {"max_positions": 5, "target_pct": 12.0, "stop_pct": 6.0, "max_hold_days": 25}
 _GRADE_OK = ("A", "B")
 
@@ -117,6 +121,10 @@ async def _forecast_levels(symbol: str, price: float, cfg: dict) -> dict:
             horizon = max(5, min(int(cfg.get("max_hold_days", 25)), 15))
             fc = get_path_forecaster().forecast(candles, horizon=horizon)
             if fc.get("ok"):
+                # Clamp forecast-derived target/stop to sane swing-trade bounds:
+                # target 3%-30% of entry price, stop 2%-15% of entry price — keeps
+                # the Monte-Carlo forecast from producing unrealistically tight or
+                # wide levels for a multi-day delivery hold.
                 tp = max(3.0, min(30.0, float(fc["target_pct"])))
                 sp = max(2.0, min(15.0, float(fc["stop_pct"])))
                 src = "forecast"
@@ -184,7 +192,7 @@ _AGENT = DeliveryAgent()
 async def tick(reason: str = "manual") -> dict:
     pfs = await _load_pfs()
     if not pfs:                                   # auto-create a default portfolio
-        p = _new_portfolio("Delivery Core", 200000.0, {})
+        p = _new_portfolio("Delivery Core", DEFAULT_PAPER_CAPITAL, {})
         pfs[p["id"]] = p
     picks = await _delivery_picks()
     pick_map = {p["symbol"]: p for p in picks}
@@ -279,7 +287,7 @@ async def tick(reason: str = "manual") -> dict:
 
 class CreatePortfolio(BaseModel):
     name: str = "Delivery Portfolio"
-    capital: float = 200000.0
+    capital: float = DEFAULT_PAPER_CAPITAL
     max_positions: int | None = None
     target_pct: float | None = None
     stop_pct: float | None = None
@@ -314,7 +322,7 @@ async def create_portfolio(req: CreatePortfolio):
 
 
 class FromOptimizeRequest(BaseModel):
-    capital: float = 200000.0
+    capital: float = DEFAULT_PAPER_CAPITAL
     name: str = "Optimized (paper test)"
 
 
@@ -369,7 +377,7 @@ async def from_optimize(req: FromOptimizeRequest):
 
 class FromThemeRequest(BaseModel):
     theme_id: str
-    capital: float = 200000.0
+    capital: float = DEFAULT_PAPER_CAPITAL
     name: str | None = None
 
 

@@ -207,6 +207,7 @@ class PatternMemory:
                 try:
                     fp = json.loads(r[1])
                 except Exception:
+                    logger.debug("Skipping pattern_memory row with unparseable fingerprint for %s", r[0], exc_info=True)
                     continue
                 if len(fp) != FINGERPRINT_DIM:
                     continue

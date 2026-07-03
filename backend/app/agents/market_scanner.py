@@ -244,7 +244,7 @@ async def scan_market(symbols: list[str] | None = None, top_n: int = _TOP_N) -> 
             if weights:
                 engine.update_weights(weights)
         except Exception:
-            pass
+            logger.debug("Failed to refresh ensemble weights before market scan; using existing weights", exc_info=True)
 
         end   = datetime.now()
         start = end - timedelta(days=160)

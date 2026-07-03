@@ -45,7 +45,13 @@ public class EnsembleConsumer {
             Optional<RiskValidated> validated = riskValidatorService.validate(decision);
             validated.ifPresent(riskValidatorService::publishValidated);
         } catch (Exception e) {
-            log.error("Failed to process ensemble decision: {}", e.getMessage());
+            // Rethrow (instead of swallowing) so Spring AMQP's retry interceptor
+            // (spring.rabbitmq.listener.simple.retry.* in application.properties) can
+            // retry transient failures a bounded number of times with backoff, then
+            // hand the message to the RepublishMessageRecoverer (see RabbitConfig)
+            // which republishes it to ensemble.decision.dlq instead of losing it.
+            log.error("Failed to process ensemble decision (will retry): {}", e.getMessage());
+            throw new IllegalStateException("Failed to process ensemble decision: " + e.getMessage(), e);
         }
     }
 }

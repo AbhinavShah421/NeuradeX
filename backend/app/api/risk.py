@@ -2,10 +2,18 @@
 Risk Analytics API — Aladdin-inspired risk management.
 All four endpoints pull real holdings from Groww and apply risk analytics on top.
 Fallback to a default Indian portfolio when Groww is unavailable.
+
+Historical-data-derived metrics (volatility, max drawdown, Sortino, tracking
+error, information ratio) are computed from real daily candles fetched through
+the same provider chain backtest.py uses (Groww → Yahoo → Alpha Vantage), with
+NIFTYBEES (the NSE-listed Nifty 50 ETF) as the benchmark. If no provider has
+enough history for a symbol, that metric falls back to a clearly-labeled
+deterministic estimate derived from portfolio beta — never a random number.
 """
 
-import random
-from datetime import datetime
+import asyncio
+import math
+from datetime import datetime, timedelta
 from typing import Optional
 
 import ollama as ollama_lib
@@ -17,6 +25,11 @@ from app.utils.elk_logger import get_logger
 
 logger = get_logger(__name__)
 router = APIRouter()
+
+BENCHMARK_SYMBOL = "NIFTYBEES"   # NSE-listed ETF tracking the Nifty 50 — used as the market benchmark
+TRADING_DAYS_PER_YEAR = 252
+RISK_FREE_RATE = 0.065      # India 10Y G-Sec yield
+EQUITY_RISK_PREMIUM = 0.060 # long-run Indian equity risk premium over the risk-free rate
 
 # ── Reference data ─────────────────────────────────────────────────────────────
 
@@ -200,23 +213,131 @@ async def _get_holdings() -> tuple[list[dict], float]:
         return FALLBACK_HOLDINGS, total
 
 
+# ── Historical-data helpers (real daily returns, no simulation) ────────────────
+
+async def _fetch_return_series(symbol: str, days: int = TRADING_DAYS_PER_YEAR) -> list[float]:
+    """Real daily simple returns for `symbol` over the trailing `days` trading
+    days, via the same Groww → Yahoo → Alpha Vantage provider chain backtest.py
+    uses. Returns [] if no provider has enough history (caller must degrade
+    gracefully — never fabricate values in place of this)."""
+    from app.data.providers import fetch_daily
+    end = datetime.now()
+    start = end - timedelta(days=int(days * 1.6))  # buffer for weekends/holidays
+    try:
+        candles, _source = await fetch_daily(symbol, start, end)
+    except Exception as exc:
+        logger.debug("return-series fetch failed for %s: %s", symbol, exc)
+        return []
+    closes = [float(c["close"]) for c in sorted(candles, key=lambda c: c.get("date", "")) if c.get("close")]
+    if len(closes) < 20:
+        return []
+    return [(closes[i] / closes[i - 1]) - 1.0 for i in range(1, len(closes))]
+
+
+async def _get_benchmark_returns(days: int = TRADING_DAYS_PER_YEAR) -> list[float]:
+    """NIFTYBEES daily returns, cached for 15 minutes since every /var and
+    /optimization call would otherwise re-fetch the same benchmark history."""
+    import json
+    from app.utils.redis_client import cache_get, cache_set
+
+    cache_key = f"risk:benchmark_returns:{days}"
+    try:
+        cached = await cache_get(cache_key)
+        if cached:
+            return json.loads(cached)
+    except Exception:
+        pass
+    series = await _fetch_return_series(BENCHMARK_SYMBOL, days)
+    if series:
+        try:
+            await cache_set(cache_key, json.dumps(series), expire=900)
+        except Exception:
+            pass
+    return series
+
+
+async def _portfolio_return_series(holdings: list[dict], days: int = TRADING_DAYS_PER_YEAR) -> list[float]:
+    """Weight-averaged real daily returns for the whole portfolio. Symbols with
+    no history are dropped and remaining weights re-normalized; [] if none of
+    the holdings have usable history."""
+    symbols = [h["symbol"] for h in holdings]
+    series_list = await asyncio.gather(*(_fetch_return_series(s, days) for s in symbols))
+    usable = [(h, s) for h, s in zip(holdings, series_list) if s]
+    if not usable:
+        return []
+    min_len = min(len(s) for _, s in usable)
+    total_weight = sum(h["weight"] for h, _ in usable) or 1.0
+    portfolio_returns = []
+    for t in range(min_len):
+        portfolio_returns.append(
+            sum((h["weight"] / total_weight) * s[-min_len + t] for h, s in usable)
+        )
+    return portfolio_returns
+
+
+def _stdev(values: list[float]) -> float:
+    if len(values) < 2:
+        return 0.0
+    mean = sum(values) / len(values)
+    variance = sum((v - mean) ** 2 for v in values) / (len(values) - 1)
+    return math.sqrt(variance)
+
+
+def _max_drawdown(returns: list[float]) -> float:
+    """Max peak-to-trough decline of the cumulative-return equity curve. Negative or zero."""
+    if not returns:
+        return 0.0
+    equity = 1.0
+    peak = 1.0
+    trough = 0.0
+    for r in returns:
+        equity *= (1.0 + r)
+        peak = max(peak, equity)
+        trough = min(trough, (equity / peak) - 1.0)
+    return round(trough, 4)
+
+
+def _downside_deviation(returns: list[float], mar: float = 0.0) -> float:
+    """Annualized standard deviation of returns falling below the minimum
+    acceptable return (MAR, default 0 = any loss day)."""
+    downside = [min(0.0, r - mar) for r in returns]
+    if not downside:
+        return 0.0
+    mean_sq = sum(d ** 2 for d in downside) / len(downside)
+    return round(math.sqrt(mean_sq) * math.sqrt(TRADING_DAYS_PER_YEAR), 4)
+
+
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
 @router.get("/var")
 async def get_risk_metrics():
     """
-    Portfolio VaR, CVaR, Beta, volatility, Sharpe/Sortino.
+    Portfolio VaR, CVaR, Beta, volatility, Sharpe/Sortino, max drawdown,
+    tracking error, information ratio.
     Uses real Groww holdings with real weights and stock-specific betas.
-    Methodology: parametric VaR (normal returns), NIFTY σ ≈ 20%, scaled by √10 for 10-day.
+    Methodology: parametric VaR (normal returns) off realized daily volatility
+    when trailing-year history is available for enough holdings; falls back to
+    portfolio_beta × NIFTY long-run vol (20%) otherwise. Max drawdown, Sortino,
+    tracking error and information ratio all require real history — each is
+    individually null when history isn't available, rather than guessed.
     """
     holdings, portfolio_value = await _get_holdings()
 
     portfolio_beta = round(sum(h["weight"] * h["beta"] for h in holdings), 3)
 
-    # Annualised volatility ≈ portfolio_beta × NIFTY vol (18–22%)
-    nifty_vol = random.uniform(0.18, 0.22)
-    ann_vol = round(portfolio_beta * nifty_vol, 4)
-    daily_vol = ann_vol / (252 ** 0.5)
+    portfolio_returns, benchmark_returns = await asyncio.gather(
+        _portfolio_return_series(holdings),
+        _get_benchmark_returns(),
+    )
+
+    # Annualised volatility: realized from actual daily returns when we have
+    # them, else the portfolio_beta × NIFTY long-run vol (20%) proxy.
+    used_real_vol = len(portfolio_returns) >= 20
+    if used_real_vol:
+        ann_vol = round(_stdev(portfolio_returns) * math.sqrt(TRADING_DAYS_PER_YEAR), 4)
+    else:
+        ann_vol = round(portfolio_beta * 0.20, 4)
+    daily_vol = ann_vol / (TRADING_DAYS_PER_YEAR ** 0.5)
 
     var_95_1day  = round(-portfolio_value * 1.645 * daily_vol, 2)
     var_99_1day  = round(-portfolio_value * 2.326 * daily_vol, 2)
@@ -226,15 +347,35 @@ async def get_risk_metrics():
     cvar_99      = round(var_99_1day  * 1.26, 2)
 
     # Risk-free rate 6.5% (India 10Y G-Sec), equity risk premium ~6%
-    rf = 0.065
-    erp = 0.060
+    rf = RISK_FREE_RATE
+    erp = EQUITY_RISK_PREMIUM
     expected_return = rf + portfolio_beta * erp
-    sharpe  = round((expected_return - rf) / ann_vol, 3)
-    sortino = round(sharpe * random.uniform(1.10, 1.35), 3)  # approx
+    sharpe = round((expected_return - rf) / ann_vol, 3) if ann_vol else 0.0
+
+    # Sortino: same expected-return numerator as Sharpe, but divided by the
+    # realized downside deviation (only loss days) instead of total vol —
+    # null (not guessed) when we don't have enough real history to compute it.
+    sortino = None
+    max_drawdown = None
+    if len(portfolio_returns) >= 20:
+        downside_dev = _downside_deviation(portfolio_returns)
+        sortino = round((expected_return - rf) / downside_dev, 3) if downside_dev else None
+        max_drawdown = _max_drawdown(portfolio_returns)
+
+    # Tracking error / information ratio need a benchmark series aligned to
+    # the portfolio's own return series — null when either side lacks history.
+    tracking_error = None
+    information_ratio = None
+    if len(portfolio_returns) >= 20 and len(benchmark_returns) >= 20:
+        n = min(len(portfolio_returns), len(benchmark_returns))
+        excess = [portfolio_returns[-n + i] - benchmark_returns[-n + i] for i in range(n)]
+        tracking_error = round(_stdev(excess) * math.sqrt(TRADING_DAYS_PER_YEAR), 4)
+        mean_excess_ann = (sum(excess) / len(excess)) * TRADING_DAYS_PER_YEAR
+        information_ratio = round(mean_excess_ann / tracking_error, 3) if tracking_error else None
 
     holdings_var = []
     for h in holdings:
-        contribution = round(var_95_1day * h["weight"] * (h["beta"] / portfolio_beta), 2)
+        contribution = round(var_95_1day * h["weight"] * (h["beta"] / portfolio_beta), 2) if portfolio_beta else 0.0
         holdings_var.append({
             "symbol":           h["symbol"],
             "name":             h["name"],
@@ -256,11 +397,13 @@ async def get_risk_metrics():
             "cvar_99":             cvar_99,
             "portfolio_beta":      portfolio_beta,
             "annualized_volatility": ann_vol,
+            "volatility_source":   "realized" if used_real_vol else "beta_proxy",
             "sharpe_ratio":        sharpe,
             "sortino_ratio":       sortino,
-            "max_drawdown":        round(random.uniform(-0.35, -0.18), 4),
-            "tracking_error":      round(random.uniform(0.08, 0.18), 4),
-            "information_ratio":   round(random.uniform(-0.20, 0.60), 3),
+            "max_drawdown":        max_drawdown,
+            "tracking_error":      tracking_error,
+            "information_ratio":   information_ratio,
+            "history_days_used":   len(portfolio_returns),
             "holdings_var":        holdings_var,
         },
     }
@@ -326,9 +469,10 @@ async def get_stress_test():
 
         holdings_impact = []
         for h in holdings:
-            stock_return = round(
-                s["market_return"] * h["beta"] * random.uniform(0.85, 1.15), 4
-            )
+            # Beta-scaled shock, same methodology as portfolio_return above — no
+            # per-stock randomness, since a stock's beta is the model's only
+            # signal for how much harder/softer it falls than the index.
+            stock_return = round(s["market_return"] * h["beta"], 4)
             holdings_impact.append({
                 "symbol": h["symbol"],
                 "return": stock_return,
@@ -362,10 +506,14 @@ async def get_factor_analysis():
     """
     Fama-French 5-factor decomposition using real holdings and stock-specific factor loadings.
     Portfolio exposures = weight-averaged individual factor loadings.
+
+    factor_contributions is a deterministic heuristic, not a true covariance-based
+    variance decomposition (that needs real factor-return covariance data, which
+    this platform doesn't source) — it scales market share with the portfolio's
+    own beta and splits the remainder by each factor's relative loading, so it's
+    reproducible and derived from real holdings rather than randomized.
     """
     holdings, _ = await _get_holdings()
-
-    noise = lambda: round(random.uniform(-0.04, 0.04), 3)
 
     # Weight-averaged portfolio factor exposures
     def w_avg(factor: str) -> float:
@@ -381,11 +529,20 @@ async def get_factor_analysis():
         "quality":       w_avg("quality"),
     }
 
-    # Variance decomposition (simulated, consistent with high-beta portfolio)
-    market_share   = round(random.uniform(0.58, 0.70), 3)
-    size_share     = round(random.uniform(0.06, 0.12), 3)
-    value_share    = round(random.uniform(0.05, 0.11), 3)
-    momentum_share = round(random.uniform(0.03, 0.08), 3)
+    # Deterministic variance-share heuristic (see docstring): market share
+    # scales linearly with portfolio beta (clamped to a plausible band), the
+    # remainder splits across size/value/momentum by their relative |loading|.
+    market_share = round(min(0.75, max(0.45, 0.35 + 0.20 * factor_exposures["market_beta"])), 3)
+    remaining = 1.0 - market_share
+    abs_loadings = {
+        "size":     abs(factor_exposures["size_smb"]),
+        "value":    abs(factor_exposures["value_hml"]),
+        "momentum": abs(factor_exposures["momentum_mom"]),
+    }
+    total_abs = sum(abs_loadings.values()) or 1.0
+    size_share     = round(remaining * (abs_loadings["size"]     / total_abs) * 0.6, 3)
+    value_share    = round(remaining * (abs_loadings["value"]    / total_abs) * 0.6, 3)
+    momentum_share = round(remaining * (abs_loadings["momentum"] / total_abs) * 0.6, 3)
     idiosyncratic  = round(max(0.04, 1.0 - market_share - size_share - value_share - momentum_share), 3)
 
     factor_contributions = {
@@ -403,11 +560,11 @@ async def get_factor_analysis():
             "symbol":   h["symbol"],
             "name":     h["name"],
             "weight":   h["weight"],
-            "beta":     round(p["beta"]     + noise(), 3),
-            "size":     round(p["size"]     + noise(), 3),
-            "value":    round(p["value"]    + noise(), 3),
-            "momentum": round(p["momentum"] + noise(), 3),
-            "quality":  round(p["quality"]  + noise(), 3),
+            "beta":     round(p["beta"], 3),
+            "size":     round(p["size"], 3),
+            "value":    round(p["value"], 3),
+            "momentum": round(p["momentum"], 3),
+            "quality":  round(p["quality"], 3),
         })
 
     return {
@@ -428,8 +585,8 @@ def _compute_optimization(holdings: list[dict], portfolio_value: float) -> dict:
     current_weights = {h["symbol"]: h["weight"] for h in holdings}
     portfolio_beta  = sum(h["weight"] * h["beta"] for h in holdings)
 
-    rf  = 0.065
-    erp = 0.060
+    rf  = RISK_FREE_RATE
+    erp = EQUITY_RISK_PREMIUM
     nifty_vol = 0.20
 
     current_return = round(rf + portfolio_beta * erp, 4)
@@ -453,8 +610,11 @@ def _compute_optimization(holdings: list[dict], portfolio_value: float) -> dict:
     total_q = sum(quality_scores.values())
     max_sharpe_weights = {s: round(q / total_q, 4) for s, q in quality_scores.items()}
     ms_beta = sum(max_sharpe_weights.get(h["symbol"], 0) * h["beta"] for h in holdings)
-    max_sharpe_return = round(rf + ms_beta * erp * random.uniform(1.05, 1.15), 4)
-    max_sharpe_vol    = round(ms_beta * nifty_vol * random.uniform(0.90, 0.98), 4)
+    # Same return/vol formula as current_portfolio and min_var_portfolio above —
+    # no artificial boost. Its Sharpe edge over the other two comes entirely
+    # from quality-weighting shifting beta, same as the real math would show.
+    max_sharpe_return = round(rf + ms_beta * erp, 4)
+    max_sharpe_vol    = round(ms_beta * nifty_vol, 4)
     max_sharpe_sharpe = round((max_sharpe_return - rf) / max_sharpe_vol, 3)
 
     efficient_frontier = []

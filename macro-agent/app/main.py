@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 import aio_pika
 import redis.asyncio as redis_async
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic_settings import BaseSettings
 from pydantic import model_validator
 
@@ -18,6 +17,9 @@ from app.regime_classifier import generate_macro_signal
 from app.elk_logger import setup_logging, get_logger
 setup_logging()
 logger = get_logger(__name__)
+
+from app.agent_bootstrap import health_payload
+from app.cors import configure_cors
 
 
 class Settings(BaseSettings):
@@ -130,12 +132,12 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="NeuradeX — Macro Agent", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+configure_cors(app)
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "macro-agent", "cached_indicators": bool(_macro_cache)}
+    return health_payload("macro-agent", cached_indicators=bool(_macro_cache))
 
 
 @app.get("/macro")

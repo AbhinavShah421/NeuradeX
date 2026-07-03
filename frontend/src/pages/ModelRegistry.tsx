@@ -4,6 +4,11 @@ import React, { useEffect, useState } from 'react';
 // Works on localhost and through ngrok (never hardcode the host).
 const MLFLOW_BASE = '/api/mlflow';
 
+// Direct link to the MLflow UI itself (for "Open in MLflow ->"). This is a
+// separate origin from MLFLOW_BASE above and isn't proxied, so it does need
+// to be configurable — defaults to the local docker-compose port.
+const MLFLOW_UI_URL = import.meta.env.VITE_MLFLOW_URL || 'http://localhost:5000';
+
 interface ModelVersion {
   name: string;
   version: string;
@@ -112,7 +117,7 @@ const ModelRegistry: React.FC = () => {
                 </span>
               </div>
               <a
-                href={`http://localhost:5000/#/models/${model.name}`}
+                href={`${MLFLOW_UI_URL}/#/models/${model.name}`}
                 target="_blank"
                 rel="noreferrer"
                 style={{ fontSize: 12, color: 'var(--nd-accent)', textDecoration: 'none' }}

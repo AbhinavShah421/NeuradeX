@@ -1,0 +1,1791 @@
+"""
+Backtesting business logic — simulate trading strategies on Groww historical data.
+
+Strategies: SMA Crossover, RSI Mean Reversion, MACD Crossover, Bollinger Band.
+Also provides a live-signal endpoint for paper trading.
+Day-Autopilot: AI-driven intraday simulation with LLM decision-making.
+
+This module holds the actual DB/data-provider access, calculations and
+simulation logic that used to live inline inside the FastAPI route handlers
+in app.api.backtest. app.api.backtest is now a thin router that parses
+requests and delegates here.
+
+A number of names defined in this module (functions, constants, Pydantic
+request models) are imported directly by other modules — app.api.backtest
+re-exports them for backward compatibility, so do not rename/remove them
+without also updating those call sites:
+  - app.api.paper_trading: IST, _MARKET_OPEN_MINUTES, _SQUAREOFF_MINUTES,
+    _compute_metrics, _intraday_indicators, _llm_decide, _minutes_to_time,
+    _tech_signal, _time_to_minutes
+  - app.api.sessions: IST, _SQUAREOFF_MINUTES, _MARKET_OPEN_MINUTES,
+    _intraday_indicators, _tech_signal, _time_to_minutes, _compute_metrics,
+    _build_trade_record, _derive_agent_signals, _save_backtest_trades,
+    _prev_trading_day, _fetch_full_day_candles, _no_real_intraday_msg
+  - app.agents.pattern_model: _fetch_candles
+  - app.agents.memory_sweep: _fetch_candles, _run_engine, STRATEGIES
+"""
+import asyncio
+import json
+import math
+import os
+import random
+import re
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+
+import httpx
+import pandas as pd
+import ta
+from fastapi import HTTPException, Query
+from pydantic import BaseModel, Field
+
+from app.config import settings
+from app.utils.candle_utils import parse_candles, simulate_daily_candles
+from app.utils.groww_client import get_groww_client
+from app.utils.elk_logger import get_logger
+
+logger = get_logger(__name__)
+
+INDIA_RF_RATE = 0.065  # 10Y G-Sec
+
+
+async def _save_backtest_trades(records: list[dict]) -> None:
+    """Fire-and-forget POST to feedback-service to persist backtest trades."""
+    if not records:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(f"{settings.FEEDBACK_SERVICE_URL}/trades", json=records)
+    except Exception as exc:
+        logger.warning("Could not save backtest trades to feedback-service: %s", exc)
+
+
+async def _feed_memory_from_backtest(symbol: str, candles: list[dict], trades: list[dict]) -> None:
+    """Turn realised backtest trades into Pattern Memory cases.
+
+    Each trade is fingerprinted from the candles available *at entry* (no
+    lookahead) and labelled with its actual P&L — so the system literally
+    remembers "this kind of setup, when I traded it, made/lost X%".
+    """
+    if not trades or not candles:
+        return
+    try:
+        from app.agents import get_memory
+        from app.agents.fingerprint import build_fingerprint, classify_regime
+
+        await get_memory().init_db()
+        # Map entry_date → candle index for a no-lookahead fingerprint window
+        date_idx = {c.get("date"): i for i, c in enumerate(candles)}
+        cases: list[dict] = []
+        for t in trades:
+            idx = date_idx.get(t.get("entry_date"))
+            if idx is None or idx < 15:
+                continue
+            window = candles[: idx + 1]
+            fp = build_fingerprint(window)
+            if fp is None:
+                continue
+            cases.append({
+                "symbol": symbol, "fingerprint": fp, "action": "BUY",
+                "entry_price": t.get("entry_price", 0.0),
+                "exit_price":  t.get("exit_price", 0.0),
+                "pnl_pct":     float(t.get("pnl_pct", 0.0)),
+                "regime":      classify_regime(window), "source": "BACKTEST",
+            })
+        if cases:
+            await get_memory().add_cases_bulk(cases)
+    except Exception as exc:
+        logger.warning("Could not feed pattern memory from backtest: %s", exc)
+
+
+async def _train_ensemble_from_backtest(symbol: str, candles: list[dict], trades: list[dict],
+                                        max_trades: int = 40) -> None:
+    """Train the 7-agent ensemble (weights + RL Q-table) from realised backtest trades.
+
+    For each trade we replay the ensemble on the candles available at entry (no
+    lookahead), store it as a prediction, then record the trade's *actual* P&L as
+    the outcome — which nudges each agent's weight and the RL policy. Capped so a
+    single backtest can't flood the learner. Runs in the background.
+
+    Disabled by default: these are multi-day swing trades and the agents are
+    intraday, so this would pollute the intraday learning signal. Intraday
+    training comes from paper + replay sessions instead. Enable with
+    TRAIN_FROM_STRATEGY_BACKTEST=true only if you want swing-trade training.
+    """
+    if not trades or not candles:
+        return
+    if not getattr(settings, "TRAIN_FROM_STRATEGY_BACKTEST", False):
+        return
+    try:
+        from app.agents import get_engine, get_learning, get_rl_agent
+        engine   = get_engine()
+        learning = get_learning()
+        await learning.init_db()
+        weights = await learning.get_weights()
+        if weights:
+            engine.update_weights(weights)
+
+        date_idx = {c.get("date"): i for i, c in enumerate(candles)}
+        ctx = {"symbol": symbol, "capital": 100_000.0, "position": "NONE"}
+        for t in trades[:max_trades]:
+            idx = date_idx.get(t.get("entry_date"))
+            if idx is None or idx < 26:    # ensemble/RL need ≥26 candles
+                continue
+            window = candles[: idx + 1]
+            try:
+                decision = await engine.decide(symbol, window, ctx)
+                rl_state = None
+                try:
+                    rl_state = get_rl_agent().extract_state(window)
+                except Exception:
+                    logger.debug("RL state extraction failed during backtest training", exc_info=True)
+                # The strategy executed a long, so train against a BUY prediction
+                decision.action = "BUY"
+                await learning.store_prediction(decision, str(t.get("entry_date", "")), ctx, rl_state, None)
+                await learning.record_outcome(
+                    decision.prediction_id, symbol,
+                    float(t.get("entry_price", 0.0)), float(t.get("exit_price", 0.0)),
+                    float(t.get("pnl", 0.0)), float(t.get("pnl_pct", 0.0)),
+                )
+            except Exception:
+                logger.debug("Skipping trade during ensemble training due to error", exc_info=True)
+                continue
+    except Exception as exc:
+        logger.warning("Could not train ensemble from backtest: %s", exc)
+
+
+def _derive_agent_signals(action: str, indicators: dict, strategy: str = "") -> dict:
+    """Map available indicators to the 5 agent signal slots the Orders page expects."""
+    rsi = float(indicators.get("rsi", 50) or 50)
+    mom5 = float(indicators.get("mom5", 0) or 0)
+    above_vwap = bool(indicators.get("above_vwap", True))
+    vol_ratio = float(indicators.get("vol_ratio", 1.0) or 1.0)
+
+    # Technical: RSI + momentum
+    if rsi < 40 and mom5 >= 0:
+        technical = "BUY"
+    elif rsi > 65 or mom5 < -0.2:
+        technical = "SELL"
+    else:
+        technical = action
+
+    # Sentiment: momentum proxy
+    if mom5 > 0.15:
+        sentiment = "BUY"
+    elif mom5 < -0.15:
+        sentiment = "SELL"
+    else:
+        sentiment = "HOLD"
+
+    # Pattern: VWAP + volume
+    if above_vwap and vol_ratio > 1.2:
+        pattern = "BUY"
+    elif not above_vwap and vol_ratio > 1.2:
+        pattern = "SELL"
+    else:
+        pattern = "HOLD"
+
+    # Macro: neutral for strategy/intraday backtests
+    macro = "HOLD"
+
+    # RL: follows the actual executed action
+    rl = action
+
+    return {"technical": technical, "sentiment": sentiment, "macro": macro, "pattern": pattern, "rl": rl}
+
+
+def _strategy_agent_signals(strategy: str, action: str) -> dict:
+    """For simple strategy backtests (no per-candle indicators), technical drives the signal."""
+    return {
+        "technical": action,
+        "sentiment": "HOLD",
+        "macro": "HOLD",
+        "pattern": "HOLD",
+        "rl": action,
+    }
+
+
+def _build_trade_record(
+    symbol: str,
+    action: str,
+    entry_price: float,
+    exit_price: float,
+    pnl_abs: float,
+    pnl_pct_decimal: float,
+    timestamp_open: str,
+    timestamp_close: str,
+    duration_minutes: int,
+    agent_signals: dict,
+    market_context: dict,
+    confidence: float = 0.75,
+    trade_source: str = "BACKTEST",
+) -> dict:
+    outcome = "WIN" if pnl_abs > 0 else "LOSS"
+    return {
+        "trade_id": str(uuid.uuid4()),
+        "symbol": symbol,
+        "exchange": "NSE",
+        "action": action,
+        "entry_price": entry_price,
+        "exit_price": exit_price,
+        "pnl_abs": round(pnl_abs, 2),
+        "pnl_pct": round(pnl_pct_decimal, 6),
+        "duration_minutes": duration_minutes,
+        "ensemble_confidence": confidence,
+        "agent_signals": agent_signals,
+        "market_context": market_context,
+        "outcome": outcome,
+        "timestamp_open": timestamp_open,
+        "timestamp_close": timestamp_close,
+        "trade_source": trade_source,
+    }
+
+
+# ── Strategy registry ──────────────────────────────────────────────────────────
+
+STRATEGIES = {
+    "sma_crossover": {
+        "name": "SMA Crossover",
+        "description": "Buy when fast SMA crosses above slow SMA (golden cross). Sell on death cross.",
+        "params": {
+            "sma_fast": {"label": "Fast SMA period", "default": 20, "min": 5,  "max": 50,  "step": 1,   "type": "int"},
+            "sma_slow": {"label": "Slow SMA period", "default": 50, "min": 20, "max": 200, "step": 5,   "type": "int"},
+        },
+    },
+    "rsi_mean_reversion": {
+        "name": "RSI Mean Reversion",
+        "description": "Buy when RSI drops below oversold. Sell when RSI rises above overbought.",
+        "params": {
+            "rsi_period":  {"label": "RSI period",           "default": 14, "min": 5,  "max": 30, "step": 1,   "type": "int"},
+            "oversold":    {"label": "Oversold threshold",   "default": 30, "min": 15, "max": 45, "step": 1,   "type": "int"},
+            "overbought":  {"label": "Overbought threshold", "default": 70, "min": 55, "max": 85, "step": 1,   "type": "int"},
+        },
+    },
+    "macd_crossover": {
+        "name": "MACD Crossover",
+        "description": "Buy when MACD crosses above signal line. Sell on cross below.",
+        "params": {
+            "fast":   {"label": "Fast EMA period",   "default": 12, "min": 5,  "max": 20, "step": 1, "type": "int"},
+            "slow":   {"label": "Slow EMA period",   "default": 26, "min": 15, "max": 50, "step": 1, "type": "int"},
+            "signal": {"label": "Signal EMA period", "default": 9,  "min": 3,  "max": 15, "step": 1, "type": "int"},
+        },
+    },
+    "bollinger_band": {
+        "name": "Bollinger Band Reversion",
+        "description": "Buy when price closes below lower band. Sell when price closes above upper band.",
+        "params": {
+            "window":  {"label": "Window period",   "default": 20,  "min": 10,  "max": 50,  "step": 5,   "type": "int"},
+            "std_dev": {"label": "Std deviations",  "default": 2.0, "min": 1.0, "max": 3.0, "step": 0.5, "type": "float"},
+        },
+    },
+}
+
+
+# ── Pydantic models ────────────────────────────────────────────────────────────
+# (defined here, imported into app.api.backtest for use as route parameter
+# types — schema is unchanged, only the module it's defined in moved)
+
+class BacktestRequest(BaseModel):
+    symbol: str
+    strategy: str
+    start_date: str
+    end_date: str
+    initial_capital: float = Field(default=100_000.0, ge=10_000, le=100_000_000)
+    commission: float = Field(default=0.001, ge=0.0, le=0.05)
+    params: dict = {}
+
+
+async def _fetch_candles(symbol: str, start: datetime, end: datetime) -> tuple[list[dict], str]:
+    # Try every configured data provider (Groww → Yahoo → Alpha Vantage)
+    from app.data.providers import fetch_daily
+    candles, source = await fetch_daily(symbol, start, end)
+    if candles and len(candles) > 10:
+        return candles, source
+    raise HTTPException(
+        422,
+        f"No real historical data available for {symbol} between "
+        f"{start.date()} and {end.date()}. Try a different date range or symbol."
+    )
+
+
+# ── Signal generators ──────────────────────────────────────────────────────────
+
+def _generate_signals(df: pd.DataFrame, strategy: str, params: dict) -> pd.Series:
+    """Returns a Series: 1 = buy, -1 = sell, 0 = hold."""
+    close = df["close"].astype(float)
+    high  = df["high"].astype(float)
+    low   = df["low"].astype(float)
+    sig   = pd.Series(0, index=df.index)
+
+    if strategy == "sma_crossover":
+        f = int(params.get("sma_fast", 20))
+        s = int(params.get("sma_slow", 50))
+        sma_f = ta.trend.SMAIndicator(close, window=f).sma_indicator()
+        sma_s = ta.trend.SMAIndicator(close, window=s).sma_indicator()
+        for i in range(1, len(df)):
+            if pd.isna(sma_f.iloc[i]) or pd.isna(sma_s.iloc[i]):
+                continue
+            if sma_f.iloc[i-1] < sma_s.iloc[i-1] and sma_f.iloc[i] >= sma_s.iloc[i]:
+                sig.iloc[i] = 1
+            elif sma_f.iloc[i-1] > sma_s.iloc[i-1] and sma_f.iloc[i] <= sma_s.iloc[i]:
+                sig.iloc[i] = -1
+
+    elif strategy == "rsi_mean_reversion":
+        period = int(params.get("rsi_period", 14))
+        os     = float(params.get("oversold",  30))
+        ob     = float(params.get("overbought", 70))
+        rsi = ta.momentum.RSIIndicator(close, window=period).rsi()
+        for i in range(1, len(df)):
+            if pd.isna(rsi.iloc[i]):
+                continue
+            if rsi.iloc[i-1] >= os and rsi.iloc[i] < os:
+                sig.iloc[i] = 1
+            elif rsi.iloc[i-1] <= ob and rsi.iloc[i] > ob:
+                sig.iloc[i] = -1
+
+    elif strategy == "macd_crossover":
+        fst = int(params.get("fast",   12))
+        slw = int(params.get("slow",   26))
+        sgn = int(params.get("signal",  9))
+        obj = ta.trend.MACD(close, window_fast=fst, window_slow=slw, window_sign=sgn)
+        macd  = obj.macd()
+        msig  = obj.macd_signal()
+        for i in range(1, len(df)):
+            if pd.isna(macd.iloc[i]) or pd.isna(msig.iloc[i]):
+                continue
+            if macd.iloc[i-1] < msig.iloc[i-1] and macd.iloc[i] >= msig.iloc[i]:
+                sig.iloc[i] = 1
+            elif macd.iloc[i-1] > msig.iloc[i-1] and macd.iloc[i] <= msig.iloc[i]:
+                sig.iloc[i] = -1
+
+    elif strategy == "bollinger_band":
+        w   = int(params.get("window",  20))
+        sd  = float(params.get("std_dev", 2.0))
+        bb  = ta.volatility.BollingerBands(close, window=w, window_dev=sd)
+        bb_lo = bb.bollinger_lband()
+        bb_hi = bb.bollinger_hband()
+        for i in range(1, len(df)):
+            if pd.isna(bb_lo.iloc[i]):
+                continue
+            if close.iloc[i] < bb_lo.iloc[i]:
+                sig.iloc[i] = 1
+            elif close.iloc[i] > bb_hi.iloc[i]:
+                sig.iloc[i] = -1
+
+    return sig
+
+
+# ── Core engine ────────────────────────────────────────────────────────────────
+
+def _run_engine(candles: list[dict], strategy: str, params: dict,
+                initial_capital: float, commission: float) -> dict:
+    df = pd.DataFrame(candles).sort_values("date").reset_index(drop=True)
+    signals = _generate_signals(df, strategy, params)
+
+    cash   = initial_capital
+    shares = 0
+    entry_price = 0.0
+    entry_date  = ""
+    trades: list[dict] = []
+    equity_curve: list[dict] = []
+
+    # Buy-and-hold benchmark: buy at day-0 close
+    bh_price  = float(df["close"].iloc[0])
+    bh_shares = math.floor(initial_capital / bh_price)
+    bh_cash   = initial_capital - bh_shares * bh_price
+
+    for i, row in df.iterrows():
+        price = float(row["close"])
+        s     = int(signals.iloc[i])
+
+        if s == 1 and shares == 0:
+            qty  = math.floor(cash / (price * (1 + commission)))
+            if qty > 0:
+                cash   -= qty * price * (1 + commission)
+                shares  = qty
+                entry_price = price
+                entry_date  = row["date"]
+
+        elif s == -1 and shares > 0:
+            revenue = shares * price * (1 - commission)
+            cash += revenue
+            cost  = shares * entry_price * (1 + commission)
+            pnl   = revenue - cost
+            entry_dt = datetime.strptime(entry_date, "%Y-%m-%d")
+            exit_dt  = datetime.strptime(row["date"], "%Y-%m-%d")
+            trades.append({
+                "entry_date":   entry_date,
+                "exit_date":    row["date"],
+                "entry_price":  round(entry_price, 2),
+                "exit_price":   round(price, 2),
+                "shares":       shares,
+                "pnl":          round(pnl, 2),
+                "pnl_pct":      round((pnl / cost) * 100, 2),
+                "holding_days": (exit_dt - entry_dt).days,
+                "type":         "WIN" if pnl > 0 else "LOSS",
+            })
+            shares = 0
+
+        pv = cash + shares * price
+        bv = bh_cash + bh_shares * price
+        equity_curve.append({
+            "date":      row["date"],
+            "portfolio": round(pv, 2),
+            "benchmark": round(bv, 2),
+        })
+
+    final_pv = cash + shares * float(df["close"].iloc[-1])
+    final_bv = bh_cash + bh_shares * float(df["close"].iloc[-1])
+
+    # ── Metrics ────────────────────────────────────────────────────────────────
+    total_ret   = ((final_pv - initial_capital) / initial_capital) * 100
+    bh_ret      = ((final_bv - initial_capital) / initial_capital) * 100
+    n_days      = (datetime.strptime(df["date"].iloc[-1], "%Y-%m-%d") -
+                   datetime.strptime(df["date"].iloc[0],  "%Y-%m-%d")).days
+    years       = max(n_days / 365.25, 0.1)
+    cagr        = ((final_pv / initial_capital) ** (1 / years) - 1) * 100
+
+    vals = [e["portfolio"] for e in equity_curve]
+    dr   = [(vals[i] - vals[i-1]) / vals[i-1] for i in range(1, len(vals)) if vals[i-1] > 0]
+    if dr:
+        mu    = sum(dr) / len(dr)
+        sigma = (sum((r - mu)**2 for r in dr) / len(dr)) ** 0.5
+        rf_d  = INDIA_RF_RATE / 252
+        sharpe = ((mu - rf_d) / sigma * math.sqrt(252)) if sigma > 0 else 0.0
+    else:
+        sharpe = 0.0
+
+    peak   = initial_capital
+    max_dd = 0.0
+    for e in equity_curve:
+        v = e["portfolio"]
+        peak = max(peak, v)
+        dd = (peak - v) / peak * 100
+        max_dd = max(max_dd, dd)
+
+    wins   = [t for t in trades if t["type"] == "WIN"]
+    losses = [t for t in trades if t["type"] == "LOSS"]
+    gp     = sum(t["pnl"] for t in wins)
+    gl     = abs(sum(t["pnl"] for t in losses))
+    pf     = (gp / gl) if gl > 0 else (1.0 if not wins else 99.0)
+    wr     = (len(wins) / len(trades) * 100) if trades else 0.0
+    avg_hd = (sum(t["holding_days"] for t in trades) / len(trades)) if trades else 0.0
+
+    # Downsample equity curve to ≤ 250 points
+    step = max(1, len(equity_curve) // 250)
+    ec_sampled = equity_curve[::step]
+    if equity_curve and ec_sampled[-1] != equity_curve[-1]:
+        ec_sampled.append(equity_curve[-1])
+
+    return {
+        "metrics": {
+            "initial_capital":       round(initial_capital, 2),
+            "final_value":           round(final_pv, 2),
+            "total_return_pct":      round(total_ret, 2),
+            "buy_hold_return_pct":   round(bh_ret, 2),
+            "cagr":                  round(cagr, 2),
+            "sharpe_ratio":          round(sharpe, 3),
+            "max_drawdown_pct":      round(max_dd, 2),
+            "win_rate":              round(wr, 1),
+            "total_trades":          len(trades),
+            "winning_trades":        len(wins),
+            "losing_trades":         len(losses),
+            "profit_factor":         round(pf, 2),
+            "avg_holding_days":      round(avg_hd, 1),
+            "gross_profit":          round(gp, 2),
+            "gross_loss":            round(gl, 2),
+        },
+        "trades":       trades,
+        "equity_curve": ec_sampled,
+        "open_position": shares > 0,
+        "candle_count":  len(df),
+    }
+
+
+# ── Service functions for the /strategies and /providers endpoints ─────────────
+
+async def get_strategies_data() -> dict:
+    return {"status": "success", "data": STRATEGIES}
+
+
+async def get_data_providers() -> dict:
+    """List configured market-data providers and whether each is currently usable."""
+    from app.data.providers import list_status
+    return {"status": "success", "data": await list_status()}
+
+
+async def run_backtest(req: BacktestRequest) -> dict:
+    symbol = req.symbol.upper()
+    if req.strategy not in STRATEGIES:
+        raise HTTPException(400, f"Unknown strategy '{req.strategy}'. Valid: {list(STRATEGIES)}")
+
+    try:
+        start = datetime.strptime(req.start_date, "%Y-%m-%d")
+        end   = datetime.strptime(req.end_date,   "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(400, "Dates must be YYYY-MM-DD")
+
+    if start >= end:
+        raise HTTPException(400, "start_date must be before end_date")
+
+    candles, source = await _fetch_candles(symbol, start, end)
+
+    if len(candles) < 30:
+        raise HTTPException(400, "Need at least 30 days of data. Widen your date range.")
+
+    result = _run_engine(candles, req.strategy, req.params, req.initial_capital, req.commission)
+    strat  = STRATEGIES[req.strategy]
+
+    logger.info(
+        "Backtest completed",
+        extra={
+            "log_type": "backtest_event",
+            "event": "backtest_complete",
+            "symbol": symbol,
+            "strategy": req.strategy,
+            "data_source": source,
+            "candle_count": result["candle_count"],
+            "total_trades": result["metrics"]["total_trades"],
+            "total_return_pct": result["metrics"]["total_return_pct"],
+            "win_rate": result["metrics"]["win_rate"],
+            "sharpe_ratio": result["metrics"]["sharpe_ratio"],
+            "max_drawdown_pct": result["metrics"]["max_drawdown_pct"],
+            "start_date": req.start_date,
+            "end_date": req.end_date,
+        },
+    )
+
+    # Persist completed trades to feedback-service so they appear in Orders page.
+    # A run id groups this backtest's trades into one collapsible session in Orders.
+    strat_name = STRATEGIES[req.strategy]["name"]
+    run_id = f"bt-{uuid.uuid4().hex[:12]}"
+    records = []
+    for t in result["trades"]:
+        try:
+            entry_dt = datetime.strptime(t["entry_date"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            exit_dt  = datetime.strptime(t["exit_date"],  "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            records.append(_build_trade_record(
+                symbol=symbol,
+                action="BUY",
+                entry_price=t["entry_price"],
+                exit_price=t["exit_price"],
+                pnl_abs=t["pnl"],
+                pnl_pct_decimal=t["pnl_pct"] / 100.0,
+                timestamp_open=entry_dt.isoformat(),
+                timestamp_close=exit_dt.isoformat(),
+                duration_minutes=t["holding_days"] * 375,
+                agent_signals=_strategy_agent_signals(req.strategy, "BUY"),
+                market_context={"atr": t["entry_price"] * 0.01, "strategy": req.strategy, "data_source": source,
+                                "holding_days": t["holding_days"], "session_id": run_id, "session_mode": "STRATEGY"},
+                confidence=0.75,
+            ))
+        except Exception:
+            logger.exception("Failed to build backtest trade record for Orders page (symbol=%s)", symbol)
+    asyncio.create_task(_save_backtest_trades(records))
+    # Also teach the Pattern Memory bank from these realised trades
+    asyncio.create_task(_feed_memory_from_backtest(symbol, candles, result["trades"]))
+    # Train the agent ensemble (weights + RL) from these realised trades
+    asyncio.create_task(_train_ensemble_from_backtest(symbol, candles, result["trades"]))
+
+    return {
+        "status": "success",
+        "data": {
+            "symbol":          symbol,
+            "strategy":        req.strategy,
+            "strategy_name":   strat["name"],
+            "start_date":      req.start_date,
+            "end_date":        req.end_date,
+            "data_source":     source,
+            "initial_capital": req.initial_capital,
+            "commission_pct":  round(req.commission * 100, 3),
+            "params":          req.params,
+            **result,
+            "generated_at":    datetime.now().isoformat(),
+        },
+    }
+
+
+async def get_live_signal(
+    symbol: str,
+    strategy: str,
+    sma_fast: int, sma_slow: int,
+    rsi_period: int, oversold: int, overbought: int,
+    fast: int, slow: int, signal: int,
+    window: int, std_dev: float,
+) -> dict:
+    """Current live trading signal + indicator values for paper trading."""
+    symbol = symbol.upper()
+    params = {
+        "sma_fast": sma_fast, "sma_slow": sma_slow,
+        "rsi_period": rsi_period, "oversold": oversold, "overbought": overbought,
+        "fast": fast, "slow": slow, "signal": signal,
+        "window": window, "std_dev": std_dev,
+    }
+
+    end   = datetime.now()
+    start = end - timedelta(days=300)
+    candles, _ = await _fetch_candles(symbol, start, end)
+
+    if not candles:
+        raise HTTPException(500, "Could not fetch candle data")
+
+    df  = pd.DataFrame(candles).sort_values("date").reset_index(drop=True)
+    sigs = _generate_signals(df, strategy, params)
+    close = df["close"].astype(float)
+
+    cur_sig   = int(sigs.iloc[-1])
+    sig_label = {1: "BUY", -1: "SELL", 0: "HOLD"}.get(cur_sig, "HOLD")
+
+    # Build recent signal history (last 10 days)
+    recent = []
+    for i in range(max(0, len(sigs) - 10), len(sigs)):
+        sv = int(sigs.iloc[i])
+        recent.append({
+            "date":   df["date"].iloc[i],
+            "signal": {1: "BUY", -1: "SELL", 0: "HOLD"}.get(sv, "HOLD"),
+            "close":  round(float(close.iloc[i]), 2),
+        })
+
+    # Current indicator snapshot
+    def _safe(v): return round(float(v), 4) if not pd.isna(v) else None
+
+    indicators: dict = {}
+    if strategy == "sma_crossover":
+        sf = ta.trend.SMAIndicator(close, window=sma_fast).sma_indicator()
+        ss = ta.trend.SMAIndicator(close, window=sma_slow).sma_indicator()
+        fv, sv2 = _safe(sf.iloc[-1]), _safe(ss.iloc[-1])
+        indicators = {
+            "sma_fast": fv, "sma_slow": sv2,
+            "spread_pct": round((fv / sv2 - 1) * 100, 2) if fv and sv2 else None,
+        }
+    elif strategy == "rsi_mean_reversion":
+        rsi = ta.momentum.RSIIndicator(close, window=rsi_period).rsi()
+        indicators = {"rsi": _safe(rsi.iloc[-1]), "oversold": oversold, "overbought": overbought}
+    elif strategy == "macd_crossover":
+        obj = ta.trend.MACD(close, window_fast=fast, window_slow=slow, window_sign=signal)
+        indicators = {
+            "macd":      _safe(obj.macd().iloc[-1]),
+            "signal":    _safe(obj.macd_signal().iloc[-1]),
+            "histogram": _safe(obj.macd_diff().iloc[-1]),
+        }
+    elif strategy == "bollinger_band":
+        bb = ta.volatility.BollingerBands(close, window=window, window_dev=std_dev)
+        indicators = {
+            "upper":  _safe(bb.bollinger_hband().iloc[-1]),
+            "middle": _safe(bb.bollinger_mavg().iloc[-1]),
+            "lower":  _safe(bb.bollinger_lband().iloc[-1]),
+            "pct_b":  _safe(bb.bollinger_pband().iloc[-1]),
+        }
+
+    logger.info(
+        "Live signal generated",
+        extra={
+            "log_type": "backtest_event",
+            "event": "live_signal",
+            "symbol": symbol,
+            "strategy": strategy,
+            "signal": sig_label,
+            "last_price": round(float(close.iloc[-1]), 2),
+        },
+    )
+
+    return {
+        "status": "success",
+        "data": {
+            "symbol":         symbol,
+            "strategy":       strategy,
+            "signal":         sig_label,
+            "last_price":     round(float(close.iloc[-1]), 2),
+            "indicators":     indicators,
+            "recent_signals": recent,
+            "candle_count":   len(candles),
+            "generated_at":   datetime.now().isoformat(),
+        },
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  AI DAY-TRADING AUTOPILOT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+_INTRADAY_BASE = {
+    "SBIN": 820, "IDBI": 72, "SUZLON": 58, "INDUSINDBK": 870,
+    "TMPV": 356, "PNB": 102, "FEDERALBNK": 182, "TMCV": 378,
+    "IREDA": 178, "ZEEL": 135, "IOB": 54, "JKTYRE": 395,
+    "RELIANCE": 2850, "TCS": 3450, "INFY": 1720, "HDFCBANK": 1530,
+    "ICICIBANK": 1220, "BAJFINANCE": 6900, "WIPRO": 505, "KOTAKBANK": 1820,
+    "TRIVENIENT": 2, "VIKASECO": 2, "CROISSANCE": 2, "SYNCOMF": 10, "SHREEGANES": 10,
+}
+
+
+def _simulate_intraday_5min(symbol: str, date_str: str) -> list[dict]:
+    """Generate 75 realistic 5-min candles (09:15–15:25 IST) for a trading day."""
+    seed = hash(f"{symbol}{date_str}") % (2 ** 31)
+    rng = random.Random(seed)
+
+    base = _INTRADAY_BASE.get(symbol, 500.0) * rng.uniform(0.88, 1.12)
+    gap_pct = rng.uniform(-0.010, 0.015)
+    trend_dir = rng.choice([-1, 1, 1])
+    trend_str = rng.uniform(0.0015, 0.0045)
+    vol_mult = rng.uniform(0.7, 1.6)
+
+    date = datetime.strptime(date_str, "%Y-%m-%d")
+    market_open_ist = datetime(date.year, date.month, date.day, 9, 15, tzinfo=IST)
+
+    price = round(base * (1 + gap_pct), 2)
+    candles = []
+
+    for i in range(75):
+        candle_time = market_open_ist + timedelta(minutes=5 * i)
+        ts = int(candle_time.timestamp())
+
+        # Volume envelope: spike at open, dip at midday, spike at close
+        if i < 6:       vol = int(500_000 * vol_mult * rng.uniform(2.5, 4.0))
+        elif i < 18:    vol = int(500_000 * vol_mult * rng.uniform(1.2, 2.0))
+        elif i < 48:    vol = int(500_000 * vol_mult * rng.uniform(0.5, 1.0))
+        elif i < 60:    vol = int(500_000 * vol_mult * rng.uniform(0.9, 1.4))
+        else:           vol = int(500_000 * vol_mult * rng.uniform(1.8, 3.2))
+
+        # Price walk
+        trend = trend_dir * trend_str * (1 - abs(i - 38) / 75)
+        noise = rng.gauss(0, 0.0028)
+        if i == 6:   noise += rng.uniform(-0.006, 0.006)   # post-open reversal
+        if i == 42:  noise += trend_dir * 0.005             # afternoon momentum burst
+        if i >= 66:  noise += rng.uniform(-0.004, 0.004)   # closing volatility
+
+        close = round(price * (1 + trend + noise), 2)
+        open_ = round(price * rng.uniform(0.9992, 1.0008), 2)
+        high  = round(max(open_, close) * rng.uniform(1.0005, 1.006), 2)
+        low   = round(min(open_, close) * rng.uniform(0.994, 0.9995), 2)
+
+        candles.append({
+            "time":      candle_time.strftime("%H:%M"),
+            "timestamp": ts,
+            "open":  open_,
+            "high":  high,
+            "low":   low,
+            "close": close,
+            "volume": vol,
+        })
+        price = close
+
+    return candles
+
+
+def _intraday_indicators(candles: list[dict], idx: int) -> dict:
+    """Compute VWAP, SMAs, RSI, momentum up to candle idx."""
+    window = candles[:idx + 1]
+    closes = [c["close"] for c in window]
+    vols   = [c["volume"] for c in window]
+    n = len(closes)
+
+    # VWAP
+    tp_sum = sum(
+        ((c["high"] + c["low"] + c["close"]) / 3) * c["volume"]
+        for c in window
+    )
+    vwap = tp_sum / max(sum(vols), 1)
+
+    sma5  = sum(closes[-5:])  / min(5,  n)
+    sma20 = sum(closes[-20:]) / min(20, n)
+
+    # RSI — Wilder's EMA (same formula as TechnicalAgent / MeanRevAgent so the
+    # timing signal and ensemble agents agree on whether price is oversold/overbought)
+    period = 14
+    if n >= period + 1:
+        deltas = [closes[i] - closes[i - 1] for i in range(1, n)]
+        g_vals = [d if d > 0 else 0.0 for d in deltas]
+        l_vals = [-d if d < 0 else 0.0 for d in deltas]
+        ag = sum(g_vals[:period]) / period
+        al = sum(l_vals[:period]) / period
+        for i in range(period, len(deltas)):
+            ag = (ag * (period - 1) + g_vals[i]) / period
+            al = (al * (period - 1) + l_vals[i]) / period
+        rsi = 100.0 if al == 0 else 100.0 - 100.0 / (1.0 + ag / al)
+    else:
+        rsi = 50.0
+
+    mom5 = (closes[-1] / closes[-5] - 1) * 100 if n >= 5 else 0.0
+    avg_vol = sum(vols) / n
+    vol_ratio = vols[-1] / max(avg_vol, 1)
+
+    # Intraday ATR (avg true range over the last 14 bars) — used to size stops
+    # and targets to the stock's own volatility instead of fixed percentages.
+    if n >= 2:
+        highs = [c["high"] for c in window]
+        lows  = [c["low"] for c in window]
+        trs = [max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
+               for i in range(max(1, n - 14), n)]
+        atr = sum(trs) / len(trs) if trs else 0.0
+    else:
+        atr = 0.0
+
+    return {
+        "vwap":      round(vwap, 2),
+        "sma5":      round(sma5, 2),
+        "sma20":     round(sma20, 2),
+        "rsi":       round(rsi, 1),
+        "mom5":      round(mom5, 3),
+        "atr":       round(atr, 4),
+        "vol_ratio": round(vol_ratio, 2),
+        "above_vwap": closes[-1] > vwap,
+    }
+
+
+def _tech_signal(ind: dict, position: str, candle: dict, entry_price: float, aggressive: bool = False) -> int:
+    """1 = buy, -1 = sell, 0 = hold based on technicals.
+
+    Entries are trend-filtered (no counter-trend knife-catching); exits are
+    volatility-scaled (ATR) with a profit-lock so winners are allowed to run
+    while bad entries are cut quickly — the realised reward:risk that fixed
+    +2.5%/-1.5% with eager momentum exits was giving away.
+
+    `aggressive=True` loosens the entry triggers (wider RSI bands, lower momentum
+    thresholds, milder downtrend filter) so a session takes more trades — useful
+    for observing/training. Exits are unchanged.
+    """
+    rsi, mom5 = ind["rsi"], ind["mom5"]
+    price = candle["close"]
+    vwap, sma5, sma20 = ind["vwap"], ind["sma5"], ind["sma20"]
+    atr = ind.get("atr", 0.0)
+    atr_pct = max(0.5, min(2.5, (atr / price * 100) if price else 0.8))  # bound to sane range
+
+    try:
+        h, m = int(candle["time"].split(":")[0]), int(candle["time"].split(":")[1])
+    except (KeyError, ValueError, IndexError):
+        h, m = 0, 0  # safe fallback — never force-close
+
+    # Force square-off ≥ 14:45
+    if position == "LONG" and (h > 14 or (h == 14 and m >= 45)):
+        return -1
+
+    if position == "NONE":
+        if aggressive:
+            # Looser bar: only veto strong downtrends; wider RSI/momentum bands.
+            if sma5 < sma20 and mom5 < -0.30:
+                return 0
+            if rsi < 48 and price >= vwap * 0.995 and mom5 > -0.10:   return 1   # dip near VWAP
+            if sma5 >= sma20 and mom5 > 0.05 and rsi < 72:            return 1   # trend continuation
+            if mom5 > 0.12 and price > vwap * 0.998 and rsi < 74:     return 1   # momentum
+            return 0
+        # Trend filter: skip entries while clearly trending down (don't catch
+        # falling knives). VWAP + RSI still gate the individual triggers.
+        downtrend = sma5 < sma20 and mom5 < -0.10
+        if downtrend:
+            return 0
+        if rsi < 38 and price >= vwap and mom5 > 0:          return 1   # oversold bounce off support
+        if sma5 >= sma20 and mom5 > 0.18 and rsi < 62:       return 1   # trend continuation
+        if mom5 > 0.35 and price > vwap and rsi < 66:        return 1   # momentum breakout
+    elif position == "LONG":
+        gain_pct = (price - entry_price) / entry_price * 100
+        stop = -max(1.0, 0.9 * atr_pct)        # ~1×ATR, floor 1.0%
+        take = max(2.5, 1.8 * atr_pct)         # let winners run, scaled to volatility
+
+        if gain_pct <= stop:                   return -1   # volatility-scaled stop loss
+        if gain_pct >= take:                   return -1   # take profit (runs further than before)
+        # Profit-lock: once up ≥1.2%, exit if price loses the 5-bar MA (trail) —
+        # protects gains without bailing on every momentum wiggle.
+        if gain_pct >= 1.2 and price < sma5:   return -1
+        # Cut bad entries fast — but only while still ~flat, never on a winner.
+        if gain_pct < 0.5:
+            if sma5 < sma20 and mom5 < -0.15:  return -1
+            if mom5 < -0.30:                   return -1
+        # Overbought, but only when momentum has already turned down.
+        if rsi > 75 and mom5 < 0:              return -1
+
+    return 0
+
+
+async def _llm_decide(
+    symbol: str, date: str, candle: dict, ind: dict,
+    position: str, entry_price: float, unrealised: float,
+    cash: float, signal_hint: int, recent: list[dict], model: str,
+) -> dict:
+    """Call LLM for a trading decision; fall back to rule-based if LLM fails."""
+    max_qty = max(1, int(cash * 0.95 / candle["close"])) if position == "NONE" else 0
+    hint_txt = {1: "BUY SIGNAL", -1: "SELL SIGNAL", 0: "HOLD"}.get(signal_hint, "HOLD")
+    pos_txt = f"LONG at ₹{entry_price:.2f} (P&L: ₹{unrealised:+.2f})" if position == "LONG" else "NONE (cash)"
+    recent_str = "\n".join(
+        f"  {c['time']}: O:{c['open']} H:{c['high']} L:{c['low']} C:{c['close']} V:{c['volume']:,}"
+        for c in recent[-6:]
+    )
+
+    prompt = f"""You are an AI day trader on the NSE, India.
+Stock: {symbol} | Date: {date} | Time: {candle['time']} IST
+
+Current 5-min candle: O:{candle['open']} H:{candle['high']} L:{candle['low']} C:{candle['close']}
+Recent candles:
+{recent_str}
+
+Indicators:
+- VWAP: ₹{ind['vwap']} | Price {'above' if ind['above_vwap'] else 'below'} VWAP
+- SMA5: ₹{ind['sma5']} | SMA20: ₹{ind['sma20']}
+- RSI(14): {ind['rsi']} | 5-candle momentum: {ind['mom5']:+.2f}%
+- Volume ratio vs avg: {ind['vol_ratio']}x
+
+Technical system: {hint_txt}
+Current position: {pos_txt}
+Available capital: ₹{cash:.0f} | Max qty: {max_qty}
+
+Rules: Day trading only (square off by 14:45 IST). One position at a time.
+
+Respond in JSON only:
+{{"action":"BUY"|"SELL"|"HOLD","confidence":50-95,"quantity":{max_qty if position=="NONE" else 0},"reason":"1-2 sentences"}}"""
+
+    try:
+        import ollama as ollama_lib
+        llm_url = getattr(settings, "LLM_API_URL", "http://host.docker.internal:11434")
+        client = ollama_lib.AsyncClient(host=llm_url)
+        resp = await asyncio.wait_for(
+            client.chat(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                options={"temperature": 0.25},
+            ),
+            timeout=15.0,
+        )
+        raw = resp["message"]["content"].strip()
+        match = re.search(r"\{.*?\}", raw, re.DOTALL)
+        if match:
+            parsed = json.loads(match.group())
+            action = parsed.get("action", "HOLD").upper()
+            if action not in ("BUY", "SELL", "HOLD"):
+                action = "HOLD"
+            return {
+                "action":     action,
+                "confidence": int(parsed.get("confidence", 65)),
+                "quantity":   int(parsed.get("quantity", max_qty if action == "BUY" else 0)),
+                "reason":     str(parsed.get("reason", "Technical signal.")),
+            }
+    except Exception as exc:
+        logger.warning(
+            "LLM day-trade decision failed, using rule-based fallback",
+            extra={"log_type": "backtest_event", "event": "llm_fallback", "error": str(exc)},
+        )
+
+    # Rule-based fallback
+    action = {1: "BUY", -1: "SELL", 0: "HOLD"}.get(signal_hint, "HOLD")
+    reasons = {
+        "BUY":  f"RSI {ind['rsi']:.0f} oversold; price {'above' if ind['above_vwap'] else 'near'} VWAP with positive momentum.",
+        "SELL": f"RSI {ind['rsi']:.0f}; momentum {ind['mom5']:+.2f}% — taking profit/cutting loss.",
+        "HOLD": "No clear entry signal; waiting for confirmation.",
+    }
+    return {"action": action, "confidence": 62, "quantity": max_qty if action == "BUY" else 0, "reason": reasons[action]}
+
+
+class DayAutopilotRequest(BaseModel):
+    symbol:     str
+    date:       str    # YYYY-MM-DD
+    start_time: str = "09:15"   # IST HH:MM — AI watches from this time onwards
+    capital:    float = Field(default=50_000.0, ge=5_000, le=10_000_000)
+    model:      Optional[str] = None
+
+
+async def day_autopilot(req: DayAutopilotRequest) -> dict:
+    """AI-powered intraday day trading simulation for a single date."""
+    symbol = req.symbol.upper()
+    try:
+        req_date = datetime.strptime(req.date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(400, "date must be YYYY-MM-DD")
+    today_ist = datetime.now(IST).date()
+    if req_date >= today_ist:
+        raise HTTPException(400, "date must be a past trading day — historical data is not available for today or future dates")
+
+    # Fetch real intraday data or simulate
+    from app.data.providers import fetch_intraday
+    candles, data_source = await fetch_intraday(symbol, req.date, 5)
+    if not candles:
+        candles = _simulate_intraday_5min(symbol, req.date)
+        data_source = "simulated"
+
+    # ── Start time → candle index ─────────────────────────────────────────────
+    try:
+        sh, sm = map(int, req.start_time.split(":"))
+    except Exception:
+        logger.debug("Could not parse start_time %r, defaulting to market open", req.start_time, exc_info=True)
+        sh, sm = 9, 15
+    start_idx = max(0, ((sh * 60 + sm) - (9 * 60 + 15)) // 5)
+    start_idx = min(start_idx, len(candles) - 20)  # leave room for decisions
+
+    # ── Simulation ─────────────────────────────────────────────────────────────
+    model   = req.model or getattr(settings, "LLM_MODEL", "llama3.2")
+    capital = req.capital
+    cash    = capital
+    position   = "NONE"
+    entry_price = 0.0
+    qty         = 0
+    trades: list[dict] = []
+
+    # Decision points: every 3 candles (15 min), starting from start_idx
+    decision_pts = list(range(max(start_idx, 3), len(candles) - 1, 3))
+
+    for idx in decision_pts:
+        candle = candles[idx]
+        ind    = _intraday_indicators(candles, idx)
+        signal = _tech_signal(ind, position, candle, entry_price)
+
+        # Skip non-events
+        if signal == 0 and position == "NONE":   continue
+        if signal == 1 and position == "LONG":   continue
+        if signal == -1 and position == "NONE":  continue
+
+        unrealised = (candle["close"] - entry_price) * qty if position == "LONG" else 0.0
+        dec = await _llm_decide(
+            symbol, req.date, candle, ind,
+            position, entry_price, unrealised,
+            cash, signal, candles[max(0, idx - 5):idx + 1], model,
+        )
+
+        action = dec["action"]
+
+        # Pattern-quality gate: in backtesting we only enter A-grade patterns, so
+        # the memory/ensemble learn from good setups instead of churning losers.
+        if action == "BUY" and position == "NONE":
+            try:
+                from app.agents import get_pattern_engine
+                from app.agents.pattern_engine import grade_rank
+                psig = await get_pattern_engine().signal(candles[:idx + 1], symbol)
+                min_grade = os.getenv("PATTERN_MIN_GRADE_BACKTEST", "A").upper()
+                if psig.get("ok") and grade_rank(psig["grade"]) > grade_rank(min_grade):
+                    action = "HOLD"
+            except Exception as exc:
+                logger.debug("backtest pattern gate skipped: %s", exc)
+
+        if action == "BUY" and position == "NONE":
+            qty  = max(1, int(cash * 0.95 / candle["close"]))
+            cost = qty * candle["close"]
+            if cost <= cash:
+                cash -= cost
+                position    = "LONG"
+                entry_price = candle["close"]
+                trades.append({
+                    "time":       candle["time"],
+                    "timestamp":  candle["timestamp"],
+                    "action":     "BUY",
+                    "price":      candle["close"],
+                    "quantity":   qty,
+                    "confidence": dec["confidence"],
+                    "reason":     dec["reason"],
+                    "pnl":        None,
+                    "pnl_pct":    None,
+                    "candle_index": idx,
+                    "indicators": ind,
+                })
+
+        elif action == "SELL" and position == "LONG":
+            revenue = qty * candle["close"]
+            pnl     = revenue - qty * entry_price
+            cash   += revenue
+            trades.append({
+                "time":       candle["time"],
+                "timestamp":  candle["timestamp"],
+                "action":     "SELL",
+                "price":      candle["close"],
+                "quantity":   qty,
+                "confidence": dec["confidence"],
+                "reason":     dec["reason"],
+                "pnl":        round(pnl, 2),
+                "pnl_pct":    round(pnl / (qty * entry_price) * 100, 2),
+                "candle_index": idx,
+                "indicators": ind,
+            })
+            position    = "NONE"
+            qty         = 0
+            entry_price = 0.0
+
+    # Force close at end of day
+    if position == "LONG":
+        last    = candles[-1]
+        revenue = qty * last["close"]
+        pnl     = revenue - qty * entry_price
+        cash   += revenue
+        trades.append({
+            "time":       last["time"],
+            "timestamp":  last["timestamp"],
+            "action":     "SELL",
+            "price":      last["close"],
+            "quantity":   qty,
+            "confidence": 99,
+            "reason":     "Market close — all positions squared off automatically.",
+            "pnl":        round(pnl, 2),
+            "pnl_pct":    round(pnl / (qty * entry_price) * 100, 2),
+            "candle_index": len(candles) - 1,
+            "indicators": {},
+        })
+
+    final_capital = cash
+    total_pnl     = round(final_capital - capital, 2)
+    sell_trades   = [t for t in trades if t["action"] == "SELL"]
+    wins          = [t for t in sell_trades if (t.get("pnl") or 0) > 0]
+    losses        = [t for t in sell_trades if (t.get("pnl") or 0) <= 0]
+
+    logger.info(
+        "Day autopilot simulation completed",
+        extra={
+            "log_type": "backtest_event",
+            "event": "autopilot_complete",
+            "symbol": symbol,
+            "date": req.date,
+            "data_source": data_source,
+            "model_used": model,
+            "capital": capital,
+            "total_pnl": total_pnl,
+            "total_pnl_pct": round(total_pnl / capital * 100, 2),
+            "total_trades": len(sell_trades),
+            "winning_trades": len(wins),
+            "losing_trades": len(losses),
+        },
+    )
+
+    # Persist completed sell trades (round trips) to Orders page
+    _ap_records = []
+    buy_map: dict[str, dict] = {}
+    for t in trades:
+        if t["action"] == "BUY":
+            buy_map["current"] = t
+        elif t["action"] == "SELL" and t.get("pnl") is not None:
+            buy_t = buy_map.pop("current", None)
+            entry_price = buy_t["price"] if buy_t else t["price"]
+            entry_time_str = buy_t["time"] if buy_t else t["time"]
+            entry_dt = datetime.strptime(f"{req.date} {entry_time_str}", "%Y-%m-%d %H:%M").replace(tzinfo=IST)
+            exit_dt  = datetime.strptime(f"{req.date} {t['time']}", "%Y-%m-%d %H:%M").replace(tzinfo=IST)
+            dur = int((exit_dt - entry_dt).total_seconds() / 60)
+            ind = t.get("indicators", {})
+            _ap_records.append(_build_trade_record(
+                symbol=symbol,
+                action="BUY",
+                entry_price=entry_price,
+                exit_price=t["price"],
+                pnl_abs=t["pnl"],
+                pnl_pct_decimal=t["pnl_pct"] / 100.0,
+                timestamp_open=entry_dt.isoformat(),
+                timestamp_close=exit_dt.isoformat(),
+                duration_minutes=dur,
+                agent_signals=_derive_agent_signals("BUY", ind),
+                market_context={"atr": ind.get("vwap", entry_price) * 0.008, "regime": "intraday", "data_source": data_source, "vwap": ind.get("vwap"), "rsi": ind.get("rsi")},
+                confidence=t.get("confidence", 70) / 100.0,
+            ))
+    asyncio.create_task(_save_backtest_trades(_ap_records))
+
+    return {
+        "status": "success",
+        "data": {
+            "symbol":        symbol,
+            "date":          req.date,
+            "capital":       capital,
+            "candles":       candles,
+
+            "trades":        trades,
+            "metrics": {
+                "total_pnl":       total_pnl,
+                "total_pnl_pct":   round(total_pnl / capital * 100, 2),
+                "final_capital":   round(final_capital, 2),
+                "total_trades":    len(sell_trades),
+                "winning_trades":  len(wins),
+                "losing_trades":   len(losses),
+                "gross_profit":    round(sum(t["pnl"] for t in wins), 2),
+                "gross_loss":      round(abs(sum(t["pnl"] for t in losses)), 2),
+            },
+            "start_candle_index": start_idx,
+            "start_time":        req.start_time,
+            "data_source":       data_source,
+            "model_used":        model,
+            "generated_at":      datetime.now().isoformat(),
+        },
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PROGRESSIVE AUTOPILOT — candles + per-step agent decisions (no lookahead)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _no_real_intraday_msg(symbol: str, date: str) -> str:
+    return (
+        f"No real intraday data for {symbol} on {date} from any provider "
+        f"(Groww / Yahoo / Alpha Vantage). This is usually a market holiday or a date "
+        f"outside the providers' intraday history. Pick a recent weekday — e.g. the last "
+        f"few trading days — or try a more liquid stock."
+    )
+
+
+async def get_intraday_candles(symbol: str, date: str, real_only: bool) -> dict:
+    """Return all 5-min candles for one trading day (Groww or simulated).
+    No LLM involved — the frontend drives the progressive replay.
+    With real_only=true the endpoint refuses to simulate."""
+    symbol = symbol.upper()
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(400, "date must be YYYY-MM-DD")
+
+    # Try every configured provider (Groww → Yahoo → Alpha Vantage)
+    from app.data.providers import fetch_intraday
+    candles, data_source = await fetch_intraday(symbol, date, 5)
+
+    if not candles:
+        if real_only:
+            raise HTTPException(422, _no_real_intraday_msg(symbol, date))
+        candles = _simulate_intraday_5min(symbol, date)
+        data_source = "simulated"
+
+    return {
+        "status": "success",
+        "data": {
+            "symbol":        symbol,
+            "date":          date,
+            "candles":       candles,
+            "data_source":   data_source,
+            "total_candles": len(candles),
+        },
+    }
+
+
+class AgentStepRequest(BaseModel):
+    symbol:      str
+    date:        str
+    candles:     list[dict]   # ALL candles seen so far — no future data
+    position:    str = "NONE" # "NONE" or "LONG"
+    entry_price: float = 0.0
+    entry_time:  str = ""
+    entry_qty:   int = 0
+    capital:     float = 50_000.0
+    model:       Optional[str] = None
+
+
+async def agent_step(req: AgentStepRequest) -> dict:
+    """Single LLM decision step using only the candles seen so far.
+    The agent has zero lookahead — it cannot see future price data."""
+    if not req.candles:
+        raise HTTPException(400, "candles list is empty")
+
+    symbol  = req.symbol.upper()
+    candles = req.candles
+    idx     = len(candles) - 1
+    candle  = candles[idx]
+
+    ind    = _intraday_indicators(candles, idx)
+    signal = _tech_signal(ind, req.position, candle, req.entry_price)
+
+    # Fast-path: skip LLM for unambiguous no-ops
+    if (
+        (signal == 0  and req.position == "NONE") or   # no signal, nothing to do
+        (signal == 1  and req.position == "LONG") or   # buy signal but already holding
+        (signal == -1 and req.position == "NONE")      # sell signal but no position
+    ):
+        return {
+            "status": "success",
+            "data": {
+                "action": "HOLD", "confidence": 50, "quantity": 0,
+                "reason": "No actionable signal at this candle.",
+                "indicators": ind, "candle_index": idx,
+                "candle_time": candle.get("time", ""), "price": candle["close"],
+                "signal_hint": "HOLD",
+            },
+        }
+
+    model      = req.model or getattr(settings, "LLM_MODEL", "llama3.2")
+    unrealised = (
+        (candle["close"] - req.entry_price) * req.entry_qty
+        if req.position == "LONG" else 0.0
+    )
+    recent = candles[max(0, idx - 5): idx + 1]
+
+    dec = await _llm_decide(
+        symbol, req.date, candle, ind,
+        req.position, req.entry_price, unrealised,
+        req.capital, signal, recent, model,
+    )
+
+    return {
+        "status": "success",
+        "data": {
+            "action":      dec["action"],
+            "confidence":  dec["confidence"],
+            "quantity":    dec["quantity"],
+            "reason":      dec["reason"],
+            "indicators":  ind,
+            "candle_index": idx,
+            "candle_time":  candle.get("time", ""),
+            "price":        candle["close"],
+            "signal_hint":  {1: "BUY", -1: "SELL", 0: "HOLD"}.get(signal, "HOLD"),
+        },
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PROGRESSIVE BACKTEST — stateless, fresh Groww fetch every step
+#  Client holds session state (cash, position, trades) and passes it each call.
+#  Server fetches candles from market open up to current_time on every request.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_MARKET_OPEN_MINUTES = 9 * 60 + 15   # 09:15
+_SQUAREOFF_MINUTES   = 15 * 60 + 25  # 15:25 — last candle, force close
+
+
+def _time_to_minutes(hhmm: str) -> int:
+    try:
+        h, m = map(int, hhmm.split(":"))
+        return h * 60 + m
+    except Exception:
+        logger.debug("Could not parse time %r, defaulting to market open", hhmm, exc_info=True)
+        return _MARKET_OPEN_MINUTES
+
+
+def _minutes_to_time(minutes: int) -> str:
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+async def _fetch_candles_up_to(symbol: str, date_str: str, up_to_time: str) -> tuple[list[dict], str]:
+    """Fetch 5-min candles from market open up to up_to_time (HH:MM inclusive)."""
+    up_to_minutes = _time_to_minutes(up_to_time)
+
+    # Try every configured provider (Groww → Yahoo → Alpha Vantage), then slice
+    from app.data.providers import fetch_intraday
+    candles, source = await fetch_intraday(symbol, date_str, 5)
+    if candles:
+        sliced = [c for c in candles if _time_to_minutes(c["time"]) <= up_to_minutes]
+        if sliced:
+            return sliced, source
+
+    all_candles = _simulate_intraday_5min(symbol, date_str)
+    sliced = [c for c in all_candles if _time_to_minutes(c["time"]) <= up_to_minutes]
+    return (sliced if sliced else all_candles[:1]), "simulated"
+
+
+def _prev_trading_day(d: datetime) -> datetime:
+    """Return the most recent weekday (Mon–Fri) strictly before d."""
+    prev = d - timedelta(days=1)
+    while prev.weekday() >= 5:   # Saturday=5, Sunday=6
+        prev -= timedelta(days=1)
+    return prev
+
+
+async def _fetch_full_day_candles(symbol: str, date_str: str, bar_seconds: int = 60) -> tuple[list[dict], str]:
+    """Complete trading-day candles for a date.
+
+    Reads OUR OWN 1-second tick-store dataset FIRST (resampled to `bar_seconds`),
+    which is real data captured live — then falls back to the historical provider
+    only when the store has no coverage for that symbol/day. Returns (candles,
+    source); empty list + 'none' on total failure.
+    """
+    # 1) Prefer the captured 1s tick dataset (resample to the requested bar size).
+    try:
+        from app.data.candle_store import read_bars
+        bars = read_bars(symbol, date_str, bar_seconds)
+        if len(bars) >= 30:                      # enough of a day to be useful
+            return bars, "tickstore"
+    except Exception:
+        logger.debug("Tick-store read failed for %s %s, falling back to provider", symbol, date_str, exc_info=True)
+    # 2) Fall back to the historical provider (1-min floor; we request 5-min bars).
+    try:
+        from app.data.providers import fetch_intraday
+        candles, source = await fetch_intraday(symbol, date_str, 5)
+        if source == "simulated" or not candles:
+            return [], "none"
+        return candles, source
+    except Exception:
+        logger.warning("Full-day candle provider fetch failed for %s %s", symbol, date_str, exc_info=True)
+        return [], "none"
+
+
+def _compute_metrics(cash: float, capital: float, trades: list[dict]) -> dict:
+    sell_trades = [t for t in trades if t["action"] == "SELL"]
+    wins   = [t for t in sell_trades if (t.get("pnl") or 0) > 0]
+    losses = [t for t in sell_trades if (t.get("pnl") or 0) <= 0]
+    total_pnl = round(cash - capital, 2)
+    return {
+        "total_pnl":      total_pnl,
+        "total_pnl_pct":  round(total_pnl / capital * 100, 2) if capital else 0,
+        "final_capital":  round(cash, 2),
+        "total_trades":   len(sell_trades),
+        "winning_trades": len(wins),
+        "losing_trades":  len(losses),
+        "gross_profit":   round(sum(t["pnl"] for t in wins), 2),
+        "gross_loss":     round(abs(sum(t["pnl"] for t in losses)), 2),
+    }
+
+
+class ProgressiveStartRequest(BaseModel):
+    symbol:     str
+    date:       str
+    start_time: str = "09:15"
+    capital:    float = Field(default=50_000.0, ge=5_000, le=10_000_000)
+    model:      Optional[str] = None
+    real_only:  bool = False     # refuse to simulate when Groww has no data
+
+
+class ProgressiveStepRequest(BaseModel):
+    symbol:       str
+    date:         str
+    current_time: str            # HH:MM — the last candle time the client already has
+    capital:      float
+    cash:         float
+    position:     str = "NONE"
+    quantity:     int = 0
+    entry_price:  float = 0.0
+    entry_time:   Optional[str] = None
+    trades:       list[dict] = []
+    model:        Optional[str] = None
+    real_only:    bool = False
+    session_id:   Optional[str] = None  # if provided, server fetches authoritative state from Redis
+
+
+async def progressive_start(req: ProgressiveStartRequest) -> dict:
+    """Start a progressive backtest session.
+
+    Fetches all 5-min candles from market open to start_time, runs the AI agent
+    on the last candle, optionally executes the first trade, and returns the
+    initial session state the client must persist and pass back each step.
+    """
+    symbol = req.symbol.upper()
+    try:
+        req_date = datetime.strptime(req.date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(400, "date must be YYYY-MM-DD")
+
+    today_ist = datetime.now(IST).date()
+    if req_date >= today_ist:
+        raise HTTPException(
+            400,
+            f"Historical data is only available for completed past trading days. "
+            f"Please select a past date (last trading day: {today_ist - timedelta(days=1 if today_ist.weekday() > 0 else 3)})."
+        )
+    if req_date.weekday() >= 5:
+        raise HTTPException(400, "Selected date is a weekend. Please pick a weekday (Mon–Fri).")
+
+    start_minutes = max(_MARKET_OPEN_MINUTES, min(_time_to_minutes(req.start_time), _SQUAREOFF_MINUTES))
+    start_time_str = _minutes_to_time(start_minutes)
+
+    candles, data_source = await _fetch_candles_up_to(symbol, req.date, start_time_str)
+    if not candles:
+        raise HTTPException(500, "Could not fetch candle data")
+    if req.real_only and data_source in ("simulated", "none"):
+        raise HTTPException(422, _no_real_intraday_msg(symbol, req.date))
+
+    # Fetch previous trading day's full candles for background chart display only.
+    # Failures are silent — an empty list is fine.
+    prev_date_str = _prev_trading_day(datetime.strptime(req.date, "%Y-%m-%d")).strftime("%Y-%m-%d")
+    prev_day_candles, _ = await _fetch_full_day_candles(symbol, prev_date_str)
+
+    model = req.model or getattr(settings, "LLM_MODEL", "llama3.2")
+    idx    = len(candles) - 1
+    candle = candles[idx]
+    ind    = _intraday_indicators(candles, idx)
+    signal = _tech_signal(ind, "NONE", candle, 0.0)
+
+    dec = await _llm_decide(
+        symbol, req.date, candle, ind,
+        "NONE", 0.0, 0.0,
+        req.capital, signal,
+        candles[max(0, idx - 5):idx + 1], model,
+    )
+
+    cash        = req.capital
+    position    = "NONE"
+    quantity    = 0
+    entry_price = 0.0
+    entry_time  = None
+    trades: list[dict] = []
+    trade_executed = None
+
+    if dec["action"] == "BUY":
+        qty  = dec.get("quantity") or max(1, int(cash * 0.95 / candle["close"]))
+        cost = qty * candle["close"]
+        if cost <= cash:
+            cash       -= cost
+            position    = "LONG"
+            quantity    = qty
+            entry_price = candle["close"]
+            entry_time  = candle["time"]
+            trade_executed = {"action": "BUY", "price": candle["close"], "quantity": qty, "pnl": None, "time": candle["time"]}
+            trades.append({
+                "time": candle["time"], "timestamp": candle.get("timestamp", 0),
+                "action": "BUY", "price": candle["close"], "quantity": qty,
+                "confidence": dec["confidence"], "reason": dec["reason"],
+                "pnl": None, "pnl_pct": None, "candle_index": idx, "indicators": ind,
+            })
+
+    next_minutes    = start_minutes + 5
+    is_market_closed = next_minutes >= _SQUAREOFF_MINUTES
+    next_time       = _minutes_to_time(next_minutes) if not is_market_closed else "market_closed"
+
+    logger.info(
+        "Progressive backtest started",
+        extra={
+            "log_type": "backtest_event", "event": "progressive_start",
+            "symbol": symbol, "date": req.date, "start_time": start_time_str,
+            "capital": req.capital, "candles_fetched": len(candles),
+            "data_source": data_source, "agent_action": dec["action"],
+        },
+    )
+
+    prog_session_id = uuid.uuid4().hex[:16]
+    _prog_state = {
+        "capital": req.capital, "cash": round(cash, 2),
+        "position": position, "quantity": quantity,
+        "entry_price": entry_price, "entry_time": entry_time,
+        "trades": trades, "model": model,
+        "symbol": symbol, "date": req.date,
+    }
+    try:
+        from app.utils.redis_client import cache_set
+        await cache_set(f"prog_session:{prog_session_id}", json.dumps(_prog_state), ex=7200)
+    except Exception:
+        logger.warning("Could not persist progressive backtest session %s to redis", prog_session_id, exc_info=True)
+
+    return {
+        "status": "success",
+        "data": {
+            "symbol":         symbol,
+            "date":           req.date,
+            "current_time":   start_time_str,
+            "candles":        candles,
+            "latest_candle":  candle,
+            "indicators":     ind,
+            "agent_decision": dec,
+            "trade_executed": trade_executed,
+            "position": {
+                "status":      position,
+                "entry_price": entry_price,
+                "quantity":    quantity,
+                "entry_time":  entry_time,
+                "current_pnl": 0.0,
+            },
+            "cash":            round(cash, 2),
+            "capital":         req.capital,
+            "trades":          trades,
+            "metrics":         _compute_metrics(cash, req.capital, trades),
+            "is_market_closed": is_market_closed,
+            "next_time":       next_time,
+            "data_source":      data_source,
+            "model_used":       model,
+            "prev_day_candles": prev_day_candles,
+            "prev_day_date":    prev_date_str,
+            "session_id":       prog_session_id,
+        },
+    }
+
+
+async def progressive_step(req: ProgressiveStepRequest) -> dict:
+    """Advance the progressive backtest by one 5-min candle.
+
+    The client passes its full session state (cash, position, trades, etc.).
+    The server fetches fresh candles from Groww from market open up to the
+    next candle time, runs the AI agent, executes any trade, and returns the
+    updated state the client should persist for the following step.
+    """
+    symbol = req.symbol.upper()
+    try:
+        datetime.strptime(req.date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(400, "date must be YYYY-MM-DD")
+
+    current_minutes = _time_to_minutes(req.current_time)
+    next_minutes    = current_minutes + 5
+    next_time_str   = _minutes_to_time(next_minutes)
+    is_market_closed = next_minutes >= _SQUAREOFF_MINUTES
+
+    candles, data_source = await _fetch_candles_up_to(symbol, req.date, next_time_str)
+    if not candles:
+        raise HTTPException(500, "Could not fetch candle data")
+    if req.real_only and data_source in ("simulated", "none"):
+        raise HTTPException(422, _no_real_intraday_msg(symbol, req.date))
+
+    model       = req.model or getattr(settings, "LLM_MODEL", "llama3.2")
+
+    # Prefer server-side authoritative state over client-supplied values
+    if req.session_id:
+        try:
+            from app.utils.redis_client import cache_get
+            raw = await cache_get(f"prog_session:{req.session_id}")
+            if not raw:
+                raise HTTPException(400, "Progressive session not found or expired — please restart")
+            srv = json.loads(raw)
+            cash        = srv["cash"]
+            position    = srv["position"]
+            quantity    = srv["quantity"]
+            entry_price = srv["entry_price"]
+            entry_time  = srv.get("entry_time")
+            trades      = list(srv.get("trades", []))
+            model       = srv.get("model") or model
+        except HTTPException:
+            raise
+        except Exception:
+            # Redis unavailable — fall back to client state
+            logger.warning(
+                "Could not load progressive backtest session %s from redis, falling back to client state",
+                req.session_id, exc_info=True,
+            )
+            cash        = req.cash
+            position    = req.position
+            quantity    = req.quantity
+            entry_price = req.entry_price
+            entry_time  = req.entry_time
+            trades      = list(req.trades)
+    else:
+        cash        = req.cash
+        position    = req.position
+        quantity    = req.quantity
+        entry_price = req.entry_price
+        entry_time  = req.entry_time
+        trades      = list(req.trades)
+
+    idx    = len(candles) - 1
+    candle = candles[idx]
+    ind    = _intraday_indicators(candles, idx)
+
+    force_squareoff = is_market_closed and position == "LONG"
+    signal = -1 if force_squareoff else _tech_signal(ind, position, candle, entry_price)
+
+    unrealised = (candle["close"] - entry_price) * quantity if position == "LONG" else 0.0
+    dec = await _llm_decide(
+        symbol, req.date, candle, ind,
+        position, entry_price, unrealised,
+        cash, signal,
+        candles[max(0, idx - 5):idx + 1], model,
+    )
+
+    if force_squareoff:
+        dec["action"]     = "SELL"
+        dec["reason"]     = "Market close — all positions squared off automatically."
+        dec["confidence"] = 99
+
+    trade_executed = None
+
+    # Pattern-quality gate — backtesting only enters A-grade patterns.
+    if dec["action"] == "BUY" and position == "NONE":
+        try:
+            from app.agents import get_pattern_engine
+            from app.agents.pattern_engine import grade_rank
+            psig = await get_pattern_engine().signal(candles[:idx + 1], symbol)
+            min_grade = os.getenv("PATTERN_MIN_GRADE_BACKTEST", "A").upper()
+            if psig.get("ok") and grade_rank(psig["grade"]) > grade_rank(min_grade):
+                dec["action"] = "HOLD"
+                dec["reason"] = f"Pattern grade {psig['grade']} below required {min_grade} — no entry."
+        except Exception as exc:
+            logger.debug("backtest pattern gate skipped: %s", exc)
+
+    if dec["action"] == "BUY" and position == "NONE":
+        qty  = dec.get("quantity") or max(1, int(cash * 0.95 / candle["close"]))
+        cost = qty * candle["close"]
+        if cost <= cash:
+            cash       -= cost
+            position    = "LONG"
+            quantity    = qty
+            entry_price = candle["close"]
+            entry_time  = candle["time"]
+            trade_executed = {"action": "BUY", "price": candle["close"], "quantity": qty, "pnl": None, "time": candle["time"]}
+            trades.append({
+                "time": candle["time"], "timestamp": candle.get("timestamp", 0),
+                "action": "BUY", "price": candle["close"], "quantity": qty,
+                "confidence": dec["confidence"], "reason": dec["reason"],
+                "pnl": None, "pnl_pct": None, "candle_index": idx, "indicators": ind,
+            })
+
+    elif dec["action"] == "SELL" and position == "LONG":
+        revenue = quantity * candle["close"]
+        pnl     = revenue - quantity * entry_price
+        cash   += revenue
+        pnl_pct = round(pnl / (quantity * entry_price) * 100, 2) if entry_price > 0 else 0.0
+        trade_executed = {"action": "SELL", "price": candle["close"], "quantity": quantity, "pnl": round(pnl, 2), "time": candle["time"]}
+        trades.append({
+            "time": candle["time"], "timestamp": candle.get("timestamp", 0),
+            "action": "SELL", "price": candle["close"], "quantity": quantity,
+            "confidence": dec["confidence"], "reason": dec["reason"],
+            "pnl": round(pnl, 2), "pnl_pct": pnl_pct,
+            "candle_index": idx, "indicators": ind,
+        })
+        # Save this completed round-trip to the Orders page
+        try:
+            _open_time = entry_time or next_time_str
+            entry_dt = datetime.strptime(f"{req.date} {_open_time}", "%Y-%m-%d %H:%M").replace(tzinfo=IST)
+            exit_dt  = datetime.strptime(f"{req.date} {candle['time']}", "%Y-%m-%d %H:%M").replace(tzinfo=IST)
+            dur = int((exit_dt - entry_dt).total_seconds() / 60)
+            asyncio.create_task(_save_backtest_trades([_build_trade_record(
+                symbol=symbol,
+                action="BUY",
+                entry_price=entry_price,
+                exit_price=candle["close"],
+                pnl_abs=round(pnl, 2),
+                pnl_pct_decimal=pnl_pct / 100.0,
+                timestamp_open=entry_dt.isoformat(),
+                timestamp_close=exit_dt.isoformat(),
+                duration_minutes=dur,
+                agent_signals=_derive_agent_signals("BUY", ind),
+                market_context={"atr": ind.get("vwap", entry_price) * 0.008, "regime": "intraday", "vwap": ind.get("vwap"), "rsi": ind.get("rsi")},
+                confidence=dec["confidence"] / 100.0,
+            )]))
+        except Exception:
+            logger.exception("Failed to persist progressive-backtest round-trip trade for Orders page (symbol=%s)", symbol)
+        position    = "NONE"
+        quantity    = 0
+        entry_price = 0.0
+        entry_time  = None
+
+    current_pnl = (candle["close"] - entry_price) * quantity if position == "LONG" else 0.0
+
+    after_next_minutes = next_minutes + 5
+    next_next_time = (
+        _minutes_to_time(after_next_minutes)
+        if after_next_minutes < _SQUAREOFF_MINUTES
+        else "market_closed"
+    )
+
+    logger.info(
+        "Progressive step processed",
+        extra={
+            "log_type": "backtest_event", "event": "progressive_step",
+            "symbol": symbol, "date": req.date, "time": next_time_str,
+            "agent_action": dec["action"], "position": position,
+            "cash": round(cash, 2), "is_market_closed": is_market_closed,
+        },
+    )
+
+    # Persist updated server-side state
+    if req.session_id:
+        try:
+            from app.utils.redis_client import cache_set
+            _updated_state = {
+                "capital": req.capital, "cash": round(cash, 2),
+                "position": position, "quantity": quantity,
+                "entry_price": entry_price, "entry_time": entry_time,
+                "trades": trades, "model": model,
+                "symbol": symbol, "date": req.date,
+            }
+            await cache_set(f"prog_session:{req.session_id}", json.dumps(_updated_state), ex=7200)
+        except Exception:
+            logger.warning("Could not persist updated progressive backtest session %s to redis", req.session_id, exc_info=True)
+
+    return {
+        "status": "success",
+        "data": {
+            "symbol":         symbol,
+            "date":           req.date,
+            "current_time":   next_time_str,
+            "candles":        candles,
+            "latest_candle":  candle,
+            "indicators":     ind,
+            "agent_decision": dec,
+            "trade_executed": trade_executed,
+            "position": {
+                "status":      position,
+                "entry_price": entry_price,
+                "quantity":    quantity,
+                "entry_time":  entry_time,
+                "current_pnl": round(current_pnl, 2),
+            },
+            "cash":            round(cash, 2),
+            "capital":         req.capital,
+            "trades":          trades,
+            "metrics":         _compute_metrics(cash, req.capital, trades),
+            "is_market_closed": is_market_closed,
+            "next_time":       next_next_time,
+            "data_source":     data_source,
+            "model_used":      model,
+            "session_id":      req.session_id,
+        },
+    }

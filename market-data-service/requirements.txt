@@ -22,7 +22,7 @@ httpx==0.27.0
 yfinance==0.2.37
 
 # News
-requests==2.31.0
+requests==2.32.3
 
 # Timezone support
 tzdata==2024.1

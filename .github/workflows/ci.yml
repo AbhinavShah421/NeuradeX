@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: frontend (type-check + build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run type-check
+      - run: npm run build
+      - name: npm audit (report only, non-blocking)
+        run: npm audit --audit-level=high || true
+
+  python-syntax:
+    name: python syntax (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - backend
+          - autopilot-service
+          - ensemble-engine
+          - feedback-service
+          - groww-feed-service
+          - macro-agent
+          - market-data-service
+          - model-trainer
+          - pattern-agent
+          - rl-agent
+          - sentiment-agent
+          - sentiment-service
+          - stock-scanner
+          - technical-agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Sync shared modules are up to date
+        if: matrix.service == 'backend'
+        run: python3 scripts/sync_shared_python.py --check
+      - name: Compile-check every .py file (fast syntax gate, no deps installed)
+        run: |
+          cd ${{ matrix.service }}
+          find . -name '*.py' -not -path '*/node_modules/*' -print0 \
+            | xargs -0 python3 -m py_compile
+
+  java-compile:
+    name: java compile (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [risk-engine, trade-executor]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+      - name: Compile
+        working-directory: ${{ matrix.service }}
+        run: mvn -q -B compile
+      - name: Test
+        working-directory: ${{ matrix.service }}
+        run: mvn -q -B test
