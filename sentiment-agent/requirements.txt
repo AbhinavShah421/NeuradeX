@@ -8,6 +8,12 @@ pymongo==4.6.3
 # FinBERT — downloads ~400MB model on first run, cached in /root/.cache/huggingface
 transformers==4.37.0
 # torch installed separately in Dockerfile using CPU-only wheel (see Dockerfile)
+# Pin numpy<2: torch 2.1.2 is compiled against the NumPy 1.x ABI, so an unpinned
+# numpy 2.x import crashes with "_ARRAY_API not found" (seen in the logs).
+numpy<2
+# accelerate enables from_pretrained(low_cpu_mem_usage=True) — streams weights via
+# the meta device instead of doubling RAM during load (the OOM-inducing spike).
+accelerate==0.26.1
 python-dotenv==1.0.0
 requests==2.32.3
 python-json-logger==2.0.7

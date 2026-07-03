@@ -19,7 +19,10 @@
       "Bash(npx tsc *)",
       "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000)",
       "Bash(gh auth *)",
-      "PowerShell(Get-ScheduledTask -TaskName 'NeuradeX-AutoStart' -ErrorAction SilentlyContinue | Select-Object TaskName, State, @{N='LastRunTime';E={\\(Get-ScheduledTaskInfo -TaskName $_.TaskName\\).LastRunTime}}, @{N='LastTaskResult';E={\\(Get-ScheduledTaskInfo -TaskName $_.TaskName\\).LastTaskResult}}, @{N='NextRunTime';E={\\(Get-ScheduledTaskInfo -TaskName $_.TaskName\\).NextRunTime}})"
+      "PowerShell(Get-ScheduledTask -TaskName 'NeuradeX-AutoStart' -ErrorAction SilentlyContinue | Select-Object TaskName, State, @{N='LastRunTime';E={\\(Get-ScheduledTaskInfo -TaskName $_.TaskName\\).LastRunTime}}, @{N='LastTaskResult';E={\\(Get-ScheduledTaskInfo -TaskName $_.TaskName\\).LastTaskResult}}, @{N='NextRunTime';E={\\(Get-ScheduledTaskInfo -TaskName $_.TaskName\\).NextRunTime}})",
+      "Bash(ollama list *)",
+      "PowerShell(Get-Command ollama -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source; \\(Get-Item \"$env:LOCALAPPDATA\\\\Programs\\\\Ollama\\\\ollama.exe\" -ErrorAction SilentlyContinue\\).FullName)",
+      "PowerShell(powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"c:\\\\Users\\\\Abhin\\\\backbone\\\\projects\\\\NeuradeX\\\\scripts\\\\install-autostart.ps1\")"
     ]
   }
 }

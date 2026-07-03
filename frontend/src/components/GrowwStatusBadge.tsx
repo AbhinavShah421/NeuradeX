@@ -27,6 +27,22 @@ const GrowwStatusBadge: React.FC = () => {
   const [credSaving, setCredSaving] = useState(false);
   const [message, setMessage] = useState('');
   const popoverRef = useRef<HTMLDivElement>(null);
+  const POPOVER_W = 300;
+  // The popover is right:0-anchored (right edge = trigger's right edge), which
+  // clips off the LEFT edge of the screen when the trigger sits less than
+  // POPOVER_W+8 from the left — true for the mobile-menu-header placement on
+  // any phone narrower than ~380px. Shift it to keep an 8px margin.
+  const [popRight, setPopRight] = useState(0);
+  useEffect(() => {
+    if (!open || !popoverRef.current) return;
+    const clamp = () => {
+      const rect = popoverRef.current!.getBoundingClientRect();
+      setPopRight(Math.min(0, rect.right - (POPOVER_W + 8)));
+    };
+    clamp();
+    window.addEventListener('resize', clamp);
+    return () => window.removeEventListener('resize', clamp);
+  }, [open]);
 
   const load = async () => {
     if (!isAuthenticated) return;
@@ -133,8 +149,8 @@ const GrowwStatusBadge: React.FC = () => {
       {/* Popover */}
       {open && (
         <div style={{
-          position: 'absolute', top: '110%', right: 0, zIndex: 1000,
-          width: 300,
+          position: 'absolute', top: '110%', right: popRight, zIndex: 1000,
+          width: POPOVER_W,
           background: dark ? '#1e2837' : '#ffffff',
           border: `1px solid ${dark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.12)'}`,
           borderRadius: 12, padding: 16,

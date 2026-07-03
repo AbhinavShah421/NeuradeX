@@ -15,7 +15,7 @@ def _ist(y, m, d, hh, mm):
     return datetime(y, m, d, hh, mm, tzinfo=IST)
 
 
-# ── _target_date: always the next clean market open ──────────────────────────
+# ── _target_date: today while the market's open (elapsed part is backfilled) ──
 # Reference weekdays: 2026-01-05 Mon, 01-06 Tue, 01-09 Fri, 01-10 Sat, 01-12 Mon.
 
 def test_target_today_before_open():
@@ -23,14 +23,20 @@ def test_target_today_before_open():
     assert rec._target_date(_ist(2026, 1, 5, 8, 0)) == "2026-01-05"
 
 
-def test_target_at_open_grace():
-    # 09:16 is within the one-minute grace → still today.
-    assert rec._target_date(_ist(2026, 1, 5, 9, 16)) == "2026-01-05"
+def test_target_mid_session_is_today():
+    # Monday 10:00 — mid-session. Still today: the elapsed part (09:15→now) is
+    # backfilled from history, so a late start still yields a full day.
+    assert rec._target_date(_ist(2026, 1, 5, 10, 0)) == "2026-01-05"
 
 
-def test_target_after_open_rolls_to_next_weekday():
-    # Monday 10:00 — open missed → next weekday (Tue).
-    assert rec._target_date(_ist(2026, 1, 5, 10, 0)) == "2026-01-06"
+def test_target_just_before_close_is_today():
+    # 15:30 is the close cutoff — still today.
+    assert rec._target_date(_ist(2026, 1, 5, 15, 30)) == "2026-01-05"
+
+
+def test_target_after_close_rolls_to_next_weekday():
+    # Monday 16:00 — session finished → next weekday (Tue).
+    assert rec._target_date(_ist(2026, 1, 5, 16, 0)) == "2026-01-06"
 
 
 def test_target_friday_evening_skips_weekend():

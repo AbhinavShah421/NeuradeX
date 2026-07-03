@@ -326,6 +326,29 @@ async def scan_market(symbols: list[str] | None = None, top_n: int = _TOP_N) -> 
         items.sort(key=lambda r: (r["action"] != "BUY", -r["score"]))
         watchlist = items[:top_n]
 
+        # Preserve committed flags from the previous watchlist so a rescan does
+        # not silently reset manual approvals.  Also auto-commit grade A/B picks
+        # so the autopilot runs daily without needing manual intervention.
+        try:
+            from app.utils.redis_client import cache_get
+            prev_raw = await cache_get(_WATCHLIST_KEY)
+            prev_committed: set[str] = set()
+            if prev_raw:
+                prev_data = json.loads(prev_raw)
+                prev_committed = {
+                    it["symbol"] for it in prev_data.get("items", [])
+                    if it.get("committed")
+                }
+        except Exception:
+            prev_committed = set()
+
+        for it in watchlist:
+            it["committed"] = (
+                it.get("committed")                        # already set
+                or it["symbol"] in prev_committed          # was committed before
+                or it.get("grade") in ("A", "B")          # auto-commit top tier
+            )
+
         payload = {
             "updatedAt":  datetime.now(IST).isoformat(),
             "updated_at": datetime.now(IST).isoformat(),   # legacy key
@@ -335,6 +358,7 @@ async def scan_market(symbols: list[str] | None = None, top_n: int = _TOP_N) -> 
             "intraday":   intraday,
             "delivery":   delivery,
             "fno":        fno,
+            "committed":  [it for it in watchlist if it.get("committed")],
         }
         try:
             from app.utils.redis_client import cache_set

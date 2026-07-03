@@ -46,10 +46,23 @@ const Recordings: React.FC = () => {
   // Expanded detail per recording id
   const [expanded, setExpanded] = useState<Record<string, Recording>>({});
   const [busy, setBusy] = useState<Record<string, boolean>>({});
+  // Inline delete confirmation (an in-app two-step, not window.confirm — the
+  // native dialog is silently suppressed in some mobile/embedded webviews, which
+  // made the delete button appear to do nothing).
+  const [confirmDel, setConfirmDel] = useState<string | null>(null);
 
   // Chart viewer
   const [chart, setChart] = useState<{ recId: string; symbol: string; candles: any[]; coverage: CoverageRow } | null>(null);
   const [chartLoading, setChartLoading] = useState(false);
+
+  // Phone layout: the chart modal becomes a full-screen sheet so the chart
+  // gets every pixel of a small display.
+  const [narrow, setNarrow] = useState(typeof window !== 'undefined' && window.innerWidth < 640);
+  useEffect(() => {
+    const onResize = () => setNarrow(window.innerWidth < 640);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -68,6 +81,25 @@ const Recordings: React.FC = () => {
     const t = setInterval(load, 20000);   // refresh coverage/status periodically
     return () => clearInterval(t);
   }, [load]);
+
+  const [syncingAgrade, setSyncingAgrade] = useState(false);
+
+  const syncAgradeNow = async () => {
+    setSyncingAgrade(true); setErr(null); setMsg(null);
+    try {
+      const r = await apiService.syncAgradeRecording();
+      if (r.data?.created) {
+        setMsg(`Created "${r.data.recording?.name}" from today's A-grade scan (${r.data.recording?.symbolCount} stocks).`);
+        await load();
+      } else {
+        setMsg("Nothing to create yet — today's A-grade recording already exists, or the latest scan has no A-grade picks.");
+      }
+    } catch (e: any) {
+      setErr(e?.response?.data?.detail || 'A-grade sync failed');
+    } finally {
+      setSyncingAgrade(false);
+    }
+  };
 
   const removeSymbol = (sym: string) => setPicked(prev => prev.filter(s => s !== sym));
 
@@ -97,7 +129,7 @@ const Recordings: React.FC = () => {
   };
 
   const remove = async (rec: Recording) => {
-    if (!window.confirm(`Delete recording "${rec.name}"? Captured data already in the dataset is kept.`)) return;
+    setConfirmDel(null);
     setBusy(p => ({ ...p, [rec.id]: true }));
     try {
       await apiService.deleteRecording(rec.id);
@@ -116,7 +148,11 @@ const Recordings: React.FC = () => {
       const r = await apiService.backtestRecording(rec.id, { symbols });
       const started = r.data?.started ?? [];
       const skipped = r.data?.skipped ?? [];
-      setMsg(`Launched ${started.length} backtest session(s)${skipped.length ? `, skipped ${skipped.length} (no data)` : ''}. Open Live Trading to watch them.`);
+      if (started.length === 0) {
+        setErr(`No sessions started${skipped.length ? ` — ${skipped.length} symbol(s) had no recorded data` : ''}.`);
+      } else {
+        setMsg(`Launched ${started.length} backtest session(s)${skipped.length ? `, skipped ${skipped.length} (no data)` : ''}. Watch them in the Dashboard's Live Auto-Trading panel.`);
+      }
     } catch (e: any) {
       setErr(e?.response?.data?.detail || 'Backtest could not start');
     } finally {
@@ -161,11 +197,25 @@ const Recordings: React.FC = () => {
           {totalArmed > 0 && (
             <span style={{ ...chip, color: '#0ea5e9', borderColor: '#0ea5e9' }}>{totalArmed} armed for capture</span>
           )}
+          <button className="nd-btn" disabled={syncingAgrade} onClick={syncAgradeNow}
+            style={{ marginLeft: 'auto', padding: '6px 12px', fontSize: 12 }}
+            title="Every trading day, an A-Grade recording is auto-created from that morning's scan (~09:00-09:15 IST). Use this to run the check right now instead of waiting.">
+            <span className="material-icons" style={{ fontSize: 14, verticalAlign: 'middle', marginRight: 4 }}>
+              {syncingAgrade ? 'autorenew' : 'auto_awesome'}
+            </span>
+            {syncingAgrade ? 'Syncing…' : 'Sync A-Grade now'}
+          </button>
         </div>
         <p style={{ margin: 0, fontSize: 12.5, color: 'var(--nd-text-3)', lineHeight: 1.6 }}>
-          Pick any number of stocks to record for the next trading day. When the market opens, the Groww live
-          stream is captured tick-by-tick into the 1-second dataset — the full day, from the open, with the
-          least possible gap. Recorded days can be charted and backtested straight from the list below.
+          Pick any number of stocks to record. The Groww live stream is captured tick-by-tick into the
+          1-second dataset — and if you start a recording mid-session, the earlier part of the day (from the
+          09:15 open up to now) is filled in from Groww's 1-minute history, so you still get the full day no
+          matter when you started. Recorded days can be charted and backtested straight from the list below.
+        </p>
+        <p style={{ margin: '8px 0 0', fontSize: 11.5, color: 'var(--nd-text-3)', lineHeight: 1.5 }}>
+          <span className="material-icons" style={{ fontSize: 12, verticalAlign: 'text-bottom', marginRight: 3, color: '#0ea5e9' }}>schedule</span>
+          A dedicated <strong>A-Grade</strong> recording is created automatically every trading day from that
+          morning's scan — no manual list-building needed.
         </p>
       </div>
 
@@ -221,7 +271,7 @@ const Recordings: React.FC = () => {
               {creating ? 'Scheduling…' : 'Schedule recording'}
             </button>
             <span style={{ fontSize: 11.5, color: 'var(--nd-text-3)' }}>
-              Targets the next clean market open (today if before 09:15 IST, otherwise the next trading day) — never a mid-day start.
+              Targets today while the market is open (the elapsed part is backfilled from history); after the 15:30 close it rolls to the next trading day.
             </span>
           </div>
         </div>
@@ -240,43 +290,107 @@ const Recordings: React.FC = () => {
         const det = expanded[rec.id];
         return (
           <div key={rec.id} style={card}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            {/* Title row: status badge + recording name */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
               <span style={{
                 display: 'inline-flex', alignItems: 'center', gap: 5, padding: '3px 10px', borderRadius: 20,
-                fontSize: 11, fontWeight: 700, color: meta.color, background: meta.bg,
+                fontSize: 11, fontWeight: 700, color: meta.color, background: meta.bg, flexShrink: 0,
               }}>
                 <span className="material-icons" style={{ fontSize: 13 }}>{meta.icon}</span>{meta.label}
               </span>
-              <span style={{ fontWeight: 700, fontSize: 14, color: 'var(--nd-text-1)' }}>{rec.name}</span>
-              <span style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>{fmtDate(rec.date)}</span>
-              <span style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>· {rec.symbolCount} stock{rec.symbolCount === 1 ? '' : 's'}</span>
+              <span style={{ fontWeight: 700, fontSize: 14, color: 'var(--nd-text-1)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>{rec.name}</span>
+            </div>
+
+            {/* Meta row: date · stocks · capture stats — dot-separated, wraps cleanly */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginTop: 7, fontSize: 12, color: 'var(--nd-text-3)' }}>
+              <span>{fmtDate(rec.date)}</span>
+              <span style={{ opacity: 0.5 }}>·</span>
+              <span>{rec.symbolCount} stock{rec.symbolCount === 1 ? '' : 's'}</span>
               {sum && sum.totalTicks > 0 && (
-                <span style={{ fontSize: 12, color: 'var(--nd-text-2)' }}>
-                  · {sum.totalTicks.toLocaleString()} ticks · {sum.symbolsWithData}/{sum.symbols} captured
-                  {sum.fullDay > 0 && <span style={{ color: 'var(--nd-green)' }}> · {sum.fullDay} full-day</span>}
-                </span>
+                <>
+                  <span style={{ opacity: 0.5 }}>·</span>
+                  <span>{sum.totalTicks.toLocaleString()} ticks</span>
+                  <span style={{ opacity: 0.5 }}>·</span>
+                  <span>{sum.symbolsWithData}/{sum.symbols} captured</span>
+                  {sum.fullDay > 0 && (
+                    <>
+                      <span style={{ opacity: 0.5 }}>·</span>
+                      <span style={{ color: 'var(--nd-green)', fontWeight: 600 }}>{sum.fullDay} full-day</span>
+                    </>
+                  )}
+                </>
               )}
-              <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
-                {rec.status === 'completed' && (
-                  <button className="nd-btn" disabled={busy[rec.id]} onClick={() => runBacktest(rec)}
-                    title="Run intraday backtest for every recorded symbol">
-                    <span className="material-icons" style={{ fontSize: 14, verticalAlign: 'middle', marginRight: 4 }}>history_edu</span>
-                    Backtest all
+            </div>
+
+            {/* Action row */}
+            <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+              {rec.status === 'completed' && (
+                <button className="nd-btn nd-btn-primary" disabled={busy[rec.id]} onClick={() => runBacktest(rec)}
+                  title="Run intraday backtest for every recorded symbol"
+                  style={{ padding: '8px 14px', fontSize: 13 }}>
+                  <span className="material-icons" style={{ fontSize: 15 }}>history_edu</span>
+                  {busy[rec.id] ? 'Starting…' : 'Backtest all'}
+                </button>
+              )}
+              <button className="nd-btn nd-btn-outline" onClick={() => toggleExpand(rec)}
+                style={{ padding: '8px 14px', fontSize: 13 }}>
+                <span className="material-icons" style={{ fontSize: 15 }}>{det ? 'expand_less' : 'expand_more'}</span>
+                {det ? 'Hide' : 'Details'}
+              </button>
+              {confirmDel === rec.id ? (
+                <div style={{ marginLeft: 'auto', display: 'flex', gap: 6, alignItems: 'center' }}>
+                  <span style={{ fontSize: 11.5, color: 'var(--nd-text-3)' }}>Delete? Captured data is kept.</span>
+                  <button className="nd-btn nd-btn-outline" disabled={busy[rec.id]} onClick={() => remove(rec)}
+                    style={{ padding: '8px 12px', fontSize: 12.5, minHeight: 36, color: '#fff', background: '#ef4444', borderColor: '#ef4444' }}>
+                    {busy[rec.id] ? 'Deleting…' : 'Confirm'}
                   </button>
-                )}
-                <button className="nd-btn" onClick={() => toggleExpand(rec)}>
-                  {det ? 'Hide' : 'Details'}
+                  <button className="nd-btn nd-btn-outline" onClick={() => setConfirmDel(null)}
+                    style={{ padding: '8px 12px', fontSize: 12.5, minHeight: 36 }}>Cancel</button>
+                </div>
+              ) : (
+                <button className="nd-btn nd-btn-outline" disabled={busy[rec.id]} onClick={() => setConfirmDel(rec.id)}
+                  title="Delete recording (captured data already in the dataset is kept)"
+                  style={{ marginLeft: 'auto', padding: '8px 12px', minHeight: 36, color: '#ef4444', borderColor: 'rgba(239,68,68,0.4)' }}>
+                  <span className="material-icons" style={{ fontSize: 16 }}>delete_outline</span>
                 </button>
-                <button className="nd-btn" disabled={busy[rec.id]} onClick={() => remove(rec)} title="Delete recording">
-                  <span className="material-icons" style={{ fontSize: 15, color: '#ef4444' }}>delete_outline</span>
-                </button>
-              </div>
+              )}
             </div>
 
             {det && (
               <div style={{ marginTop: 14, borderTop: '1px solid var(--nd-border)', paddingTop: 12 }}>
                 {(det.coverage ?? []).length === 0 ? (
                   <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>No symbols.</div>
+                ) : narrow ? (
+                  // Phone layout: a 5-column grid crushes "Window" and the action
+                  // buttons into ~50px each. Stack as a card per symbol instead.
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {(det.coverage ?? []).map(c => (
+                      <div key={c.symbol} style={{ background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 10, padding: '10px 12px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 4 }}>
+                          <span style={{ fontWeight: 700, fontSize: 13, color: 'var(--nd-text-1)' }}>{c.symbol}</span>
+                          {c.ticks === 0 ? <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>No data</span>
+                            : c.fullDay ? <span style={{ fontSize: 11, color: 'var(--nd-green)', fontWeight: 600 }}>Full day</span>
+                            : <span style={{ fontSize: 11, color: '#f59e0b', fontWeight: 600 }}>Partial</span>}
+                        </div>
+                        <div style={{ fontSize: 11.5, color: 'var(--nd-text-3)', marginBottom: 10 }}>
+                          {c.ticks.toLocaleString()} ticks
+                          {c.firstTime && c.lastTime ? ` · ${c.firstTime}–${c.lastTime}` : ''}
+                        </div>
+                        <div style={{ display: 'flex', gap: 8 }}>
+                          <button className="nd-btn nd-btn-outline" disabled={c.ticks === 0} onClick={() => openChart(rec.id, c.symbol)}
+                            style={{ flex: 1, padding: '8px 12px', minHeight: 36, fontSize: 12.5, opacity: c.ticks === 0 ? 0.5 : 1 }}>
+                            <span className="material-icons" style={{ fontSize: 15 }}>candlestick_chart</span>Chart
+                          </button>
+                          {rec.status === 'completed' && (
+                            <button className="nd-btn nd-btn-primary" disabled={c.ticks === 0 || busy[rec.id]} onClick={() => runBacktest(rec, [c.symbol])}
+                              style={{ flex: 1, padding: '8px 12px', minHeight: 36, fontSize: 12.5, opacity: (c.ticks === 0 || busy[rec.id]) ? 0.5 : 1 }}>
+                              <span className="material-icons" style={{ fontSize: 15 }}>history_edu</span>Backtest
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 ) : (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                     <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr 1fr 0.8fr auto', gap: 8, fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.4px', color: 'var(--nd-text-3)', padding: '0 4px' }}>
@@ -293,11 +407,11 @@ const Recordings: React.FC = () => {
                             : <span style={{ color: '#f59e0b', fontWeight: 600 }}>Partial</span>}
                         </span>
                         <span style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
-                          <button className="nd-btn" disabled={c.ticks === 0} onClick={() => openChart(rec.id, c.symbol)}
-                            style={{ padding: '3px 8px', fontSize: 11, opacity: c.ticks === 0 ? 0.5 : 1 }}>Chart</button>
+                          <button className="nd-btn nd-btn-outline" disabled={c.ticks === 0} onClick={() => openChart(rec.id, c.symbol)}
+                            style={{ padding: '5px 10px', fontSize: 11.5, opacity: c.ticks === 0 ? 0.5 : 1 }}>Chart</button>
                           {rec.status === 'completed' && (
-                            <button className="nd-btn" disabled={c.ticks === 0 || busy[rec.id]} onClick={() => runBacktest(rec, [c.symbol])}
-                              style={{ padding: '3px 8px', fontSize: 11, opacity: c.ticks === 0 ? 0.5 : 1 }}>Backtest</button>
+                            <button className="nd-btn nd-btn-primary" disabled={c.ticks === 0 || busy[rec.id]} onClick={() => runBacktest(rec, [c.symbol])}
+                              style={{ padding: '5px 10px', fontSize: 11.5, opacity: (c.ticks === 0 || busy[rec.id]) ? 0.5 : 1 }}>Backtest</button>
                           )}
                         </span>
                       </div>
@@ -315,15 +429,19 @@ const Recordings: React.FC = () => {
         );
       })}
 
-      {/* Chart modal */}
+      {/* Chart modal — full-screen sheet on phones, centered dialog on desktop */}
       {(chart || chartLoading) && (
         <div onClick={() => setChart(null)} style={{
           position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 200,
-          display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20,
+          display: 'flex', alignItems: narrow ? 'stretch' : 'center', justifyContent: 'center',
+          padding: narrow ? 0 : 20,
         }}>
           <div onClick={e => e.stopPropagation()} style={{
-            background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 14,
-            padding: 18, width: 'min(960px, 96vw)', maxHeight: '92vh', overflowY: 'auto',
+            background: 'var(--nd-surface)', border: narrow ? 'none' : '1px solid var(--nd-border)',
+            borderRadius: narrow ? 0 : 14,
+            padding: narrow ? '12px 10px calc(12px + env(safe-area-inset-bottom))' : 18,
+            width: narrow ? '100%' : 'min(960px, 96vw)',
+            maxHeight: narrow ? '100dvh' : '92vh', overflowY: 'auto',
           }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
               <span className="material-icons" style={{ fontSize: 18, color: '#0ea5e9' }}>candlestick_chart</span>
@@ -347,7 +465,8 @@ const Recordings: React.FC = () => {
                     {chart.coverage.fullDay ? <span style={{ color: 'var(--nd-green)' }}> full day</span> : <span style={{ color: '#f59e0b' }}> partial</span>}
                   </div>
                 )}
-                <TradingChart candles={chart.candles} height={460} />
+                <TradingChart candles={chart.candles}
+                  height={narrow ? Math.max(300, Math.round(window.innerHeight * 0.45)) : 460} />
               </>
             ) : null}
           </div>

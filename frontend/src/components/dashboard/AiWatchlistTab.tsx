@@ -120,7 +120,9 @@ const WatchlistRow: React.FC<{ w: WatchlistStock; i: number; onClick: () => void
     {onAutoTrade && (
       <button onClick={e => { e.stopPropagation(); onAutoTrade(w.symbol); }} disabled={started}
         title="Auto paper-trade this stock with the selected hold cap"
-        style={{ display: 'flex', alignItems: 'center', gap: 3, padding: '4px 8px', borderRadius: 6, border: `1px solid ${started ? 'var(--nd-green)' : 'var(--nd-border)'}`, background: started ? 'var(--nd-green-50)' : 'var(--nd-surface)', color: started ? 'var(--nd-green)' : 'var(--nd-text-2)', cursor: started ? 'default' : 'pointer', fontSize: 11, fontWeight: 600, flexShrink: 0 }}>
+        // minHeight guarantees a real ~34px tap target — this starts a trade,
+        // so it shouldn't be easier to mis-tap than to hit.
+        style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 3, padding: '6px 10px', minHeight: 34, borderRadius: 6, border: `1px solid ${started ? 'var(--nd-green)' : 'var(--nd-border)'}`, background: started ? 'var(--nd-green-50)' : 'var(--nd-surface)', color: started ? 'var(--nd-green)' : 'var(--nd-text-2)', cursor: started ? 'default' : 'pointer', fontSize: 11.5, fontWeight: 600, flexShrink: 0 }}>
         <span className="material-icons" style={{ fontSize: 13 }}>{started ? 'check' : 'play_arrow'}</span>
         {started ? 'Started' : 'Auto'}
       </button>
@@ -153,12 +155,15 @@ const ScanDiffPanel: React.FC<{ diff: ScanDiff | null }> = ({ diff }) => {
     const color = kind === 'up' ? '#22c55e' : kind === 'down' ? '#ef4444' : kind === 'in' ? '#3b82f6' : '#94a3b8';
     const badge = kind === 'up' ? `▲ ${(m as ScanDiffMove).delta}` : kind === 'down' ? `▼ ${Math.abs((m as ScanDiffMove).delta)}` : kind === 'in' ? 'NEW' : 'OUT';
     return (
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, padding: '4px 0', borderBottom: '1px solid var(--nd-border)' }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, padding: '4px 0', borderBottom: '1px solid var(--nd-border)', flexWrap: 'wrap' }}>
         <span style={{ fontSize: 10, fontWeight: 700, color, minWidth: 38 }}>{badge}</span>
         <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--nd-text-1)', minWidth: 80 }}>{m.symbol}</span>
         <span style={{ fontSize: 11, color: 'var(--nd-text-3)', minWidth: 78 }}>
           {kind === 'out' ? `was #${m.prevRank}` : kind === 'in' ? `#${m.rank}` : `#${m.prevRank}→#${m.rank}`}
         </span>
+        {/* No minWidth/flex-grow: with flexWrap on the row, this drops to its own
+            line when the fixed columns above don't leave enough room (narrow
+            screens) instead of squeezing into a few illegible px. */}
         <span style={{ fontSize: 11, color: 'var(--nd-text-2)' }}>{m.reason || ''}</span>
       </div>
     );
@@ -282,8 +287,12 @@ const AiWatchlistTab: React.FC = () => {
       <SignalScorePanel ev={evalData} />
       <ScanDiffPanel diff={diff} />
 
-      {/* Category tabs */}
-      <div style={{ display: 'flex', gap: 6, marginBottom: 14, borderBottom: '1px solid var(--nd-border)', paddingBottom: 0 }}>
+      {/* Category tabs — scrolls horizontally instead of overflowing the page
+          on narrow screens (three tabs + icon + count badge don't fit 390px). */}
+      <div style={{
+        display: 'flex', gap: 6, marginBottom: 14, borderBottom: '1px solid var(--nd-border)', paddingBottom: 0,
+        overflowX: 'auto', scrollbarWidth: 'none', WebkitOverflowScrolling: 'touch',
+      }}>
         {tabs.map(t => (
           <button key={t.key} onClick={() => setTab(t.key)}
             style={{
@@ -293,7 +302,7 @@ const AiWatchlistTab: React.FC = () => {
               background: tab === t.key ? 'var(--nd-surface)' : 'transparent',
               cursor: 'pointer', fontSize: 12, fontWeight: tab === t.key ? 700 : 500,
               color: tab === t.key ? 'var(--nd-green)' : 'var(--nd-text-2)',
-              marginBottom: -1,
+              marginBottom: -1, whiteSpace: 'nowrap', flexShrink: 0,
             }}>
             <span className="material-icons" style={{ fontSize: 14 }}>{t.icon}</span>
             {t.label}

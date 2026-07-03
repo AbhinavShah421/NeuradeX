@@ -216,7 +216,7 @@ services:
       REDIS_HOST: redis
       RABBITMQ_HOST: rabbitmq
       INFLUXDB_HOST: influxdb
-      LLM_API_URL: http://host.docker.internal:11434
+      LLM_API_URL: http://ollama:11434
       ELASTICSEARCH_URL: http://elasticsearch:9200
       LLM_PROVIDER: ollama
       ANTHROPIC_API_KEY: ""
@@ -283,7 +283,7 @@ services:
       REDIS_HOST: redis
       RABBITMQ_HOST: rabbitmq
       INFLUXDB_HOST: influxdb
-      LLM_API_URL: http://host.docker.internal:11434
+      LLM_API_URL: http://ollama:11434
       ELASTICSEARCH_URL: http://elasticsearch:9200
       LLM_PROVIDER: ollama
       ANTHROPIC_API_KEY: ""
@@ -401,6 +401,12 @@ services:
       MLFLOW_TRACKING_URI: http://mlflow:5000
       FINBERT_MODEL: "ProsusAI/finbert"
       SENTIMENT_WINDOW_MINUTES: "60"
+      # Constrain torch/transformers to a single math thread. This both trims the
+      # per-thread memory arenas that spiked past the old 1G cap (→ OOM/137) and
+      # stops the CPU-limited container from thrashing while loading the model.
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      TOKENIZERS_PARALLELISM: "false"
     ports:
       - "8003:8003"
     volumes:
@@ -412,11 +418,15 @@ services:
         condition: service_healthy
     networks:
       - stock-prediction-network
+    restart: unless-stopped     # self-heal: don't stay dead after a transient crash
     deploy:
       resources:
         limits:
-          memory: 1024M
-          cpus: '0.5'
+          # FinBERT (torch + transformers + ProsusAI/finbert) peaks ~1.5-1.8G while
+          # the pipeline loads on the first /score call; 1G OOM-killed it (137). 2G —
+          # the same ceiling as the backend — gives headroom without over-committing 8G host.
+          memory: 2048M
+          cpus: '1.0'
 
   macro-agent:
     build:
@@ -645,6 +655,50 @@ services:
           memory: 128M   # 44MB actual; simple polling loop
           cpus: '0.3'
 
+  # ── Ollama (local LLM) ───────────────────────────────────────────────────────
+  # Runs the Ollama server inside Docker so the host doesn't need Ollama installed.
+  # ollama-init pulls llama3.2 on first boot (skipped if the model is already cached).
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: stock-prediction-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - stock-prediction-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list 2>/dev/null && exit 0 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: stock-prediction-ollama-init
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    networks:
+      - stock-prediction-network
+    entrypoint: ["/bin/sh", "-c", "ollama pull llama3.2 && echo 'llama3.2 ready'"]
+    restart: "no"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+
   # ── Groww Live-Feed Service ───────────────────────────────────────────────────
   # Isolated so the heavy growwapi SDK (pydantic/pandas/protobuf pins) can't clash
   # with the backend. Streams real-time LTPs to Redis for paper trading.
@@ -685,7 +739,7 @@ services:
       ANTHROPIC_API_KEY: ""
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-haiku-4-5-20251001}
       LLM_MODEL: ${OLLAMA_MODEL:-llama3.2}
-      LLM_API_URL: http://host.docker.internal:11434
+      LLM_API_URL: http://ollama:11434
       SENTIMENT_INTERVAL: "900"
       SENTIMENT_TTL: "5400"
     ports:
@@ -835,10 +889,11 @@ services:
 
   ngrok:
     image: ngrok/ngrok:latest
-    restart: unless-stopped
+    restart: "no"                    # token-rotation script manages lifecycle
     container_name: stock-prediction-ngrok
     env_file:
-      - ./backend/.env
+      - path: ./.env.ngrok           # written by scripts/start-ngrok.ps1 per attempt
+        required: false              # missing file on first cold boot is safe
     command: http nginx:80 --log stdout
     ports:
       - "4040:4040"
@@ -883,6 +938,7 @@ volumes:
   finbert_cache:
   rl_models:
   candle_data:        # 1-second tick-store dataset (our own real-data warehouse)
+  ollama_data:        # Ollama model cache — persists llama3.2 across restarts
 
 networks:
   stock-prediction-network:

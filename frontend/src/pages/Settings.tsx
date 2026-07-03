@@ -235,8 +235,10 @@ const Settings: React.FC = () => {
 };
 
 const arrowBtn = (disabled: boolean): React.CSSProperties => ({
+  // padding (not 0) turns this into a real tap target — was a bare 16px icon.
   background: 'none', border: 'none', cursor: disabled ? 'default' : 'pointer',
-  color: disabled ? 'var(--nd-border)' : 'var(--nd-text-3)', padding: 0, lineHeight: 0,
+  color: disabled ? 'var(--nd-border)' : 'var(--nd-text-3)', padding: 6, lineHeight: 0,
+  display: 'flex', alignItems: 'center', justifyContent: 'center',
 });
 
 export default Settings;

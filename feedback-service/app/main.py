@@ -80,20 +80,31 @@ async def _save_weights(pool: asyncpg.Pool, weights: dict[str, float]) -> None:
 
 
 async def _store_trade_record(pool: asyncpg.Pool, payload: dict) -> None:
+    # session_id may be passed as a top-level key or nested inside market_context
+    ctx = payload.get("market_context") or {}
+    if isinstance(ctx, str):
+        try:
+            ctx = json.loads(ctx)
+        except Exception:
+            ctx = {}
+    session_id = payload.get("session_id") or ctx.get("session_id")
+
     await pool.execute(
         """
         INSERT INTO trade_records
             (trade_id, symbol, exchange, action, entry_price, exit_price,
              pnl_pct, pnl_abs, duration_minutes, ensemble_confidence,
-             agent_signals, market_context, outcome, timestamp_open, timestamp_close, trade_source)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+             agent_signals, market_context, outcome, timestamp_open, timestamp_close,
+             trade_source, session_id)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
         ON CONFLICT (trade_id) DO UPDATE SET
             exit_price=EXCLUDED.exit_price,
             pnl_pct=EXCLUDED.pnl_pct,
             pnl_abs=EXCLUDED.pnl_abs,
             outcome=EXCLUDED.outcome,
             timestamp_close=EXCLUDED.timestamp_close,
-            trade_source=EXCLUDED.trade_source
+            trade_source=EXCLUDED.trade_source,
+            session_id=EXCLUDED.session_id
         """,
         payload.get("trade_id", str(uuid.uuid4())),
         payload.get("symbol", ""),
@@ -106,11 +117,12 @@ async def _store_trade_record(pool: asyncpg.Pool, payload: dict) -> None:
         int(payload.get("duration_minutes", 0)) if payload.get("duration_minutes") else None,
         float(payload.get("ensemble_confidence", 0)),
         json.dumps(payload.get("agent_signals", {})),
-        json.dumps(payload.get("market_context", {})),
+        json.dumps(ctx),
         payload.get("outcome"),
         datetime.fromisoformat(payload["timestamp_open"]) if payload.get("timestamp_open") else datetime.now(tz=timezone.utc),
         datetime.fromisoformat(payload["timestamp_close"]) if payload.get("timestamp_close") else None,
         payload.get("trade_source", "LIVE"),
+        session_id,
     )
 
 

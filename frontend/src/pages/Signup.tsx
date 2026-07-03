@@ -176,8 +176,9 @@ const Signup: React.FC = () => {
 
   // ── Shared styles ──────────────────────────────────────────────────────────
   const inputStyle: React.CSSProperties = {
+    // 16px, not 14px: iOS Safari auto-zooms the page on focusing any input under 16px.
     width: '100%', height: 42, padding: '0 12px', border: '1px solid var(--nd-border)',
-    borderRadius: 8, background: 'var(--nd-bg)', color: 'var(--nd-text-1)', fontSize: 14,
+    borderRadius: 8, background: 'var(--nd-bg)', color: 'var(--nd-text-1)', fontSize: 16,
     outline: 'none', boxSizing: 'border-box',
   };
   const labelStyle: React.CSSProperties = {

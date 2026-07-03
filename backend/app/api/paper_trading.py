@@ -60,6 +60,27 @@ _yahoo_candles: dict[str, tuple[list, float]] = {}
 _YAHOO_CACHE_TTL = 15  # seconds — Yahoo's 1-min data is current-minute fresh, so
                        # refresh it every ~15s to keep the live candle gap small
 
+# ── Yahoo live LTP (meta.regularMarketPrice) ──────────────────────────────────
+# Every chart fetch also carries the *current* market price in its meta block —
+# fresher than the last published 1-min bar. Cached here so the paper flows can
+# fall back to a near-real-time Yahoo price when no Groww/Angel tick is available,
+# instead of waiting ~1-2 min for Yahoo's next completed candle.
+# symbol → (price, market_epoch_ts, fetched_at_epoch)
+_yahoo_live: dict[str, tuple[float, float, float]] = {}
+
+
+def get_yahoo_live_ltp(symbol: str, max_age: float = 90.0) -> float:
+    """Latest Yahoo regularMarketPrice for `symbol`, or 0.0 if absent/stale.
+    Freshness is judged on when we fetched it (the cache refreshes every
+    _YAHOO_CACHE_TTL while a session polls), not Yahoo's own trade timestamp."""
+    entry = _yahoo_live.get(symbol.upper())
+    if not entry:
+        return 0.0
+    px, _mkt_ts, fetched_at = entry
+    if px <= 0 or (_time.time() - fetched_at) > max_age:
+        return 0.0
+    return px
+
 
 # ── Time helpers ───────────────────────────────────────────────────────────────
 
@@ -401,6 +422,18 @@ async def _fetch_candles_yahoo(symbol: str, up_to_time: str) -> tuple[list, str]
             return [], "yahoo_no_data"
 
         chart = result[0]
+
+        # Cache the real-time market price carried in the chart meta block so
+        # get_yahoo_live_ltp() can serve it as the lowest-latency Yahoo fallback.
+        meta = chart.get("meta") or {}
+        try:
+            _mp = float(meta.get("regularMarketPrice") or 0)
+            _mt = float(meta.get("regularMarketTime") or 0)
+            if _mp > 0:
+                _yahoo_live[symbol.upper()] = (_mp, _mt, _time.time())
+        except (TypeError, ValueError):
+            pass
+
         timestamps = chart.get("timestamp") or []
         quote = (chart.get("indicators", {}).get("quote") or [{}])[0]
         opens   = quote.get("open",   [])
@@ -919,6 +952,16 @@ async def paper_trading_tick(
         await _get_yahoo_cached(symbol, current_time_for_yahoo)
     except Exception:
         pass
+
+    # No Groww stream/REST price → fall back to Yahoo's real-time market price
+    # (just refreshed above with the chart fetch) so the live bar and P&L keep
+    # moving with the smallest possible time gap instead of a frozen price.
+    if price <= 0:
+        y_ltp = get_yahoo_live_ltp(symbol)
+        if y_ltp > 0:
+            price = y_ltp
+            quote_source = "yahoo_live"
+            _accumulate_tick(symbol, price, ts)
 
     candles     = _get_merged_candles(symbol, price, ts)
     data_source = "yahoo+groww" if (_yahoo_candles.get(symbol) or ([], 0))[0] else ("groww_ticks" if candles else "no_data")

@@ -782,12 +782,18 @@ def _intraday_indicators(candles: list[dict], idx: int) -> dict:
     vols   = [c["volume"] for c in window]
     n = len(closes)
 
-    # VWAP
-    tp_sum = sum(
-        ((c["high"] + c["low"] + c["close"]) / 3) * c["volume"]
-        for c in window
-    )
-    vwap = tp_sum / max(sum(vols), 1)
+    # VWAP. Tick-store bars carry volume=0 until the post-close enrichment runs;
+    # a volume-weighted VWAP would then be 0 and every "price >= VWAP" filter
+    # passes vacuously — so fall back to the equal-weighted typical-price mean.
+    total_vol = sum(vols)
+    if total_vol > 0:
+        tp_sum = sum(
+            ((c["high"] + c["low"] + c["close"]) / 3) * c["volume"]
+            for c in window
+        )
+        vwap = tp_sum / total_vol
+    else:
+        vwap = sum((c["high"] + c["low"] + c["close"]) / 3 for c in window) / n
 
     sma5  = sum(closes[-5:])  / min(5,  n)
     sma20 = sum(closes[-20:]) / min(20, n)
@@ -809,8 +815,10 @@ def _intraday_indicators(candles: list[dict], idx: int) -> dict:
         rsi = 50.0
 
     mom5 = (closes[-1] / closes[-5] - 1) * 100 if n >= 5 else 0.0
-    avg_vol = sum(vols) / n
-    vol_ratio = vols[-1] / max(avg_vol, 1)
+    # vol_ratio is neutral (1.0) when the bars carry no volume data at all —
+    # 0.0 would read as "volume died", which is a false bearish signal.
+    avg_vol = total_vol / n
+    vol_ratio = (vols[-1] / max(avg_vol, 1)) if total_vol > 0 else 1.0
 
     # Intraday ATR (avg true range over the last 14 bars) — used to size stops
     # and targets to the stock's own volatility instead of fixed percentages.

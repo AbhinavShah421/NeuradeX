@@ -210,13 +210,13 @@ const BacktestPage: React.FC = () => {
       </div>
 
       {/* Tab switcher */}
-      <div style={{ display: 'flex', gap: 4, marginBottom: 24, background: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)', borderRadius: 12, padding: 4, width: 'fit-content' }}>
+      <div style={{ display: 'flex', gap: 4, marginBottom: 24, background: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)', borderRadius: 12, padding: 4, width: 'fit-content', maxWidth: '100%', overflowX: 'auto' }}>
         {([['autopilot','AI Live Trading','auto_awesome'],['strategy','Strategy Backtest','timeline']] as const).map(([tab, label, icon]) => (
           <button key={tab} onClick={() => setPageTab(tab)} style={{
-            display: 'flex', alignItems: 'center', gap: 6, padding: '8px 20px', borderRadius: 10, border: 'none',
+            display: 'flex', alignItems: 'center', gap: 6, padding: '9px 20px', minHeight: 36, borderRadius: 10, border: 'none',
             background: pageTab === tab ? 'var(--nd-primary)' : 'transparent',
             color: pageTab === tab ? '#fff' : 'var(--nd-text-2)',
-            fontWeight: pageTab === tab ? 700 : 500, fontSize: 13, cursor: 'pointer',
+            fontWeight: pageTab === tab ? 700 : 500, fontSize: 13, cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0,
           }}>
             <span className="material-icons" style={{ fontSize: 16 }}>{icon}</span>
             {label}
@@ -354,7 +354,7 @@ const BacktestPage: React.FC = () => {
                       <div style={{ display: 'flex', gap: 4 }}>
                         {(['ALL','WIN','LOSS'] as const).map(f => (
                           <button key={f} onClick={() => setTradeFilter(f)} style={{
-                            padding: '4px 12px', borderRadius: 20, border: 'none', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                            padding: '7px 14px', minHeight: 34, borderRadius: 20, border: 'none', fontSize: 12, fontWeight: 600, cursor: 'pointer',
                             background: tradeFilter === f ? 'var(--nd-primary)' : isDark ? 'rgba(255,255,255,0.06)' : '#f1f5f9',
                             color: tradeFilter === f ? '#fff' : 'var(--nd-text-2)',
                           }}>{f}</button>

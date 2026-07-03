@@ -84,7 +84,9 @@ const OptimizeTab: React.FC<OptimizeTabProps> = ({
                       <td style={{ textAlign: 'center' }}>
                         {canCancel ? (
                           <button onClick={() => cancelPendingOrder(o.orderId, o.segment)} disabled={cancellingId === o.orderId}
-                            style={{ fontSize: 11, fontWeight: 700, padding: '3px 10px', borderRadius: 6, border: '1px solid #ef444455', background: '#ef44441a', color: '#ef4444', cursor: cancellingId === o.orderId ? 'wait' : 'pointer' }}>
+                            // Cancels a live Groww order — minHeight keeps
+                            // the tap target real-sized in this dense row.
+                            style={{ fontSize: 11.5, fontWeight: 700, padding: '6px 12px', minHeight: 34, borderRadius: 6, border: '1px solid #ef444455', background: '#ef44441a', color: '#ef4444', cursor: cancellingId === o.orderId ? 'wait' : 'pointer' }}>
                             {cancellingId === o.orderId ? '…' : 'Cancel'}
                           </button>
                         ) : (

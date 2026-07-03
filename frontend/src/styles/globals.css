@@ -582,6 +582,20 @@ input[type=range] { accent-color: var(--nd-green); }
   .nd-portfolio-stat .nd-stat-value { font-size: 18px !important; }
 }
 
+/* ── StockDetail quick-stats strip: same 4-col→2-col divider fix as above ──── */
+.nd-sd-stat { padding: 0 20px; border-left: 1px solid var(--nd-border); }
+.nd-sd-stat:first-child { border-left: none; }
+@media (max-width: 768px) {
+  /* .nd-grid-4 goes to 2 columns here — item 3 (Volume) would otherwise start
+     a new row still carrying its borderLeft, an orphan divider with nothing
+     to its left. Same fix as .nd-portfolio-stat: swap to a 2x2 divider set. */
+  .nd-sd-stat { border-left: none; border-top: 1px solid var(--nd-border); padding: 10px 16px; }
+  .nd-sd-stat:first-child { border-top: none; padding-top: 0; }
+  .nd-sd-stat:nth-child(2) { border-top: none; border-left: 1px solid var(--nd-border); padding-top: 0; }
+  .nd-sd-stat:nth-child(3) { border-top: 1px solid var(--nd-border); }
+  .nd-sd-stat:nth-child(4) { border-left: 1px solid var(--nd-border); border-top: 1px solid var(--nd-border); }
+}
+
 /* ── Scrollable pill tab strip ───────────────────────────────────────────────── */
 .nd-pill-tabs {
   display: flex;
@@ -643,6 +657,21 @@ input[type=range] { accent-color: var(--nd-green); }
 }
 @media (max-width: 480px) {
   .nd-orders-stats { grid-template-columns: 1fr 1fr; }
+}
+
+/* Portfolio Performance metrics: 6 columns squeeze to unreadable ~50px cells
+   on a phone (Sharpe/Sortino/Calmar/Max Drawdown/Total Return/Avg P&L). */
+.nd-orders-perf-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+@media (max-width: 768px) {
+  .nd-orders-perf-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 420px) {
+  .nd-orders-perf-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* ── Session Manager: new-session form (Paper Trading / AI Live Trading) ─────── */
+@media (max-width: 768px) {
+  .nd-session-form-grid { grid-template-columns: 1fr !important; }
 }
 
 /* ── AI Agent controls layout ───────────────────────────────────────────────── */
@@ -857,6 +886,10 @@ body.nd-chart-fullscreen-open { overflow: hidden; }
 
   /* Page title area */
   .nd-page-title { font-size: 17px; }
+
+  /* Inputs: iOS Safari auto-zooms the whole page on focusing any input under
+     16px — bump to the zoom-safe size on phones only (desktop keeps 13.5px). */
+  .nd-input, .nd-select { font-size: 16px; }
 }
 
 /* ── Breakpoint: small phone (≤480px) ───────────────────────────────────────── */
@@ -955,6 +988,16 @@ body.nd-chart-fullscreen-open { overflow: hidden; }
 .nd-pm-sample { display: flex; }
 @media (max-width: 540px) {
   .nd-pm-sample { display: none; }
+}
+
+/* ── Market Board (dense terminal-style watchlist) ────────────────────────────
+   Fixed-px columns (Action/Grade/Price/Win%) don't fit the narrow sidebar slot
+   on desktop or a phone's content width; Win% is the least essential column
+   (Grade + the Signal bar already convey quality) so it drops first. */
+.nd-mb-cols { grid-template-columns: 1.4fr 46px 32px 62px 48px 1fr; }
+@media (max-width: 420px) {
+  .nd-mb-cols     { grid-template-columns: 1.6fr 42px 30px 58px 1fr; }
+  .nd-mb-winpct   { display: none; }
 }
 
 /* 4-col stat grid collapses to 2-col on mobile */

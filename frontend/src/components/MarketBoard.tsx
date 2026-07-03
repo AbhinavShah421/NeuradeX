@@ -54,13 +54,15 @@ const MarketBoard: React.FC<{ limit?: number }> = ({ limit = 15 }) => {
         </button>
       </div>
 
-      {/* Column header */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1.6fr 56px 38px 70px 56px 1fr', gap: 8,
+      {/* Column header. Win% is dropped below 420px (class .nd-mb-winpct) — six
+          columns at these widths need ~338px minimum, more than a phone's
+          content width leaves once the sidebar card's own padding is subtracted. */}
+      <div className="nd-mb-cols" style={{ display: 'grid', gap: 6,
         padding: '6px 14px', borderBottom: '1px solid var(--nd-border)',
         fontSize: 9.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--nd-text-3)',
         fontFamily: 'ui-monospace, monospace' }}>
         <span>Symbol</span><span>Action</span><span>Grade</span><span style={{ textAlign: 'right' }}>Price</span>
-        <span style={{ textAlign: 'right' }}>Win%</span><span>Signal</span>
+        <span className="nd-mb-winpct" style={{ textAlign: 'right' }}>Win%</span><span>Signal</span>
       </div>
 
       {/* Rows */}
@@ -77,8 +79,8 @@ const MarketBoard: React.FC<{ limit?: number }> = ({ limit = 15 }) => {
           const sig = Math.max(0, Math.min(100, it.signalScore ?? (it.score ?? 0) * 100));
           const win = (it.winProbability ?? it.confidence ?? 0) * 100;
           return (
-            <div key={it.symbol + i} onClick={() => navigate(`/stocks/${it.symbol}`)} style={{
-              display: 'grid', gridTemplateColumns: '1.6fr 56px 38px 70px 56px 1fr', gap: 8, alignItems: 'center',
+            <div key={it.symbol + i} onClick={() => navigate(`/stocks/${it.symbol}`)} className="nd-mb-cols" style={{
+              display: 'grid', gap: 6, alignItems: 'center',
               padding: '7px 14px', borderBottom: i < items.length - 1 ? '1px solid var(--nd-border)' : 'none',
               cursor: 'pointer', fontFamily: 'ui-monospace, monospace', fontSize: 12,
             }}
@@ -91,7 +93,7 @@ const MarketBoard: React.FC<{ limit?: number }> = ({ limit = 15 }) => {
               <span style={{ fontSize: 10.5, fontWeight: 700, color: actionColor(it.action) }}>{it.action ?? '—'}</span>
               <span style={{ fontSize: 11, fontWeight: 800, color: GRADE_COLOR[it.grade ?? ''] ?? 'var(--nd-text-3)' }}>{it.grade ?? '—'}</span>
               <span style={{ textAlign: 'right', color: 'var(--nd-text-1)' }}>{it.price != null ? `₹${it.price.toFixed(2)}` : '—'}</span>
-              <span style={{ textAlign: 'right', fontWeight: 600, color: win >= 60 ? '#26a69a' : win >= 45 ? '#ffab00' : 'var(--nd-text-2)' }}>{win.toFixed(0)}%</span>
+              <span className="nd-mb-winpct" style={{ textAlign: 'right', fontWeight: 600, color: win >= 60 ? '#26a69a' : win >= 45 ? '#ffab00' : 'var(--nd-text-2)' }}>{win.toFixed(0)}%</span>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <div style={{ flex: 1, height: 5, background: 'var(--nd-border)', borderRadius: 3, overflow: 'hidden' }}>
                   <div style={{ width: `${sig}%`, height: '100%', background: sig >= 65 ? '#26a69a' : sig >= 45 ? '#ffab00' : '#ef5350', borderRadius: 3 }} />

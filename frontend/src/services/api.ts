@@ -1125,6 +1125,14 @@ class ApiService {
     return response.data;
   }
 
+  // Manually run the "auto-record today's A-grade picks" check now, instead of
+  // waiting for the next 5-min server-side tick (normally fires itself daily
+  // off the premarket scan).
+  async syncAgradeRecording(): Promise<ApiResponse<{ created: boolean; recording?: any }>> {
+    const response = await this.api.post('/api/recordings/auto-agrade/sync');
+    return response.data;
+  }
+
   // Absolute URL to a container's logs page (opens in a new browser tab).
   dockerLogsUrl(name: string): string {
     return `${API_BASE_URL || ''}/api/system/services/${name}/logs`;

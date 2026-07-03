@@ -15,6 +15,13 @@ const fmtTime = (s?: string) => {
   try { return new Date(s).toLocaleString('en-IN'); } catch { return ''; }
 };
 
+const fmtDate = (d?: string) => {
+  if (!d) return 'the next trading day';
+  try {
+    return new Date(d + 'T00:00:00').toLocaleDateString(undefined, { weekday: 'short', day: '2-digit', month: 'short' });
+  } catch { return d; }
+};
+
 // ── Per-stock "why this rank" detail ──────────────────────────────────────────
 const RankDetail: React.FC<{ s: any; onClose: () => void }> = ({ s, onClose }) => {
   const m = s.metrics || {};
@@ -141,6 +148,12 @@ const Predictions: React.FC = () => {
   const [limit, setLimit] = useState<number | 'All'>(20);
   const [sel, setSel] = useState<any>(null);
 
+  // Multi-select → record: tick stocks and arm them for capture into the
+  // 1-second dataset (a Data Recording) in one click.
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [recording, setRecording] = useState(false);
+  const [recMsg, setRecMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
   const fetchRanked = useCallback(async (lim: number | 'All') => {
     setLoading(true);
     try {
@@ -161,6 +174,35 @@ const Predictions: React.FC = () => {
 
   const items: any[] = data?.items ?? [];
 
+  const togglePick = (sym: string) => setPicked(prev => {
+    const n = new Set(prev);
+    if (n.has(sym)) n.delete(sym); else n.add(sym);
+    return n;
+  });
+  const allOnPage = items.length > 0 && items.every(s => picked.has(s.symbol));
+  const toggleAll = () => setPicked(prev => {
+    if (items.every(s => prev.has(s.symbol))) {
+      const n = new Set(prev); items.forEach(s => n.delete(s.symbol)); return n;   // clear page
+    }
+    const n = new Set(prev); items.forEach(s => n.add(s.symbol)); return n;        // select page
+  });
+
+  const recordPicked = async () => {
+    const symbols = Array.from(picked);
+    if (!symbols.length) return;
+    setRecording(true); setRecMsg(null);
+    try {
+      const r = await apiService.createRecording({ symbols });
+      const d = r.data || {};
+      setRecMsg({ ok: true, text: `Recording scheduled for ${fmtDate(d.date)} — ${d.symbolCount ?? symbols.length} stock(s) armed for capture. Manage it under AI Engine · Recordings.` });
+      setPicked(new Set());
+    } catch (e: any) {
+      setRecMsg({ ok: false, text: e?.response?.data?.detail || 'Failed to create recording.' });
+    } finally {
+      setRecording(false);
+    }
+  };
+
   return (
     <div>
       <div style={{ marginBottom: 16 }}>
@@ -170,12 +212,15 @@ const Predictions: React.FC = () => {
 
       {/* Controls */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 14 }}>
-        <div style={{ display: 'flex', borderRadius: 8, overflow: 'hidden', border: '1px solid var(--nd-border)' }}>
+        {/* overflowX (not overflow:hidden) so an extra filter or a narrow phone
+            scrolls the pill strip instead of clipping a button or forcing the
+            whole row (and page) to overflow. */}
+        <div style={{ display: 'flex', borderRadius: 8, border: '1px solid var(--nd-border)', overflowX: 'auto', scrollbarWidth: 'none', WebkitOverflowScrolling: 'touch' }}>
           {FILTERS.map(f => (
             <button key={String(f)} onClick={() => setLimit(f)}
               style={{ padding: '7px 14px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer', border: 'none',
                 background: limit === f ? 'var(--nd-accent)' : 'var(--nd-surface)',
-                color: limit === f ? '#fff' : 'var(--nd-text-2)' }}>
+                color: limit === f ? '#fff' : 'var(--nd-text-2)', whiteSpace: 'nowrap', flexShrink: 0 }}>
               {f === 'All' ? 'All' : `Top ${f}`}
             </button>
           ))}
@@ -185,6 +230,40 @@ const Predictions: React.FC = () => {
         </span>
         <ScanControl align="right" />
       </div>
+
+      {/* Selection action bar — appears once at least one stock is ticked */}
+      {picked.size > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 14, padding: '10px 14px', borderRadius: 10, border: '1px solid var(--nd-accent)', background: 'var(--nd-accent-50, rgba(59,130,246,0.08))' }}>
+          <span className="material-icons" style={{ fontSize: 18, color: 'var(--nd-accent)' }}>radio_button_checked</span>
+          <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--nd-text-1)' }}>{picked.size} selected</span>
+          <span style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>Record these into the 1-second dataset for the next trading day.</span>
+          <div style={{ display: 'flex', gap: 8, marginLeft: 'auto', flexWrap: 'wrap' }}>
+            <button className="nd-btn nd-btn-outline" onClick={() => setPicked(new Set())}
+              style={{ padding: '7px 12px', fontSize: 12.5 }}>Clear</button>
+            <button className="nd-btn nd-btn-primary" disabled={recording} onClick={recordPicked}
+              style={{ padding: '7px 14px', fontSize: 12.5, opacity: recording ? 0.6 : 1 }}>
+              <span className="material-icons" style={{ fontSize: 15, verticalAlign: 'middle', marginRight: 4 }}>
+                {recording ? 'autorenew' : 'fiber_manual_record'}
+              </span>
+              {recording ? 'Scheduling…' : `Record ${picked.size} stock${picked.size === 1 ? '' : 's'}`}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {recMsg && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14, padding: '10px 14px', borderRadius: 10,
+          borderLeft: `3px solid ${recMsg.ok ? 'var(--nd-green)' : '#ef4444'}`,
+          background: recMsg.ok ? 'rgba(0,179,134,0.08)' : 'rgba(239,68,68,0.08)' }}>
+          <span className="material-icons" style={{ fontSize: 16, color: recMsg.ok ? 'var(--nd-green)' : '#ef4444' }}>
+            {recMsg.ok ? 'check_circle' : 'error_outline'}
+          </span>
+          <span style={{ fontSize: 12.5, color: 'var(--nd-text-1)' }}>{recMsg.text}</span>
+          <button onClick={() => setRecMsg(null)} style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--nd-text-3)', display: 'flex' }}>
+            <span className="material-icons" style={{ fontSize: 15 }}>close</span>
+          </button>
+        </div>
+      )}
 
       {/* Ranked table */}
       {loading && !items.length ? (
@@ -198,6 +277,11 @@ const Predictions: React.FC = () => {
           <div style={{ overflowX: 'auto' }}>
             <table className="nd-table">
               <thead><tr>
+                <th style={{ width: 38, textAlign: 'center' }}>
+                  <input type="checkbox" checked={allOnPage} onChange={toggleAll}
+                    title={allOnPage ? 'Clear all on this list' : 'Select all on this list'}
+                    style={{ width: 15, height: 15, cursor: 'pointer', accentColor: 'var(--nd-accent)' }} />
+                </th>
                 <th style={{ width: 50, textAlign: 'center' }}>#</th>
                 <th>Stock</th>
                 <th style={{ textAlign: 'center' }}>Action</th>
@@ -212,8 +296,13 @@ const Predictions: React.FC = () => {
                 {items.map(s => {
                   const ac = ACTION_BG[s.action] ?? 'var(--nd-text-2)';
                   const mom = s.metrics?.momentumPct;
+                  const isPicked = picked.has(s.symbol);
                   return (
-                    <tr key={s.symbol} onClick={() => setSel(s)} style={{ cursor: 'pointer' }}>
+                    <tr key={s.symbol} onClick={() => setSel(s)} style={{ cursor: 'pointer', background: isPicked ? 'var(--nd-accent-50, rgba(59,130,246,0.06))' : undefined }}>
+                      <td style={{ textAlign: 'center' }} onClick={e => e.stopPropagation()}>
+                        <input type="checkbox" checked={isPicked} onChange={() => togglePick(s.symbol)}
+                          style={{ width: 15, height: 15, cursor: 'pointer', accentColor: 'var(--nd-accent)' }} />
+                      </td>
                       <td style={{ textAlign: 'center', fontWeight: 700, color: 'var(--nd-text-3)' }}>{s.rank}</td>
                       <td>
                         <div style={{ fontWeight: 700, fontFamily: 'monospace', color: 'var(--nd-accent)' }}>{s.symbol}</div>

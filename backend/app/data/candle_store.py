@@ -189,6 +189,22 @@ def read_bars(symbol: str, date_str: str, bar_seconds: int = 60) -> list[dict]:
     return bars
 
 
+def symbols_with_ticks(date_str: str) -> list[str]:
+    """Symbols that have a tick file for `date_str` (cheap directory scan)."""
+    out: list[str] = []
+    if not os.path.isdir(_TICKS):
+        return out
+    for symbol in sorted(os.listdir(_TICKS)):
+        if os.path.exists(_path(symbol, date_str)):
+            out.append(symbol)
+    return out
+
+
+def has_minute_volume(symbol: str, date_str: str) -> bool:
+    """True if the per-minute volume sidecar exists for this symbol/day."""
+    return os.path.exists(_vol_path(symbol, date_str))
+
+
 def day_coverage(symbol: str, date_str: str) -> dict:
     """What the store holds for one symbol on one IST day: tick count, first/last
     captured tick (epoch + HH:MM:SS IST), and whether the capture covers a clean

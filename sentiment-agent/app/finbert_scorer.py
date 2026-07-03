@@ -35,16 +35,28 @@ def _load_pipeline(model_name: str = "ProsusAI/finbert") -> None:
     if _pipeline is not None:
         return
     try:
-        from transformers import pipeline as hf_pipeline
+        import torch
+        # One math thread: the container is CPU-limited, and multi-threaded BLAS
+        # both thrashes that quota and allocates a memory arena per thread.
+        torch.set_num_threads(1)
+        from transformers import (
+            AutoTokenizer, AutoModelForSequenceClassification, pipeline as hf_pipeline,
+        )
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        # low_cpu_mem_usage streams the checkpoint through the meta device rather
+        # than materialising a full random-init copy *and* the loaded weights at
+        # once — that double-allocation was the load-time spike that OOM-killed
+        # the 1G container. eval() disables dropout/train-only buffers.
+        model = AutoModelForSequenceClassification.from_pretrained(
+            model_name, low_cpu_mem_usage=True, torch_dtype=torch.float32,
+        )
+        model.eval()
         _pipeline = hf_pipeline(
             "text-classification",
-            model=model_name,
-            tokenizer=model_name,
-            top_k=None,
-            max_length=512,
-            truncation=True,
+            model=model, tokenizer=tokenizer,
+            top_k=None, max_length=512, truncation=True,
         )
-        logger.info("FinBERT loaded: %s", model_name)
+        logger.info("FinBERT loaded: %s (1 thread, low_cpu_mem_usage)", model_name)
     except Exception as exc:
         logger.error("FinBERT load failed: %s — using keyword fallback", exc)
 
@@ -58,7 +70,11 @@ def score_text(text: str, model_name: str = "ProsusAI/finbert") -> dict:
     _load_pipeline(model_name)
     if _pipeline is not None:
         try:
-            results = _pipeline(text[:512])
+            import torch
+            # inference_mode skips autograd bookkeeping — no graph is built, so no
+            # per-call activation memory is retained.
+            with torch.inference_mode():
+                results = _pipeline(text[:512])
             scores = {r["label"].lower(): r["score"] for r in results[0]}
             return {
                 "positive": scores.get("positive", 0.0),

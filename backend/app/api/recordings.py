@@ -42,7 +42,9 @@ _INDEX_KEY   = "recordings:index"
 _ALLOWLIST   = "candle_capture:symbols"      # the capture loop reads this set
 _OPEN_MIN    = 9 * 60 + 15                    # 09:15 IST
 _CLOSE_MIN   = 15 * 60 + 30                   # 15:30 IST
-_OPEN_GRACE  = 1                              # allow targeting today up to 09:16
+
+_WATCHLIST_KEY      = "ai_engine:watchlist"                 # written by stock-scanner
+_AUTO_AGRADE_PREFIX = "recordings:auto_agrade_created:"      # date -> "1", once-per-day dedupe
 
 
 # ── Time / target-day helpers ────────────────────────────────────────────────
@@ -59,12 +61,15 @@ def _next_weekday(d):
 
 
 def _target_date(now: datetime | None = None) -> str:
-    """The next clean trading day to record. Today only if it's a weekday and the
-    open hasn't passed (so capture starts from 09:15 with no gap); otherwise the
-    next weekday. Holidays just yield an empty recording — harmless."""
+    """The trading day a new recording targets. Today whenever it's a weekday and the
+    close hasn't passed — even mid-session: the earlier part of the day (09:15 → now)
+    is seeded from 1-minute historical (see candle_capture.backfill_intraday), so the
+    recorded day is complete no matter when the recording was started. After the close
+    (or on a weekend), it rolls to the next weekday. Holidays just yield an empty
+    recording — harmless."""
     now = now or _now_ist()
     now_min = now.hour * 60 + now.minute
-    if now.weekday() < 5 and now_min <= (_OPEN_MIN + _OPEN_GRACE):
+    if now.weekday() < 5 and now_min <= _CLOSE_MIN:
         return now.date().isoformat()
     return _next_weekday(now.date()).isoformat()
 
@@ -171,6 +176,136 @@ async def sync_capture_allowlist() -> list[str]:
     return sorted(wanted)
 
 
+# ── Full-day backfill (fill the morning when a recording starts mid-session) ──
+
+async def backfill_today_recordings() -> int:
+    """For every recording targeting *today* that is scheduled/recording, seed the
+    part of the session already elapsed (09:15 → now) from 1-minute historical, so a
+    mid-day-created recording still holds the full day. Idempotent and cheap when
+    there's no gap — backfill_intraday only fills minutes before the first live tick.
+    Returns total ticks written. No-op outside a weekday trading day."""
+    now = _now_ist()
+    if now.weekday() >= 5:
+        return 0
+    now_min = now.hour * 60 + now.minute
+    if now_min < _OPEN_MIN:            # nothing has happened yet today
+        return 0
+    today = now.date().isoformat()
+
+    symbols: set[str] = set()
+    for rec in await _load_all():
+        if rec.get("date") == today and _status(today, now) in ("scheduled", "recording"):
+            for s in rec.get("symbols", []):
+                symbols.add(str(s).upper())
+    if not symbols:
+        return 0
+
+    from app.data.candle_capture import backfill_symbols
+    return await backfill_symbols(sorted(symbols), today)
+
+
+def _spawn_backfill(symbols: list[str], date_str: str) -> None:
+    """Fire-and-forget intraday backfill for a just-created recording, so the HTTP
+    response isn't blocked on the historical fetch. Only runs for a today-dated
+    recording once the open has passed (nothing to backfill before 09:15).
+
+    The tick-store is single-writer (runner/full role only), so in a split api/runner
+    deployment the api process skips the direct write — the runner's maintenance loop
+    backfills within the next cycle instead."""
+    import asyncio, os
+    if os.getenv("BACKEND_ROLE", "full").lower() not in ("full", "runner"):
+        return
+    now = _now_ist()
+    if date_str != now.date().isoformat():
+        return
+    if now.weekday() >= 5 or (now.hour * 60 + now.minute) < _OPEN_MIN:
+        return
+
+    async def _run():
+        try:
+            from app.data.candle_capture import backfill_symbols
+            await backfill_symbols(symbols, date_str)
+        except Exception as exc:
+            logger.debug("recording create backfill failed: %s", exc)
+
+    try:
+        asyncio.get_running_loop().create_task(_run())
+    except RuntimeError:
+        pass
+
+
+# ── Auto A-grade recording (one per trading day) ────────────────────────────
+
+async def sync_daily_agrade_recording() -> Optional[dict]:
+    """Once per trading day, snapshot the freshest scan's A-grade picks into a
+    dedicated recording — so every A-grade name gets captured automatically,
+    no manual list-building needed. The premarket scan (09:00-09:15 IST) is
+    normally what's fresh here, which lands the recording on *today* via the
+    usual `_target_date()` rule; if this fires late, it rolls to the next
+    trading day like any manually created recording would.
+
+    Idempotent per IST calendar day (a Redis flag blocks re-creating after the
+    first successful run) and only acts on a same-day scan — a stale
+    yesterday's watchlist is ignored rather than producing a wrong-day or
+    empty recording. Safe to call frequently (e.g. from a 5-min maintenance
+    loop); returns the created recording, or None if skipped/already done.
+    """
+    from app.utils.redis_client import cache_get, get_redis
+
+    now = _now_ist()
+    if now.weekday() >= 5:
+        return None
+    today = now.date().isoformat()
+
+    r = get_redis()
+    dedupe_key = _AUTO_AGRADE_PREFIX + today
+    if await r.get(dedupe_key):
+        return None
+
+    try:
+        raw = await cache_get(_WATCHLIST_KEY)
+        if not raw:
+            return None
+        data = json.loads(raw)
+    except Exception:
+        return None
+
+    updated_at = str(data.get("updated_at") or "")
+    if not updated_at.startswith(today):
+        return None   # stale (yesterday's) scan — wait for today's to land
+
+    symbols = sorted({
+        str(it.get("symbol")).upper()
+        for it in (data.get("items") or [])
+        if it.get("grade") == "A" and it.get("symbol")
+    })
+    if not symbols:
+        # Nothing graded A yet — don't dedupe-lock the day, a later intraday
+        # rescan (or tomorrow's premarket scan) should get another chance.
+        return None
+
+    rec = {
+        "id":      uuid.uuid4().hex[:12],
+        "name":    f"A-Grade {today}",
+        "symbols": symbols,
+        "date":    _target_date(now),
+        "note":    "Auto-created from the day's A-grade scan picks.",
+        "created_at": now.isoformat(),
+        "updated_at": now.isoformat(),
+        "auto":    True,
+    }
+    await _save(rec)
+    await sync_capture_allowlist()
+    _spawn_backfill(symbols, rec["date"])   # fill the morning if created mid-session
+    await r.set(dedupe_key, "1", ex=86400 * 2)
+    logger.info(
+        "Auto A-grade recording created",
+        extra={"log_type": "recording_event", "event": "auto_agrade_recording",
+               "recording_id": rec["id"], "date": rec["date"], "symbols": len(symbols)},
+    )
+    return rec
+
+
 # ── Coverage ─────────────────────────────────────────────────────────────────
 
 def _coverage_for(rec: dict) -> tuple[list[dict], dict]:
@@ -268,6 +403,7 @@ async def create_recording(req: CreateRecordingRequest, user: dict = Depends(get
     }
     await _save(rec)
     await sync_capture_allowlist()
+    _spawn_backfill(symbols, date)     # fill the morning if created mid-session
     logger.info("Recording created",
                 extra={"log_type": "recording_event", "event": "recording_create",
                        "recording_id": rec["id"], "date": date, "symbols": len(symbols)})
@@ -303,6 +439,7 @@ async def update_recording(rec_id: str, req: UpdateRecordingRequest,
     rec["updated_at"] = now.isoformat()
     await _save(rec)
     await sync_capture_allowlist()
+    _spawn_backfill(rec["symbols"], rec.get("date", ""))   # seed any newly-added symbols' morning
     return {"status": "success", "data": _view(rec, now, with_coverage=True)}
 
 
@@ -376,13 +513,27 @@ async def backtest_recording(rec_id: str, req: BacktestRecordingRequest,
     return {"status": "success", "data": {"started": started, "skipped": skipped}}
 
 
+@router.post("/auto-agrade/sync")
+async def trigger_agrade_sync(user: dict = Depends(get_current_user)):
+    """Manually run the daily A-grade auto-recording check right now, instead of
+    waiting for the next 5-min maintenance tick. No-ops (returns created=false)
+    if today's already been handled or the latest scan has no A-grade picks yet."""
+    rec = await sync_daily_agrade_recording()
+    if rec:
+        return {"status": "success", "data": {"created": True, "recording": _view(rec, _now_ist())}}
+    return {"status": "success", "data": {"created": False}}
+
+
 # ── Maintenance loop ─────────────────────────────────────────────────────────
 
 async def recordings_maintenance_loop() -> None:
     """Keep the capture allowlist correct across day rollovers: as a recording's day
     completes it should stop being captured, and a scheduled one's symbols should be
-    armed ahead of its open. Cheap resync every few minutes; runs in the runner/full
-    role only (same single-writer scope as the capture loop)."""
+    armed ahead of its open. Also checks (once per trading day) whether the day's
+    A-grade scan recording still needs creating, and backfills today's recordings'
+    morning gap from historical (so a mid-day-created recording still ends up full-day).
+    Cheap resync every few minutes; runs in the runner/full role only (same
+    single-writer scope as the capture loop)."""
     import asyncio
     await asyncio.sleep(20)
     logger.info("recordings maintenance loop started",
@@ -392,4 +543,12 @@ async def recordings_maintenance_loop() -> None:
             await sync_capture_allowlist()
         except Exception as exc:
             logger.debug("recordings maintenance resync failed: %s", exc)
+        try:
+            await sync_daily_agrade_recording()
+        except Exception as exc:
+            logger.debug("auto A-grade recording check failed: %s", exc)
+        try:
+            await backfill_today_recordings()
+        except Exception as exc:
+            logger.debug("recordings intraday backfill failed: %s", exc)
         await asyncio.sleep(300)

@@ -201,8 +201,11 @@ const FloatingSystemStatus: React.FC = () => {
     return a.label.localeCompare(b.label);
   });
 
-  // Panel position — above if space, else below; right-aligned to button
-  const panelW   = 362;  // +25% over the original 290px
+  // Panel position — above if space, else below; right-aligned to button.
+  // panelW clamps to the viewport: at a fixed 362px, a 320-360px phone (the
+  // clamp on panelLeft can only push it to x=8, not shrink it) would still
+  // render ~40px of the panel off the right edge of the screen.
+  const panelW   = Math.min(362, window.innerWidth - 16);  // +25% over the original 290px
   const panelH   = 380; // fixed height; services list scrolls inside
   const panelTop = pos.y - panelH - 8 >= 8 ? pos.y - panelH - 8 : pos.y + BTN_SIZE + 8;
   const panelLeft = Math.max(8, Math.min(window.innerWidth - panelW - 8, pos.x - panelW + BTN_SIZE));
@@ -220,7 +223,10 @@ const FloatingSystemStatus: React.FC = () => {
         style={{
           position: 'fixed', left: pos.x, top: pos.y,
           width: BTN_SIZE, height: BTN_SIZE,
-          zIndex: 10000,
+          // Below the mobile full-screen nav (500) and chart-fullscreen mode
+          // (9999) so this diagnostics widget can't float on top of either —
+          // still above ordinary page chrome (header dropdowns top out at 300).
+          zIndex: 450,
           cursor: dragging ? 'grabbing' : 'grab',
           userSelect: 'none', touchAction: 'none',
         }}
@@ -267,7 +273,7 @@ const FloatingSystemStatus: React.FC = () => {
           onClick={e => e.stopPropagation()}
           style={{
             position: 'fixed', left: panelLeft, top: panelTop,
-            width: panelW, zIndex: 9999,
+            width: panelW, zIndex: 449,
             background: 'var(--nd-bg)',
             border: '1px solid var(--nd-border)',
             borderRadius: 12,

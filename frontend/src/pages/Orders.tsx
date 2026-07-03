@@ -697,7 +697,7 @@ const Orders: React.FC = () => {
           <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--nd-text-3)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 12 }}>
             Portfolio Performance · {portfolio.totalTrades} closed trades
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, minmax(0, 1fr))', gap: 8 }}>
+          <div className="nd-orders-perf-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(6, minmax(0, 1fr))', gap: 8 }}>
             {[
               { label: 'Sharpe',       value: portfolio.sharpeRatio.toFixed(2),       good: portfolio.sharpeRatio >= 1 },
               { label: 'Sortino',      value: portfolio.sortinoRatio.toFixed(2),      good: portfolio.sortinoRatio >= 1 },
