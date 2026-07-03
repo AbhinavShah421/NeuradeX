@@ -37,10 +37,15 @@ async def _get_learned_weights() -> dict[str, float]:
     return {}
 
 
-async def _get_action_rates() -> dict[str, dict[str, float]]:
-    """Return per-agent, per-action accuracy rates published by LearningSystem.
-    Shape: {agent_name: {BUY: 0.72, SELL: 0.61, HOLD: 0.29}}
-    Only populated once an action has >= _MIN_ACTION_SAMPLES outcomes."""
+async def _get_action_rates() -> dict:
+    """Return the action-rate payload published by LearningSystem:
+        {"base": {BUY: 0.28, SELL: 0.72, HOLD: 0.72},
+         "rates": {agent_name: {BUY: 0.31, SELL: 0.74, ...}}}
+    `base` is what a skill-less voter would score (the executed-trade base win
+    rate for BUY, its complement for SELL/HOLD); `rates` are Bayesian-shrunk
+    per-agent correctness rates, only present once an action has
+    >= _MIN_ACTION_SAMPLES outcomes. Tolerates the legacy flat shape
+    ({agent: {action: rate}}) by wrapping it with a neutral 0.5 base."""
     now = time.time()
     if _ar_cache["data"] and (now - _ar_cache["ts"]) < _LW_TTL:
         return _ar_cache["data"]
@@ -48,11 +53,32 @@ async def _get_action_rates() -> dict[str, dict[str, float]]:
         from app.utils.redis_client import cache_get
         raw = await cache_get(_ACTION_RATES_KEY)
         if raw:
-            _ar_cache.update({"data": json.loads(raw), "ts": now})
+            data = json.loads(raw)
+            if "rates" not in data:      # legacy flat payload from an old writer
+                data = {"base": {}, "rates": data}
+            _ar_cache.update({"data": data, "ts": now})
             return _ar_cache["data"]
     except Exception:
         pass
     return {}
+
+
+def _action_factor(rate: float | None, base: float | None) -> float:
+    """Vote-weight multiplier from an agent's action-specific correctness rate.
+
+    Skill is LIFT over the base rate, not distance from 0.5: with a ~28% base
+    win rate every agent's BUY rate sits near 0.28, and the old
+    `2.0 * rate` formula read that as "way below random" and halved every
+    directional vote — a structural HOLD bias unrelated to agent skill.
+
+      factor = rate / base, clamped to [0.5, 2.0]
+        rate == base   → 1.0  (no skill signal either way)
+        rate  2× base  → 2.0  (twice as accurate as chance → double weight)
+        rate 0.5× base → 0.5  (half as accurate → half weight)
+    """
+    if rate is None or not base or base <= 0:
+        return 1.0
+    return max(0.5, min(2.0, rate / base))
 
 DEFAULT_WEIGHTS: dict[str, float] = {
     "technical":     1.0,
@@ -176,21 +202,19 @@ class EnsembleEngine:
         # ── Action-specific weighted vote ───────────────────────────────────────
         # Each agent's contribution is scaled by how accurate IT specifically is
         # for the action it just voted — a BUY voter is weighted by its BUY rate,
-        # a SELL voter by its SELL rate.  Overall weight still anchors the scale;
-        # action rate shifts it up or down (rate=0.5 → 1.0×, 0.7 → 1.4×, 0.3 → 0.6×).
-        # Rates are only applied once an agent has ≥ _MIN_ACTION_SAMPLES outcomes for
-        # that action (see learning.py), so cold-start agents stay at 1.0×.
+        # a SELL voter by its SELL rate — measured as LIFT over the base rate a
+        # skill-less voter would score (see _action_factor). Overall weight still
+        # anchors the scale. Rates only exist once an agent has
+        # ≥ _MIN_ACTION_SAMPLES outcomes for that action (see learning.py), so
+        # cold-start agents stay at 1.0×.
+        rate_base  = action_rates.get("base", {})
+        rate_table = action_rates.get("rates", {})
         vote: dict[str, float] = {"BUY": 0.0, "SELL": 0.0, "HOLD": 0.0}
         for s in signals:
             base_w = s.weight or 1.0
             if s.action in ("BUY", "SELL"):
-                rate = action_rates.get(s.agent_name, {}).get(s.action)
-                # factor: maps accuracy rate [0,1] → multiplier centred at 0.5
-                #   rate 0.50 → 1.0×  (no change)
-                #   rate 0.70 → 1.4×  (33% accuracy edge → 40% weight boost)
-                #   rate 0.30 → 0.6×  (20% below random → 40% weight reduction)
-                action_factor = max(0.2, 2.0 * rate) if rate is not None else 1.0
-                effective_w   = base_w * action_factor
+                rate        = rate_table.get(s.agent_name, {}).get(s.action)
+                effective_w = base_w * _action_factor(rate, rate_base.get(s.action))
             else:
                 effective_w = base_w   # HOLD: use base weight unchanged
             s.weight = round(effective_w, 3)   # persist effective weight for logging/UI

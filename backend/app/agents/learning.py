@@ -10,6 +10,34 @@ logger = get_logger(__name__)
 _WEIGHTS_KEY      = "ai_engine:agent_weights"
 _ACTION_RATES_KEY = "ai_engine:agent_action_rates"
 _MIN_ACTION_SAMPLES = 20   # minimum decisions before we trust action-specific rate
+_SHRINK_K           = 20   # Bayesian shrinkage prior weight (in pseudo-samples)
+
+# Weight decay/normalization (see record_outcome). Additive weight updates with a
+# [0.3, 3.0] clamp and no decay saturated 9 of 12 agents at the ceiling — learned
+# weighting collapsed back to uniform. After every outcome we (a) decay each weight
+# toward 1.0 with a ~200-trade half-life so stale evidence fades, and (b) renormalize
+# the mean to 1.0 so the *relative* ordering is what matters, not absolute drift.
+_DECAY_PER_TRADE = 0.99654   # 0.5 ** (1/200) → half-life ≈ 200 recorded outcomes
+
+
+def _shrunk_rate(correct: int, total: int, base: float, k: int = _SHRINK_K) -> float:
+    """Bayesian-shrunk accuracy: pulls small samples toward the base rate so an
+    agent needs sustained evidence (not a lucky 20-trade run) to earn a big
+    factor. (correct + k·base) / (total + k)."""
+    if total <= 0:
+        return base
+    return (correct + k * base) / (total + k)
+
+
+def _vote_was_correct(action: str, trade_won: bool) -> bool:
+    """Whether an agent's vote was right given the executed trade's result.
+    The system trades long-only (BUY→SELL), so:
+      BUY  voter is right when the trade won;
+      SELL voter is right when the trade lost;
+      HOLD voter (abstain) is right when the trade lost."""
+    if action == "BUY":
+        return trade_won
+    return not trade_won
 
 _DDL_STATEMENTS = [
     """CREATE TABLE IF NOT EXISTS ai_engine_predictions (
@@ -227,6 +255,26 @@ class LearningSystem:
                         })
                         if sig["agent"] == "rl":
                             rl_action = sig["action"]
+
+                    # ── Anti-saturation: decay + renormalize ──────────────────
+                    # Additive deltas with a hard [0.3, 3.0] clamp and no decay
+                    # eventually pinned most agents at the ceiling, collapsing the
+                    # learned weighting back to uniform. Two counter-forces:
+                    #   1. Decay each weight toward 1.0 (half-life ≈ 200 outcomes)
+                    #      so evidence ages out instead of accumulating forever.
+                    #   2. Renormalize the mean to 1.0 — only *relative* weight
+                    #      matters in the vote, so absolute drift is pure noise
+                    #      that eats headroom under the clamp.
+                    await conn.execute(text("""
+                        UPDATE ai_engine_agent_weights
+                        SET weight = 1.0 + (weight - 1.0) * :decay
+                    """), {"decay": _DECAY_PER_TRADE})
+                    await conn.execute(text("""
+                        UPDATE ai_engine_agent_weights
+                        SET weight = GREATEST(0.3, LEAST(3.0,
+                                weight / NULLIF((SELECT AVG(weight)
+                                                 FROM ai_engine_agent_weights), 0)))
+                    """))
         except Exception as exc:
             logger.warning("record_outcome failed: %s", exc)
 
@@ -315,18 +363,42 @@ class LearningSystem:
         await self._sync_action_rates_to_redis()
 
     async def _sync_action_rates_to_redis(self) -> None:
-        """Publish per-agent, per-action accuracy rates so the ensemble can use
-        action-specific weights (BUY voters weighted by BUY rate, SELL by SELL rate)."""
+        """Publish per-agent, per-action *vote correctness* rates + the base rates
+        the ensemble should compare them against.
+
+        Correctness is action-aware (see _vote_was_correct): a SELL voter is right
+        when the trade LOST. The old query counted o.outcome='correct' (trade won)
+        for every action, which inverted SELL — good bears were published with low
+        rates and had their votes scaled DOWN.
+
+        Each action also gets a baseline: BUY's is the base win rate of executed
+        trades (~P(win)), SELL/HOLD's is its complement. The ensemble weights a
+        vote by its LIFT over that baseline, not vs a fixed 0.5 — with a ~28% base
+        win rate, comparing to 0.5 was silently halving every directional vote.
+
+        Published shape:
+            {"base": {"BUY": 0.28, "SELL": 0.72, "HOLD": 0.72},
+             "rates": {agent: {action: shrunk_correct_rate}}}
+        """
         try:
             from sqlalchemy import text
             from app.database.postgres import engine
             async with engine.begin() as conn:
+                base_row = (await conn.execute(text("""
+                    SELECT COUNT(*)::int,
+                           SUM(CASE WHEN outcome = 'correct' THEN 1 ELSE 0 END)::int
+                    FROM ai_engine_outcomes
+                """))).fetchone()
                 rows = (await conn.execute(text("""
                     SELECT
                         sig->>'agent'  AS agent_name,
                         sig->>'action' AS action,
                         COUNT(*)::int  AS total,
-                        SUM(CASE WHEN o.outcome = 'correct' THEN 1 ELSE 0 END)::int AS correct
+                        SUM(CASE
+                              WHEN sig->>'action' = 'BUY'
+                                   THEN CASE WHEN o.outcome = 'correct' THEN 1 ELSE 0 END
+                              ELSE CASE WHEN o.outcome = 'correct' THEN 0 ELSE 1 END
+                            END)::int AS correct
                     FROM ai_engine_predictions p
                     JOIN ai_engine_outcomes o USING (prediction_id)
                     CROSS JOIN LATERAL jsonb_array_elements(p.agent_signals::jsonb) AS sig
@@ -334,15 +406,23 @@ class LearningSystem:
                     GROUP BY sig->>'agent', sig->>'action'
                 """))).fetchall()
 
+            n_out, n_win = (base_row[0] or 0), (base_row[1] or 0)
+            base_win = (n_win / n_out) if n_out > 0 else 0.5
+            base = {"BUY": round(base_win, 3),
+                    "SELL": round(1.0 - base_win, 3),
+                    "HOLD": round(1.0 - base_win, 3)}
+
             rates: dict[str, dict[str, float]] = {}
             for r in rows:
                 agent, action, total, correct = r[0], r[1], r[2] or 0, r[3] or 0
-                if total >= _MIN_ACTION_SAMPLES:
-                    rates.setdefault(agent, {})[action] = round(correct / total, 3)
+                if total >= _MIN_ACTION_SAMPLES and action in base:
+                    rates.setdefault(agent, {})[action] = round(
+                        _shrunk_rate(correct, total, base[action]), 3)
 
             from app.utils.redis_client import cache_set
-            await cache_set(_ACTION_RATES_KEY, json.dumps(rates), expire=3600)
-            logger.debug("Action rates synced: %d agents", len(rates))
+            payload = {"base": base, "rates": rates}
+            await cache_set(_ACTION_RATES_KEY, json.dumps(payload), expire=3600)
+            logger.debug("Action rates synced: %d agents (base win %.3f)", len(rates), base_win)
         except Exception as exc:
             logger.debug("Could not sync action rates to Redis: %s", exc)
 
@@ -374,13 +454,19 @@ class LearningSystem:
                 # Per-agent, per-action breakdown from the predictions + outcomes tables.
                 # jsonb_array_elements unnests the agent_signals JSON array so each agent
                 # vote is its own row, then we group by agent+action to get BUY/SELL/HOLD
-                # counts and accuracy.
+                # counts and accuracy. Correctness is action-aware (same rule as the
+                # weight updates + published rates): SELL/HOLD voters are right when
+                # the executed trade LOST, BUY voters when it won.
                 action_rows = (await conn.execute(text("""
                     SELECT
                         sig->>'agent'  AS agent_name,
                         sig->>'action' AS action,
                         COUNT(*)::int  AS total,
-                        SUM(CASE WHEN o.outcome = 'correct' THEN 1 ELSE 0 END)::int AS correct,
+                        SUM(CASE
+                              WHEN sig->>'action' = 'BUY'
+                                   THEN CASE WHEN o.outcome = 'correct' THEN 1 ELSE 0 END
+                              ELSE CASE WHEN o.outcome = 'correct' THEN 0 ELSE 1 END
+                            END)::int AS correct,
                         ROUND(AVG(o.pnl_pct)::numeric, 2) AS avg_pnl
                     FROM ai_engine_predictions p
                     JOIN ai_engine_outcomes o USING (prediction_id)
