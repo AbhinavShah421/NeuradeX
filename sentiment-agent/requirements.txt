@@ -9,5 +9,5 @@ pymongo==4.6.3
 transformers==4.37.0
 # torch installed separately in Dockerfile using CPU-only wheel (see Dockerfile)
 python-dotenv==1.0.0
-requests==2.31.0
+requests==2.32.3
 python-json-logger==2.0.7

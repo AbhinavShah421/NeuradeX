@@ -53,9 +53,13 @@ public class RiskValidatedConsumer {
             log.info("Published trade.outcomes for {} tradeId={}", outcome.getSymbol(), outcome.getTradeId());
 
         } catch (Exception e) {
-            log.error("Trade execution failed for {}: {}", validated.getSymbol(), e.getMessage());
-            // Re-throw so Spring AMQP nacks the message — caller must configure DLQ on risk.validated queue
-            throw new org.springframework.amqp.AmqpRejectAndDontRequeueException(
+            // Rethrow so Spring AMQP's retry interceptor (spring.rabbitmq.listener.simple.retry.*
+            // in application.properties) retries transient failures (e.g. Groww API blips) a
+            // bounded number of times with backoff, then hands the message to the
+            // RepublishMessageRecoverer (see RabbitConfig) which republishes it to
+            // risk.validated.dlq instead of the order silently vanishing.
+            log.error("Trade execution failed for {} (will retry): {}", validated.getSymbol(), e.getMessage());
+            throw new IllegalStateException(
                 "Trade execution failed for " + validated.getSymbol() + ": " + e.getMessage(), e);
         }
     }

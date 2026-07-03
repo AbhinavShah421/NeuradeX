@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import apiService from '../services/api';
 import StockPicker from '../components/StockPicker';
+import { getErrorMessage } from '../utils/errors';
 
 // ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -85,7 +86,7 @@ interface TickData {
   signal:      string;
   signalInt:   number;
   confidence?: number;
-  indicators:  Record<string, any>;
+  indicators:  Record<string, number>;
   candleTime:  string;
   istTime:     string;
 }
@@ -256,8 +257,8 @@ const LiveTrading: React.FC = () => {
 
   const fetchStatus = useCallback(async () => {
     try {
-      const r = await (apiService as any).liveStatus();
-      setStatus(r.data);
+      const r = await apiService.liveStatus();
+      setStatus(r.data as LiveStatus);
     } catch { /* keep last */ }
   }, []);
 
@@ -272,7 +273,7 @@ const LiveTrading: React.FC = () => {
   const pollTick = useCallback(async () => {
     if (!symbol || !statusRef.current?.marketOpen) return;
     try {
-      const r = await (apiService as any).paperTradingTick(symbol, { position: 'NONE', entry_price: 0, quantity: 0 });
+      const r = await apiService.paperTradingTick(symbol, { position: 'NONE', entry_price: 0, quantity: 0 });
       const d = r.data as TickData;
       setTick(d);
       setLastUpdate(d.istTime || '');
@@ -287,7 +288,7 @@ const LiveTrading: React.FC = () => {
       const confidence    = d.indicators?.ensembleConfidence ?? d.indicators?.confidence ?? 0.65;
       const agentAgreement = d.indicators?.agentAgreement ?? 0.55;
 
-      const evalR = await (apiService as any).liveEvaluate({
+      const evalR = await apiService.liveEvaluate({
         symbol,
         action,
         confidence,
@@ -324,8 +325,8 @@ const LiveTrading: React.FC = () => {
       await Promise.allSettled(
         syms.map(async sym => {
           try {
-            const r = await (apiService as any).paperTradingTick(sym, { position: 'LONG', entry_price: 0, quantity: 0 });
-            prices[sym] = r.data?.price ?? 0;
+            const r = await apiService.paperTradingTick(sym, { position: 'LONG', entry_price: 0, quantity: 0 });
+            prices[sym] = (r.data as TickData)?.price ?? 0;
           } catch {}
         })
       );
@@ -341,25 +342,25 @@ const LiveTrading: React.FC = () => {
   const handleEnable = async () => {
     setLoading(true); setError(null);
     try {
-      await (apiService as any).liveEnable({
+      await apiService.liveEnable({
         allocated_capital: parseFloat(capital) || 50_000,
         auto_execute: autoExec,
       });
       await fetchStatus();
-    } catch (e: any) {
-      setError(e?.response?.data?.detail || 'Failed to enable');
+    } catch (e: unknown) {
+      setError(getErrorMessage(e, 'Failed to enable'));
     } finally { setLoading(false); setShowEnableModal(false); }
   };
 
   const handleDisable = async () => {
     setLoading(true); setError(null);
     try {
-      await (apiService as any).liveDisable();
+      await apiService.liveDisable();
       setEvaluation(null);
       setPendingOrder(null);
       await fetchStatus();
-    } catch (e: any) {
-      setError(e?.response?.data?.detail || 'Failed to disable');
+    } catch (e: unknown) {
+      setError(getErrorMessage(e, 'Failed to disable'));
     } finally { setLoading(false); }
   };
 
@@ -368,7 +369,7 @@ const LiveTrading: React.FC = () => {
   const executeOrder = async (ev: Evaluation, price: number, action?: string) => {
     setOrderLoading(true); setError(null);
     try {
-      await (apiService as any).livePlaceOrder({
+      await apiService.livePlaceOrder({
         symbol,
         action:        action ?? ev.action,
         quantity:      ev.recommendedQty || 1,
@@ -379,18 +380,18 @@ const LiveTrading: React.FC = () => {
       setPendingOrder(null);
       setEvaluation(null);
       await fetchStatus();
-    } catch (e: any) {
-      setError(e?.response?.data?.detail || 'Order failed');
+    } catch (e: unknown) {
+      setError(getErrorMessage(e, 'Order failed'));
     } finally { setOrderLoading(false); }
   };
 
   const handleSquareoff = async (sym?: string) => {
     setOrderLoading(true); setError(null);
     try {
-      await (apiService as any).liveSquareoff(sym ? { symbol: sym } : {});
+      await apiService.liveSquareoff(sym ? { symbol: sym } : {});
       await fetchStatus();
-    } catch (e: any) {
-      setError(e?.response?.data?.detail || 'Squareoff failed');
+    } catch (e: unknown) {
+      setError(getErrorMessage(e, 'Squareoff failed'));
     } finally { setOrderLoading(false); }
   };
 

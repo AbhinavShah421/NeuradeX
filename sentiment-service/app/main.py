@@ -6,7 +6,6 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
 from .sentiment import sentiment_loop, refresh_all, get_sentiment, get_state
 from . import llm
@@ -14,6 +13,8 @@ from . import llm
 from app.elk_logger import setup_logging, get_logger
 setup_logging()
 logger = get_logger("sentiment-service")
+
+from app.cors import configure_cors
 
 _tasks: list[asyncio.Task] = []
 
@@ -29,7 +30,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="sentiment-service", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+configure_cors(app)
 
 
 @app.get("/health")

@@ -12,6 +12,7 @@ from pydantic import BaseModel, field_validator
 
 from app.utils.groww_client import get_groww_client
 from app.utils.elk_logger import get_logger
+from app.config import settings
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -217,12 +218,10 @@ async def cancel_order(req: CancelRequest):
 # The browser cannot reach feedback-service:8012 directly (Docker-internal only).
 # These endpoints proxy through the backend so the frontend can call /api/orders/feedback/*.
 
-_FEEDBACK_BASE = "http://feedback-service:8012"
-
 async def _feedback_get(path: str, params: dict | None = None):
     try:
         async with httpx.AsyncClient() as client:
-            r = await client.get(f"{_FEEDBACK_BASE}{path}", params=params, timeout=5.0)
+            r = await client.get(f"{settings.FEEDBACK_SERVICE_URL}{path}", params=params, timeout=5.0)
             r.raise_for_status()
             return r.json()
     except httpx.HTTPStatusError as e:

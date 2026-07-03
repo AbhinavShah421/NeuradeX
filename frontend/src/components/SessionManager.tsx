@@ -1,8 +1,70 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../stores/appStore';
 import apiService from '../services/api';
-import TradingChart, { TradeMarker } from './TradingChart';
+import TradingChart, { TradeMarker, ChartCandle } from './TradingChart';
 import StockPicker from './StockPicker';
+import { getErrorMessage } from '../utils/errors';
+
+// ── Session data shapes (server-side trading session state) ───────────────────
+interface SessionSummary {
+  id: string;
+  status: string;
+  mode?: 'replay' | 'paper';
+  symbol: string;
+  date?: string;
+  currentTime?: string;
+  pnl: number;
+  trades?: number;
+  position?: string;
+}
+
+interface SessionAgentVote { agent: string; action: string; reasoning?: string }
+
+interface SessionDecision {
+  action?: string;
+  confidence?: number;
+  executed?: boolean;
+  time?: string;
+  reason?: string;
+  timingSignal?: number;
+  timingLabel?: string;
+  timingMode?: string;
+  ensembleAction?: string;
+  indicators?: { rsi?: number; momentumPct?: number; vwap?: number };
+  agents?: SessionAgentVote[];
+}
+
+interface SessionTrade {
+  time?: string;
+  timestamp?: number;
+  action: 'BUY' | 'SELL';
+  price: number;
+  quantity?: number;
+  pnl?: number;
+  reason?: string;
+  executed?: boolean;
+}
+
+interface SessionDetail {
+  id: string;
+  status: string;
+  symbol: string;
+  date?: string;
+  currentTime?: string;
+  dataSource?: string;
+  speed?: number;
+  pnl: number;
+  pnlPct?: number;
+  cash: number;
+  timingMode?: string;
+  positionDetail?: { status: string; quantity?: number; entryPrice?: number; currentPnl?: number };
+  agentDecision?: SessionDecision;
+  lastDecision?: SessionDecision | null;
+  decisionLog?: SessionTrade[];
+  tradesList?: SessionTrade[];
+  candles?: ChartCandle[];
+  prevDayCandles?: ChartCandle[];
+}
 
 /**
  * Multi-session manager: start several server-side trading sessions (different
@@ -65,9 +127,9 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
   const isDark = theme === 'dark';
   const header = HEADERS[fixedMode ?? 'all'];
 
-  const [sessions, setSessions] = useState<any[]>([]);
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [detail, setDetail] = useState<any>(null);
+  const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
 
@@ -85,14 +147,14 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
 
   const selectedRef = useRef<string | null>(null);
   selectedRef.current = selectedId;
-  const detailCache = useRef<Map<string, any>>(new Map());
+  const detailCache = useRef<Map<string, SessionDetail>>(new Map());
 
   const loadList = useCallback(async () => {
     try {
       const r = await apiService.sessionList();
-      setSessions((r as any).data ?? []);
-    } catch (e: any) {
-      const status = e?.response?.status;
+      setSessions((r.data as SessionSummary[]) ?? []);
+    } catch (e: unknown) {
+      const status = (e as { response?: { status?: number } })?.response?.status;
       if (status === 401 || status === 403) {
         setError('Session expired — please log in again.');
       }
@@ -102,7 +164,7 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
   const loadDetail = useCallback(async (id: string) => {
     try {
       const r = await apiService.sessionGet(id);
-      const data = (r as any).data;
+      const data = r.data as SessionDetail;
       detailCache.current.set(id, data);
       if (selectedRef.current === id) setDetail(data);
     } catch { if (selectedRef.current === id) setDetail(null); }
@@ -128,11 +190,11 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
         start_time: startTime, capital: parseFloat(capital) || 50000, speed,
         timing_mode: timingMode,
       });
-      const d = (r as any).data;
+      const d = r.data as { id: string };
       await loadList();
       setSelectedId(d.id);
-    } catch (e: any) {
-      setError(e?.response?.data?.detail || e?.message || 'Failed to start session');
+    } catch (e: unknown) {
+      setError(getErrorMessage(e, 'Failed to start session'));
     } finally {
       setStarting(false);
     }
@@ -145,11 +207,11 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
   // Only in-progress sessions of this mode are listed; finished ones live in Orders.
   const running = sessions.filter(s => s.status === 'running' && (!fixedMode || s.mode === fixedMode));
 
-  const markers: TradeMarker[] = (detail?.tradesList ?? []).map((t: any) => ({ timestamp: t.timestamp, action: t.action, price: t.price }));
-  const pos = detail?.positionDetail ?? {};
-  const dec = detail?.agentDecision ?? {};
+  const markers: TradeMarker[] = (detail?.tradesList ?? []).map((t) => ({ timestamp: t.timestamp ?? 0, action: t.action, price: t.price }));
+  const pos: NonNullable<SessionDetail['positionDetail']> = detail?.positionDetail ?? { status: 'FLAT' };
+  const dec: SessionDecision = detail?.agentDecision ?? {};
   const ld  = detail?.lastDecision ?? null;
-  const decLog: any[] = detail?.decisionLog ?? [];
+  const decLog: SessionTrade[] = detail?.decisionLog ?? [];
   const actColor = (a?: string) => a === 'BUY' ? 'var(--nd-green)' : a === 'SELL' ? 'var(--nd-red)' : 'var(--nd-text-2)';
 
   return (
@@ -169,7 +231,7 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 12 }}>
           {!fixedMode && (
             <Field label="Mode" full>
-              <select className="nd-select" value={mode} onChange={e => setMode(e.target.value as any)} style={fieldStyle}>
+              <select className="nd-select" value={mode} onChange={e => setMode(e.target.value as 'replay' | 'paper')} style={fieldStyle}>
                 <option value="replay">AI Live Trading (replay)</option>
                 <option value="paper">Paper Trading (live)</option>
               </select>
@@ -198,7 +260,7 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
             </select>
           </Field>
           <Field label="Entry timing">
-            <select className="nd-select" value={timingMode} onChange={e => setTimingMode(e.target.value as any)} style={fieldStyle}
+            <select className="nd-select" value={timingMode} onChange={e => setTimingMode(e.target.value as 'normal' | 'aggressive')} style={fieldStyle}
               title="Aggressive loosens the entry triggers (wider RSI/momentum bands) so the session takes more trades">
               <option value="normal">Normal</option>
               <option value="aggressive">Aggressive (more trades)</option>
@@ -271,9 +333,9 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
           </div>
 
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, marginBottom: 12 }}>
-            <Stat label="P&L" value={`${detail.pnl >= 0 ? '+' : ''}${inr(detail.pnl)} (${detail.pnlPct >= 0 ? '+' : ''}${(detail.pnlPct ?? 0).toFixed(2)}%)`} color={pnlColor(detail.pnl)} />
+            <Stat label="P&L" value={`${detail.pnl >= 0 ? '+' : ''}${inr(detail.pnl)} (${(detail.pnlPct ?? 0) >= 0 ? '+' : ''}${(detail.pnlPct ?? 0).toFixed(2)}%)`} color={pnlColor(detail.pnl)} />
             <Stat label="Cash" value={inr(detail.cash)} />
-            <Stat label="Position" value={pos.status === 'LONG' ? `LONG ${pos.quantity} @ ${inr(pos.entryPrice)}` : 'FLAT'} color={pos.status === 'LONG' ? 'var(--nd-green)' : 'var(--nd-text-2)'} />
+            <Stat label="Position" value={pos.status === 'LONG' ? `LONG ${pos.quantity} @ ${inr(pos.entryPrice ?? 0)}` : 'FLAT'} color={pos.status === 'LONG' ? 'var(--nd-green)' : 'var(--nd-text-2)'} />
             <Stat label="Unrealised" value={inr(pos.currentPnl ?? 0)} color={pnlColor(pos.currentPnl ?? 0)} />
           </div>
 
@@ -311,7 +373,7 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
                     {ind.vwap != null && <span>VWAP <strong style={{ color: 'var(--nd-text-1)' }}>{inr(ind.vwap)}</strong></span>}
                     {Array.isArray(d.agents) && d.agents.length > 0 && (
                       <span style={{ flexBasis: '100%', marginTop: 2 }}>
-                        Agents: {d.agents.map((a: any, i: number) => (
+                        Agents: {d.agents.map((a, i: number) => (
                           <span key={i} style={{ marginRight: 8 }}>{a.agent} <strong style={{ color: actColor(a.action) }}>{a.action}</strong></span>
                         ))}
                       </span>
@@ -329,7 +391,7 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
                 Decision log ({decLog.length} candles)
               </summary>
               <div style={{ maxHeight: 240, overflow: 'auto', border: '1px solid var(--nd-border)', borderRadius: 8, marginTop: 6 }}>
-                {[...decLog].reverse().map((d: any, i: number) => (
+                {[...decLog].reverse().map((d, i: number) => (
                   <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'baseline', padding: '5px 10px', borderBottom: '1px solid var(--nd-border)', fontSize: 11 }}>
                     <span style={{ color: 'var(--nd-text-3)', width: 42, flexShrink: 0 }}>{d.time}</span>
                     <span style={{ fontWeight: 700, color: actColor(d.action), width: 38, flexShrink: 0 }}>{d.action}</span>
@@ -350,7 +412,7 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
                   </tr>
                 </thead>
                 <tbody>
-                  {detail.tradesList.map((t: any, i: number) => (
+                  {(detail.tradesList ?? []).map((t, i: number) => (
                     <tr key={i} style={{ borderTop: '1px solid var(--nd-border)' }}>
                       <td style={td}>{t.time}</td>
                       <td style={{ ...td, color: t.action === 'BUY' ? 'var(--nd-green)' : 'var(--nd-red)', fontWeight: 600 }}>{t.action}</td>

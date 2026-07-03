@@ -5,7 +5,6 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .autopilot import paper_loop, backtest_loop, status, set_mode, kick, reset_cursor, _set_batch_size, _set_speed
@@ -13,6 +12,8 @@ from .autopilot import paper_loop, backtest_loop, status, set_mode, kick, reset_
 from app.elk_logger import setup_logging, get_logger
 setup_logging()
 logger = get_logger("autopilot")
+
+from app.cors import configure_cors
 
 _tasks: list[asyncio.Task] = []
 
@@ -29,7 +30,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="autopilot-service", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+configure_cors(app)
 
 
 class ControlRequest(BaseModel):
