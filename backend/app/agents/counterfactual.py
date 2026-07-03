@@ -95,6 +95,8 @@ async def init_schema() -> None:
 # that survived past 31 minutes won 48.9% (+0.16%) — the tight stop / fast-cut /
 # SMA5-trail cluster crystallises 1-minute noise as losses.
 
+# The OLD tight exit policy (pre-2026-07-03 _tech_signal rules). Kept as the
+# A/B's "baseline" variant so day-over-day comparisons stay continuous.
 BASELINE_POLICY: dict = {
     "stop_atr_mult": 0.9,  "stop_floor": 1.0,     # stop  = -max(floor, mult×ATR%)
     "take_atr_mult": 1.8,  "take_floor": 2.5,     # take  = +max(floor, mult×ATR%)
@@ -102,6 +104,16 @@ BASELINE_POLICY: dict = {
     "fast_cut": True,       "rsi_exit": True,      # momentum cut / overbought exit
     "grace_min": 0,                                # stop active immediately
     "hold_cap": 30,                                # minutes
+}
+
+# The exit policy the live sessions actually run (_tech_signal LONG rules) —
+# CF labels must track this. Updated 2026-07-03 to the A/B winner "wide_hold60"
+# (wider ATR stop, 10-min grace, no fast momentum cuts, 60-min runway): +12pts
+# win-rate on ~13k identical entries across four independent populations.
+LIVE_POLICY: dict = {
+    **BASELINE_POLICY,
+    "stop_atr_mult": 1.5, "stop_floor": 1.5,
+    "fast_cut": False, "grace_min": 10, "hold_cap": 60,
 }
 
 EXIT_VARIANTS: dict[str, dict] = {
@@ -206,11 +218,13 @@ def _simulate_policy(bars: list[dict], inds: list[dict], entry_idx: int,
     return round(pnl / (qty * entry) * 100, 3)
 
 
-def _simulate_long(bars: list[dict], entry_idx: int, max_hold_minutes: int = 30) -> Optional[float]:
-    """Live-policy simulation (the CF label): the baseline policy at the given
-    hold cap — this is what the running sessions would actually have done."""
-    policy = BASELINE_POLICY if max_hold_minutes == BASELINE_POLICY["hold_cap"] \
-        else {**BASELINE_POLICY, "hold_cap": max_hold_minutes}
+def _simulate_long(bars: list[dict], entry_idx: int,
+                   max_hold_minutes: Optional[int] = None) -> Optional[float]:
+    """Live-policy simulation (the CF label): LIVE_POLICY at the given hold cap
+    (default: the live cap) — what the running sessions would actually do."""
+    cap = LIVE_POLICY["hold_cap"] if max_hold_minutes is None else max_hold_minutes
+    policy = LIVE_POLICY if cap == LIVE_POLICY["hold_cap"] \
+        else {**LIVE_POLICY, "hold_cap": cap}
     return _simulate_policy(bars, _day_indicators(bars), entry_idx, policy)
 
 
@@ -276,7 +290,7 @@ async def label_pending(max_days: int = _LABEL_BATCH_DAYS) -> dict:
                 if idx is not None and idx + 1 < len(bars):
                     # Enter at the NEXT bar's open — the decision is made on the
                     # closed candle, exactly like the live entry path.
-                    cf = _simulate_policy(bars, inds, idx + 1, BASELINE_POLICY)
+                    cf = _simulate_policy(bars, inds, idx + 1, LIVE_POLICY)
             updates.append({"id": r[0], "cf": cf})
             if cf is None:
                 skipped += 1
@@ -438,19 +452,68 @@ async def promote_memory_phantoms(day: str) -> int:
 
 
 # ── Exit-policy A/B evaluation ────────────────────────────────────────────────
+# Two entry populations, tagged by `source`:
+#   sessions — the day's labeled session decisions (what the live system faced)
+#   store    — synthesized entries at a fixed stride over EVERY recorded
+#              symbol-day in the tick store. Needs no sessions/ensemble, so the
+#              whole recorded history becomes A/B evidence immediately instead
+#              of waiting for live days to accumulate.
 
-_AB_TRAINED_KEY   = "counterfactual:ab_trained:"    # + date → dedupe flag
-_AB_MAX_PER_DAY   = 4000                            # decision sample cap per day
+_AB_TRAINED_KEY   = "counterfactual:ab_trained:"          # + date → dedupe flag
+_AB_STORE_KEY     = "counterfactual:ab_store_trained:"    # + date → dedupe flag
+_AB_MAX_PER_DAY   = 4000                                  # decision sample cap per day
+_AB_STORE_STRIDE  = 3        # store population: an entry every N minutes
+_AB_STORE_LAST_ENTRY_MIN = 13 * 60 + 30   # entries up to 13:30 IST — matches the
+                                          # live entry-cutoff regime the winning
+                                          # policy would actually trade under
 
 _AB_DDL = """CREATE TABLE IF NOT EXISTS cf_exit_ab (
     day         TEXT NOT NULL,
     variant     TEXT NOT NULL,
+    source      TEXT NOT NULL DEFAULT 'sessions',
     n           INTEGER,
     wins        INTEGER,
     avg_pnl_pct DOUBLE PRECISION,
     updated_at  TIMESTAMPTZ DEFAULT NOW(),
-    PRIMARY KEY (day, variant)
+    PRIMARY KEY (day, variant, source)
 )"""
+
+
+async def _ensure_ab_schema(conn) -> None:
+    """Create/migrate cf_exit_ab: older deployments lack the `source` column and
+    have PK (day, variant) — widen both. Idempotent."""
+    from sqlalchemy import text
+    await conn.execute(text(_AB_DDL))
+    await conn.execute(text(
+        "ALTER TABLE cf_exit_ab ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'sessions'"))
+    await conn.execute(text("ALTER TABLE cf_exit_ab DROP CONSTRAINT IF EXISTS cf_exit_ab_pkey"))
+    await conn.execute(text(
+        "ALTER TABLE cf_exit_ab ADD CONSTRAINT cf_exit_ab_pkey PRIMARY KEY (day, variant, source)"))
+
+
+async def _store_ab_results(day: str, source: str, stats: dict[str, list[float]]) -> dict:
+    """Aggregate per-variant pnl lists and upsert into cf_exit_ab."""
+    from sqlalchemy import text
+    from app.database.postgres import engine
+    out: dict[str, dict] = {}
+    async with engine.begin() as conn:
+        await _ensure_ab_schema(conn)
+        for name, pnls in stats.items():
+            if not pnls:
+                continue
+            agg = {"n": len(pnls),
+                   "wins": sum(1 for p in pnls if p >= 0),
+                   "avg": round(sum(pnls) / len(pnls), 4)}
+            out[name] = agg
+            await conn.execute(text("""
+                INSERT INTO cf_exit_ab (day, variant, source, n, wins, avg_pnl_pct, updated_at)
+                VALUES (:day, :v, :src, :n, :w, :avg, NOW())
+                ON CONFLICT (day, variant, source) DO UPDATE SET
+                    n = EXCLUDED.n, wins = EXCLUDED.wins,
+                    avg_pnl_pct = EXCLUDED.avg_pnl_pct, updated_at = NOW()
+            """), {"day": day, "v": name, "src": source,
+                   "n": agg["n"], "w": agg["wins"], "avg": agg["avg"]})
+    return out
 
 
 async def run_exit_ab(day: str) -> dict:
@@ -470,7 +533,7 @@ async def run_exit_ab(day: str) -> dict:
         return {}
 
     async with engine.begin() as conn:
-        await conn.execute(text(_AB_DDL))
+        await _ensure_ab_schema(conn)
         rows = (await conn.execute(text("""
             SELECT d.symbol, d.candle_time
             FROM session_decisions d
@@ -505,27 +568,61 @@ async def run_exit_ab(day: str) -> dict:
             if pnl is not None:
                 stats[name].append(pnl)
 
-    out: dict[str, dict] = {}
-    async with engine.begin() as conn:
-        for name, pnls in stats.items():
-            if not pnls:
-                continue
-            agg = {"n": len(pnls),
-                   "wins": sum(1 for p in pnls if p >= 0),
-                   "avg": round(sum(pnls) / len(pnls), 4)}
-            out[name] = agg
-            await conn.execute(text("""
-                INSERT INTO cf_exit_ab (day, variant, n, wins, avg_pnl_pct, updated_at)
-                VALUES (:day, :v, :n, :w, :avg, NOW())
-                ON CONFLICT (day, variant) DO UPDATE SET
-                    n = EXCLUDED.n, wins = EXCLUDED.wins,
-                    avg_pnl_pct = EXCLUDED.avg_pnl_pct, updated_at = NOW()
-            """), {"day": day, "v": name, "n": agg["n"], "w": agg["wins"], "avg": agg["avg"]})
-
+    out = await _store_ab_results(day, "sessions", stats)
     await r.set(flag, "1", ex=86400 * 7)
     logger.info("exit A/B evaluated for %s: %s", day,
                 {k: f"{v['wins']}/{v['n']} ({v['avg']:+.3f}%)" for k, v in out.items()},
                 extra={"log_type": "ai_engine", "event": "cf_exit_ab", "day": day})
+    return out
+
+
+async def run_exit_ab_store(day: str, force: bool = False) -> dict:
+    """A/B over the ENTIRE tick store for `day`: every symbol with usable
+    coverage contributes a synthesized entry every _AB_STORE_STRIDE minutes from
+    the open through the 13:30 entry cutoff — the same regime the winning policy
+    would trade under live. No sessions or ensemble required, so all recorded
+    history becomes evidence immediately. Idempotent per day (Redis flag) unless
+    force=True. Returns {variant: {n, wins, avg}}."""
+    from app.utils.redis_client import get_redis
+    from app.data.candle_store import symbols_with_ticks, day_coverage, read_bars
+
+    r = get_redis()
+    flag = _AB_STORE_KEY + day
+    if not force and await r.get(flag):
+        return {}
+
+    symbols = await asyncio.to_thread(symbols_with_ticks, day)
+    stats: dict[str, list[float]] = {v: [] for v in EXIT_VARIANTS}
+    used_symbols = 0
+    for sym in symbols:
+        cov = await asyncio.to_thread(day_coverage, sym, day)
+        if cov.get("ticks", 0) < _MIN_DAY_TICKS:
+            continue
+        bars = await asyncio.to_thread(read_bars, sym, day, 60)
+        if len(bars) < 40:
+            continue
+        inds = await asyncio.to_thread(_day_indicators, bars)
+        used_symbols += 1
+        for i in range(1, len(bars) - 1, _AB_STORE_STRIDE):
+            try:
+                h, m = int(bars[i]["time"].split(":")[0]), int(bars[i]["time"].split(":")[1])
+            except (KeyError, ValueError, IndexError):
+                continue
+            if (h * 60 + m) > _AB_STORE_LAST_ENTRY_MIN:
+                break
+            for name, policy in EXIT_VARIANTS.items():
+                pnl = _simulate_policy(bars, inds, i + 1, policy)
+                if pnl is not None:
+                    stats[name].append(pnl)
+
+    if not any(stats.values()):
+        return {}
+    out = await _store_ab_results(day, "store", stats)
+    await r.set(flag, "1", ex=86400 * 14)
+    logger.info("exit A/B (store) evaluated %s across %d symbols: %s", day, used_symbols,
+                {k: f"{v['wins']}/{v['n']} ({v['avg']:+.3f}%)" for k, v in out.items()},
+                extra={"log_type": "ai_engine", "event": "cf_exit_ab_store",
+                       "day": day, "symbols": used_symbols})
     return out
 
 
@@ -537,15 +634,15 @@ async def exit_ab_report(days: int = 14) -> dict:
     from app.database.postgres import engine
     try:
         async with engine.begin() as conn:
-            await conn.execute(text(_AB_DDL))
+            await _ensure_ab_schema(conn)
             daily = (await conn.execute(text("""
-                SELECT day, variant, n, wins, avg_pnl_pct
+                SELECT day, variant, source, n, wins, avg_pnl_pct
                 FROM cf_exit_ab
                 WHERE day >= (NOW() AT TIME ZONE 'Asia/Kolkata' - make_interval(days => :d))::date::text
-                ORDER BY day DESC, avg_pnl_pct DESC
+                ORDER BY day DESC, source, avg_pnl_pct DESC
             """), {"d": days})).fetchall()
         totals: dict[str, dict] = {}
-        for day, variant, n, wins, avg in daily:
+        for day, variant, source, n, wins, avg in daily:
             t = totals.setdefault(variant, {"n": 0, "wins": 0, "pnl_sum": 0.0})
             t["n"] += n or 0
             t["wins"] += wins or 0
@@ -560,8 +657,8 @@ async def exit_ab_report(days: int = 14) -> dict:
         summary.sort(key=lambda x: x["avg_pnl_pct"], reverse=True)
         return {
             "summary": summary,
-            "daily": [{"day": d, "variant": v, "n": n, "wins": w, "avg_pnl_pct": a}
-                      for d, v, n, w, a in daily],
+            "daily": [{"day": d, "variant": v, "source": s, "n": n, "wins": w, "avg_pnl_pct": a}
+                      for d, v, s, n, w, a in daily],
         }
     except Exception as exc:
         logger.warning("exit_ab_report failed: %s", exc)
@@ -608,6 +705,7 @@ async def counterfactual_loop() -> None:
                 await train_rl_from_labels(day)
                 await promote_memory_phantoms(day)
                 await run_exit_ab(day)
+                await run_exit_ab_store(day)   # whole-tick-store population too
         except Exception as exc:
             logger.warning("counterfactual sweep failed: %s", exc)
         await asyncio.sleep(60)

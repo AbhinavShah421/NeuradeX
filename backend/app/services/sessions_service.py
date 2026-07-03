@@ -504,7 +504,18 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
     # Intraday rule signal times the entries/exits (RSI/VWAP/momentum + take-profit,
     # stop-loss, end-of-day square-off). 1 = buy, -1 = sell, 0 = hold.
     aggressive = s.get("timing_mode") == "aggressive"
-    tsig = -1 if (force_close and pos_status == "LONG") else _tech_signal(ind, pos_status, candle, entry_price, aggressive=aggressive)
+    # Minutes the current LONG has been held — enables _tech_signal's entry grace
+    # period (first minutes: disaster stop only, normal stops suspended).
+    held_minutes = None
+    if pos_status == "LONG" and pos.get("entry_time") and candle.get("time"):
+        try:
+            eh, em = map(int, str(pos["entry_time"]).split(":")[:2])
+            ch, cm = map(int, str(candle["time"]).split(":")[:2])
+            held_minutes = max(0, (ch * 60 + cm) - (eh * 60 + em))
+        except (ValueError, AttributeError):
+            held_minutes = None
+    tsig = -1 if (force_close and pos_status == "LONG") else _tech_signal(
+        ind, pos_status, candle, entry_price, aggressive=aggressive, held_minutes=held_minutes)
 
     # The 11-agent ensemble (+memory gate) is the decision brain: it provides the
     # confidence, the reasoning, and can confirm or veto what the timing signal proposes.

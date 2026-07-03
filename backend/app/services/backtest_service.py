@@ -843,14 +843,25 @@ def _intraday_indicators(candles: list[dict], idx: int) -> dict:
     }
 
 
-def _tech_signal(ind: dict, position: str, candle: dict, entry_price: float, aggressive: bool = False) -> int:
+# Exit grace period (minutes): during the first minutes of a LONG only a 2×
+# disaster stop can fire. Part of the A/B-winning "wide_hold60" exit policy.
+_EXIT_GRACE_MIN = 10
+
+
+def _tech_signal(ind: dict, position: str, candle: dict, entry_price: float, aggressive: bool = False,
+                 held_minutes: int | None = None) -> int:
     """1 = buy, -1 = sell, 0 = hold based on technicals.
 
-    Entries are trend-filtered (no counter-trend knife-catching); exits are
-    volatility-scaled (ATR) with a profit-lock so winners are allowed to run
-    while bad entries are cut quickly — the realised reward:risk that fixed
-    +2.5%/-1.5% with eager momentum exits was giving away.
+    Entries are trend-filtered (no counter-trend knife-catching); exits are the
+    "wide_hold60" policy that won the counterfactual exit A/B on ~13k identical
+    entries across four independent populations (see agents/counterfactual):
+    a wider ATR stop with an entry grace period, no fast momentum cuts. The old
+    tight-stop/fast-cut cluster exited 7.6k trades inside 30 minutes at a 15%
+    win rate (avg -0.23 to -0.32%); the wide policy wins +12pts more on the
+    same entries — 1-minute noise was being crystallised as losses.
 
+    `held_minutes` (when the caller tracks it) enables the grace period: during
+    the first _EXIT_GRACE_MIN minutes only a disaster stop (2×) can fire.
     `aggressive=True` loosens the entry triggers (wider RSI bands, lower momentum
     thresholds, milder downtrend filter) so a session takes more trades — useful
     for observing/training. Exits are unchanged.
@@ -889,18 +900,24 @@ def _tech_signal(ind: dict, position: str, candle: dict, entry_price: float, agg
         if mom5 > 0.35 and price > vwap and rsi < 66:        return 1   # momentum breakout
     elif position == "LONG":
         gain_pct = (price - entry_price) / entry_price * 100
-        stop = -max(1.0, 0.9 * atr_pct)        # ~1×ATR, floor 1.0%
+        stop = -max(1.5, 1.5 * atr_pct)        # wide ATR stop (was -max(1.0, 0.9×ATR):
+                                               # A/B showed the tight stop was the loss factory)
         take = max(2.5, 1.8 * atr_pct)         # let winners run, scaled to volatility
+
+        # Entry grace: 1-min noise wicks out normal stops in the first minutes —
+        # during the grace window only a disaster stop (2×) can fire.
+        if held_minutes is not None and held_minutes < _EXIT_GRACE_MIN:
+            return -1 if gain_pct <= 2 * stop else 0
 
         if gain_pct <= stop:                   return -1   # volatility-scaled stop loss
         if gain_pct >= take:                   return -1   # take profit (runs further than before)
         # Profit-lock: once up ≥1.2%, exit if price loses the 5-bar MA (trail) —
         # protects gains without bailing on every momentum wiggle.
         if gain_pct >= 1.2 and price < sma5:   return -1
-        # Cut bad entries fast — but only while still ~flat, never on a winner.
-        if gain_pct < 0.5:
-            if sma5 < sma20 and mom5 < -0.15:  return -1
-            if mom5 < -0.30:                   return -1
+        # NOTE: the "cut bad entries fast" momentum exits are deliberately gone —
+        # they fired on 1-min noise and were the single biggest loss driver
+        # (sub-30-min exits: 15% win). Removing them alone was worth ~+7.6pts
+        # on identical entries in the exit A/B.
         # Overbought, but only when momentum has already turned down.
         if rsi > 75 and mom5 < 0:              return -1
 
