@@ -119,6 +119,17 @@ async def lifespan(app: FastAPI):
             except Exception as exc:
                 logger.warning("Could not start recordings maintenance: %s", exc)
 
+            # Counterfactual learning — off-hours, labels the decisions sessions
+            # declined against the recorded tick data and feeds RL / action-rates /
+            # pattern-memory with full-information updates.
+            try:
+                from app.agents.counterfactual import counterfactual_loop
+                app.state.counterfactual_task = asyncio.create_task(counterfactual_loop())
+                logger.info("counterfactual learning scheduled",
+                            extra={"log_type": "app_lifecycle", "event": "cf_loop_scheduled"})
+            except Exception as exc:
+                logger.warning("Could not start counterfactual learning: %s", exc)
+
         if _role in ("full", "api"):
             # Delivery (multi-day) paper-trading autopilot — ticks once a day
             try:
@@ -171,7 +182,8 @@ async def lifespan(app: FastAPI):
     try:
         for _attr in ("memory_sweep_task", "gbm_autotrain_task", "delivery_paper_task",
                       "session_runner_task", "candle_capture_task", "scanner_task",
-                      "autopilot_task", "angel_task", "live_squareoff_task"):
+                      "autopilot_task", "angel_task", "live_squareoff_task",
+                      "recordings_maint_task", "counterfactual_task"):
             task = getattr(app.state, _attr, None)
             if task:
                 task.cancel()

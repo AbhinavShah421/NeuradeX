@@ -150,11 +150,16 @@ class RLAgent(BaseAgent):
 
     # ── Learning update ───────────────────────────────────────────────────────
 
-    async def update(self, state: int, action_idx: int, reward: float, next_state: int) -> None:
+    async def update(self, state: int, action_idx: int, reward: float, next_state: int,
+                     lr: float | None = None) -> None:
+        """Q-update. `lr` overrides the default learning rate — counterfactual
+        (simulated) labels train at a fraction of the real-trade rate so replayed
+        what-ifs can inform Q-values without ever outweighing real outcomes."""
+        eff_lr  = LR if lr is None else lr
         q       = await self._load()
         old_q   = q[state][action_idx]
         max_nq  = max(q[next_state])
-        new_q   = old_q + LR * (reward + GAMMA * max_nq - old_q)
+        new_q   = old_q + eff_lr * (reward + GAMMA * max_nq - old_q)
         q[state][action_idx] = new_q
         self._q = q
         await self._save()
@@ -162,7 +167,7 @@ class RLAgent(BaseAgent):
                     extra={"log_type": "ai_engine", "event": "rl_update",
                            "state": state, "action": ACTIONS[action_idx],
                            "old_q": round(old_q, 4), "new_q": round(new_q, 4),
-                           "reward": round(reward, 4)})
+                           "reward": round(reward, 4), "lr": round(eff_lr, 4)})
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 

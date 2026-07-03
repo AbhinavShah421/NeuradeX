@@ -311,7 +311,12 @@ async def _feed_memory(symbol: str, fp, regime: str, pnl_pct: float, entry: floa
 
 
 async def _persist_session_decision(session_id: str, symbol: str, decision: dict) -> None:
-    """Write one candle decision to session_decisions table (permanent, unlike Redis rolling window)."""
+    """Write one candle decision to session_decisions (permanent, unlike the Redis
+    rolling window). Upserted on (session_id, candle_time): _step re-decides the
+    same in-progress candle every ~2s advance tick, and a plain INSERT was writing
+    tens of thousands of duplicate rows per day — the final decision for the
+    candle is the only one that matters (and the only one the counterfactual
+    labeler should learn from)."""
     try:
         import json as _json
         from sqlalchemy import text
@@ -323,6 +328,15 @@ async def _persist_session_decision(session_id: str, symbol: str, decision: dict
                      confidence, reason, indicators, agents, trade)
                 VALUES (:sid, :sym, :ct, :price, :action, :executed,
                         :conf, :reason, :indicators, :agents, :trade)
+                ON CONFLICT (session_id, candle_time) DO UPDATE SET
+                    price      = EXCLUDED.price,
+                    action     = EXCLUDED.action,
+                    executed   = EXCLUDED.executed OR session_decisions.executed,
+                    confidence = EXCLUDED.confidence,
+                    reason     = EXCLUDED.reason,
+                    indicators = EXCLUDED.indicators,
+                    agents     = EXCLUDED.agents,
+                    trade      = COALESCE(EXCLUDED.trade, session_decisions.trade)
             """), {
                 "sid":        session_id,
                 "sym":        symbol,
