@@ -258,7 +258,8 @@ async def _watchlist_symbols() -> list[str]:
 
 async def _committed_symbols() -> list[str]:
     """High-conviction (committed) picks only — the selective tier the system
-    actually trades. Empty means the system abstains for now (no committed setup)."""
+    actually trades. Sorted most-convicted first so sessions open in conviction
+    order. Empty means the scanner committed nothing for now."""
     try:
         r = await _get_redis()
         raw = await r.get(WATCHLIST_KEY)
@@ -268,10 +269,31 @@ async def _committed_symbols() -> list[str]:
                 logger.warning("Watchlist is stale (>4h) — skipping committed symbols read")
                 return []
             comm = data.get("committed") or [it for it in data.get("items", []) if it.get("committed")]
+            comm = sorted(comm, key=lambda it: float(it.get("score") or 0), reverse=True)
             return [it["symbol"] for it in comm if it.get("symbol")]
     except Exception:
         pass
     return []
+
+
+async def _top_conviction_symbols(n: int = 1) -> list[str]:
+    """The n most-convicted watchlist stocks (BUY-rated preferred, by score).
+    Fallback tier: guarantees paper trading starts with the most convicted
+    stock on every trading day even when the committed tier is empty."""
+    try:
+        r = await _get_redis()
+        raw = await r.get(WATCHLIST_KEY)
+        if not raw:
+            return []
+        data = json.loads(raw)
+        if not _watchlist_fresh(data):
+            return []
+        items = [it for it in data.get("items", []) if it.get("symbol")]
+        buys = [it for it in items if it.get("action") == "BUY"] or items
+        buys.sort(key=lambda it: float(it.get("score") or 0), reverse=True)
+        return [it["symbol"] for it in buys[:n]]
+    except Exception:
+        return []
 
 
 async def _start_session(payload: dict) -> str | None:
@@ -281,9 +303,11 @@ async def _start_session(payload: dict) -> str | None:
             r = await c.post(f"{BACKEND_URL}/api/sessions/start", json=tagged)
             if r.status_code == 200:
                 return (r.json().get("data") or {}).get("id")
-            logger.debug("start %s -> %s %s", payload.get("symbol"), r.status_code, r.text[:120])
+            # WARN, not debug — a silently failing start means "autopilot enabled
+            # but no sessions running" with nothing in the logs to explain it.
+            logger.warning("start %s -> %s %s", payload.get("symbol"), r.status_code, r.text[:200])
     except Exception as exc:
-        logger.debug("start_session error: %s", exc)
+        logger.warning("start_session %s error: %s", payload.get("symbol"), exc)
     return None
 
 
@@ -437,10 +461,17 @@ async def _do_paper_tick() -> None:
         )
         return
 
-    # Paper trading acts ONLY on committed high-conviction picks (precision tier).
+    # Paper trading acts on committed high-conviction picks (precision tier),
+    # most-convicted first. If the scanner committed nothing today, never sit
+    # the day out: fall back to the single most-convicted watchlist stock so
+    # every trading day starts with at least one live session for the agents.
     syms = await _committed_symbols()
     if not syms:
-        return                              # abstain — no high-conviction setup
+        syms = await _top_conviction_symbols(1)
+        if syms:
+            logger.info("no committed picks — falling back to top-conviction stock %s", syms[0])
+    if not syms:
+        return                              # no watchlist at all — nothing to trade
     # Use Redis directly for paper session checks — avoids deserialising all
     # session summaries just to count running paper sessions.
     r = await _get_redis()

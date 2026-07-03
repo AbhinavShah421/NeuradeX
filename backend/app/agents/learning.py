@@ -148,6 +148,8 @@ class LearningSystem:
         mem_action: str = "HOLD"
         rl_state: Optional[int] = None
         rl_action: Optional[str] = None
+        row = None                        # defined here so a DB failure inside the
+        signals: list = []                # try can't NameError the blocks below
         try:
             from sqlalchemy import text
             from app.database.postgres import engine

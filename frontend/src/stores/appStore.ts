@@ -17,6 +17,10 @@ interface AppState {
 
   // UI
   theme: 'light' | 'dark';
+  // Command palette is Ctrl/Cmd+K only by default — no on-screen trigger, so it
+  // was unreachable on a touchscreen. This flag lets a visible button (e.g. a
+  // header search icon on mobile) open it without CommandPalette owning global nav state.
+  commandPaletteOpen: boolean;
 
   // Actions
   setStocks: (stocks: Stock[]) => void;
@@ -31,6 +35,7 @@ interface AppState {
   setLoadingPortfolio: (loading: boolean) => void;
 
   setTheme: (theme: 'light' | 'dark') => void;
+  setCommandPaletteOpen: (open: boolean) => void;
 }
 
 const THEME_KEY = 'neuradex-theme';
@@ -56,6 +61,7 @@ export const useAppStore = create<AppState>((set) => ({
   loadingPortfolio: false,
 
   theme: getInitialTheme(),
+  commandPaletteOpen: false,
 
   // Actions
   setStocks: (stocks) => set({ stocks }),
@@ -79,4 +85,5 @@ export const useAppStore = create<AppState>((set) => ({
     try { localStorage.setItem(THEME_KEY, theme); } catch { /* ignore */ }
     set({ theme });
   },
+  setCommandPaletteOpen: (open) => set({ commandPaletteOpen: open }),
 }));

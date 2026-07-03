@@ -1087,6 +1087,52 @@ class ApiService {
     return response.data;
   }
 
+  // ── Data recordings (dedicated dataset capture for a coming trading day) ─────
+  async listRecordings(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/recordings');
+    return response.data;
+  }
+
+  async createRecording(payload: { name?: string; symbols: string[]; note?: string }): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/recordings', payload);
+    return response.data;
+  }
+
+  async getRecording(id: string): Promise<ApiResponse<any>> {
+    const response = await this.api.get(`/api/recordings/${id}`);
+    return response.data;
+  }
+
+  async updateRecording(id: string, payload: { name?: string; symbols?: string[]; note?: string }): Promise<ApiResponse<any>> {
+    const response = await this.api.put(`/api/recordings/${id}`, payload);
+    return response.data;
+  }
+
+  async deleteRecording(id: string): Promise<ApiResponse<any>> {
+    const response = await this.api.delete(`/api/recordings/${id}`);
+    return response.data;
+  }
+
+  async getRecordingChart(id: string, symbol: string, barSeconds = 60): Promise<ApiResponse<any>> {
+    const response = await this.api.get(`/api/recordings/${id}/chart/${symbol}`, {
+      params: { bar_seconds: barSeconds }, timeout: 15000,
+    });
+    return response.data;
+  }
+
+  async backtestRecording(id: string, payload: { symbols?: string[]; capital?: number; speed?: number }): Promise<ApiResponse<any>> {
+    const response = await this.api.post(`/api/recordings/${id}/backtest`, payload);
+    return response.data;
+  }
+
+  // Manually run the "auto-record today's A-grade picks" check now, instead of
+  // waiting for the next 5-min server-side tick (normally fires itself daily
+  // off the premarket scan).
+  async syncAgradeRecording(): Promise<ApiResponse<{ created: boolean; recording?: any }>> {
+    const response = await this.api.post('/api/recordings/auto-agrade/sync');
+    return response.data;
+  }
+
   // Absolute URL to a container's logs page (opens in a new browser tab).
   dockerLogsUrl(name: string): string {
     return `${API_BASE_URL || ''}/api/system/services/${name}/logs`;

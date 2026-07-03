@@ -189,6 +189,61 @@ def read_bars(symbol: str, date_str: str, bar_seconds: int = 60) -> list[dict]:
     return bars
 
 
+def symbols_with_ticks(date_str: str) -> list[str]:
+    """Symbols that have a tick file for `date_str` (cheap directory scan)."""
+    out: list[str] = []
+    if not os.path.isdir(_TICKS):
+        return out
+    for symbol in sorted(os.listdir(_TICKS)):
+        if os.path.exists(_path(symbol, date_str)):
+            out.append(symbol)
+    return out
+
+
+def has_minute_volume(symbol: str, date_str: str) -> bool:
+    """True if the per-minute volume sidecar exists for this symbol/day."""
+    return os.path.exists(_vol_path(symbol, date_str))
+
+
+def day_coverage(symbol: str, date_str: str) -> dict:
+    """What the store holds for one symbol on one IST day: tick count, first/last
+    captured tick (epoch + HH:MM:SS IST), and whether the capture covers a clean
+    full trading day (first tick at/near 09:15 open, last tick at/near 15:30 close).
+
+    Reads only the `ts` column so this stays cheap even across many symbols.
+    """
+    path = _path(symbol, date_str)
+    out = {
+        "symbol": symbol.upper(), "date": date_str, "ticks": 0,
+        "first_ts": None, "last_ts": None, "first_time": None, "last_time": None,
+        "full_day": False, "start_clean": False, "end_clean": False,
+    }
+    if not os.path.exists(path):
+        return out
+    try:
+        ts = pd.read_parquet(path, columns=["ts"])["ts"]
+        if ts.empty:
+            return out
+        first_ts, last_ts = int(ts.min()), int(ts.max())
+        first_dt = datetime.fromtimestamp(first_ts, IST)
+        last_dt  = datetime.fromtimestamp(last_ts, IST)
+        first_min = first_dt.hour * 60 + first_dt.minute
+        last_min  = last_dt.hour * 60 + last_dt.minute
+        start_clean = first_min <= (9 * 60 + 16)     # first tick by ~09:16 → no open gap
+        end_clean   = last_min  >= (15 * 60 + 25)     # ran to within 5 min of the close
+        out.update({
+            "ticks": int(len(ts)),
+            "first_ts": first_ts, "last_ts": last_ts,
+            "first_time": first_dt.strftime("%H:%M:%S"),
+            "last_time":  last_dt.strftime("%H:%M:%S"),
+            "start_clean": start_clean, "end_clean": end_clean,
+            "full_day": start_clean and end_clean,
+        })
+    except Exception as exc:
+        logger.warning("candle_store day_coverage failed (%s %s): %s", symbol, date_str, exc)
+    return out
+
+
 def coverage() -> list[dict]:
     """What the dataset holds: one row per symbol/day with tick count + size."""
     out: list[dict] = []

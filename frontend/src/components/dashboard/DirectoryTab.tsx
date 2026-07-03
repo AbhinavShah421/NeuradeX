@@ -315,15 +315,19 @@ const DirectoryTab: React.FC = () => {
         </table>
       </div>
 
-      {/* Pagination */}
+      {/* Pagination — up to 9 buttons (Prev + 7 page numbers + Next) in a rigid
+          row with no wrap/scroll used to push ~30-40px past a 390px viewport,
+          the exact width of the page's horizontal-scroll bug. flexWrap lets the
+          button group drop to its own line; overflowX is a second safety net
+          for the narrowest phones where even that line doesn't fit. */}
       {pages > 1 && (
-        <div style={{ padding: '12px 0', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}>
+        <div style={{ padding: '12px 0', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4, flexWrap: 'wrap', gap: 8 }}>
           <span style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>
             Page {page} of {pages} · {total} stocks
           </span>
-          <div style={{ display: 'flex', gap: 4 }}>
+          <div style={{ display: 'flex', gap: 4, overflowX: 'auto', scrollbarWidth: 'none', WebkitOverflowScrolling: 'touch', maxWidth: '100%' }}>
             <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1}
-              style={{ padding: '4px 12px', fontSize: 12, borderRadius: 6, cursor: page === 1 ? 'default' : 'pointer', border: '1px solid var(--nd-border)', background: 'var(--nd-surface)', color: page === 1 ? 'var(--nd-text-3)' : 'var(--nd-text-1)', opacity: page === 1 ? 0.5 : 1 }}>
+              style={{ padding: '4px 12px', fontSize: 12, borderRadius: 6, cursor: page === 1 ? 'default' : 'pointer', border: '1px solid var(--nd-border)', background: 'var(--nd-surface)', color: page === 1 ? 'var(--nd-text-3)' : 'var(--nd-text-1)', opacity: page === 1 ? 0.5 : 1, flexShrink: 0, whiteSpace: 'nowrap' }}>
               ← Prev
             </button>
             {Array.from({ length: Math.min(7, pages) }, (_, i) => {
@@ -334,13 +338,13 @@ const DirectoryTab: React.FC = () => {
               else                  p = page - 3 + i;
               return (
                 <button key={p} onClick={() => setPage(p)}
-                  style={{ width: 30, height: 28, fontSize: 12, borderRadius: 6, cursor: 'pointer', border: '1px solid var(--nd-border)', background: p === page ? 'var(--nd-accent)' : 'var(--nd-surface)', color: p === page ? '#fff' : 'var(--nd-text-2)', fontWeight: p === page ? 700 : 400 }}>
+                  style={{ width: 30, height: 28, fontSize: 12, borderRadius: 6, cursor: 'pointer', border: '1px solid var(--nd-border)', background: p === page ? 'var(--nd-accent)' : 'var(--nd-surface)', color: p === page ? '#fff' : 'var(--nd-text-2)', fontWeight: p === page ? 700 : 400, flexShrink: 0 }}>
                   {p}
                 </button>
               );
             })}
             <button onClick={() => setPage(p => Math.min(pages, p + 1))} disabled={page === pages}
-              style={{ padding: '4px 12px', fontSize: 12, borderRadius: 6, cursor: page === pages ? 'default' : 'pointer', border: '1px solid var(--nd-border)', background: 'var(--nd-surface)', color: page === pages ? 'var(--nd-text-3)' : 'var(--nd-text-1)', opacity: page === pages ? 0.5 : 1 }}>
+              style={{ padding: '4px 12px', fontSize: 12, borderRadius: 6, cursor: page === pages ? 'default' : 'pointer', border: '1px solid var(--nd-border)', background: 'var(--nd-surface)', color: page === pages ? 'var(--nd-text-3)' : 'var(--nd-text-1)', opacity: page === pages ? 0.5 : 1, flexShrink: 0, whiteSpace: 'nowrap' }}>
               Next →
             </button>
           </div>

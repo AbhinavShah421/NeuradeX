@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from 'react';
 import apiService from '../services/api';
-import MarketBoard from '../components/MarketBoard';
 import AutopilotBanner from '../components/dashboard/AutopilotBanner';
 import TradeGateCard from '../components/dashboard/TradeGateCard';
 import DeliveryAutopilotCard from '../components/dashboard/DeliveryAutopilotCard';
@@ -14,23 +13,15 @@ import SystemStartupModal from '../components/dashboard/SystemStartupModal';
 import PerformanceRegimeStrip from '../components/dashboard/PerformanceRegimeStrip';
 import LiveSessionsPanel from '../components/dashboard/LiveSessionsPanel';
 
-// ── Shared Tab Bar ─────────────────────────────────────────────────────────────
-
-const TABS = [
-  { id: 'watchlist', label: 'AI Watchlist',  icon: 'auto_awesome' },
-  { id: 'directory', label: 'All Stocks',    icon: 'format_list_bulleted' },
-] as const;
-type TabId = typeof TABS[number]['id'];
-
-
-
 // ── Dashboard Page ────────────────────────────────────────────────────────────
 
 const Dashboard: React.FC = () => {
-  const [activeTab, setActiveTab]     = useState<TabId>('watchlist');
   const [accuracyStats, setAccuracyStats] = useState<any>(null);
   const [selectedCard, setSelectedCard] = useState<string | null>(null);
   const [showStartup, setShowStartup] = useState(false);
+  // Bottom stocks section: AI Watchlist (default) + All Stocks, merged into one
+  // tabbed card at the bottom of the page instead of two separate blocks.
+  const [stocksTab, setStocksTab] = useState<'watchlist' | 'directory'>('watchlist');
 
   useEffect(() => {
     apiService.getAccuracyStats().then(r => { if (r.data) setAccuracyStats(r.data); }).catch(() => {});
@@ -77,11 +68,6 @@ const Dashboard: React.FC = () => {
       {/* Currently-running auto-trading sessions with open positions + P&L */}
       <LiveSessionsPanel />
 
-      {/* Dense terminal-style market board — scanner's high-conviction picks */}
-      <div style={{ marginBottom: 20 }}>
-        <MarketBoard />
-      </div>
-
       {/* Accuracy stat cards — click any to see the evidence */}
       {STAT_CARDS.length > 0 && (
         <div className="nd-grid-4" style={{ gap: 12, marginBottom: 20 }}>
@@ -125,42 +111,27 @@ const Dashboard: React.FC = () => {
         <ScanAccuracyCard />
       </div>
 
-      {/* Tabbed card */}
-      <div className="nd-card" style={{ padding: 0 }}>
-
-        {/* Tab bar */}
-        <div style={{ display: 'flex', borderBottom: '1px solid var(--nd-border)', padding: '0 20px' }}>
-          {TABS.map(tab => {
-            const active = activeTab === tab.id;
-            return (
-              <button
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 6,
-                  padding: '13px 18px', fontSize: 13, fontWeight: active ? 700 : 500,
-                  cursor: 'pointer', border: 'none', background: 'transparent',
-                  color: active ? 'var(--nd-accent)' : 'var(--nd-text-3)',
-                  borderBottom: active ? '2px solid var(--nd-accent)' : '2px solid transparent',
-                  marginBottom: -1, transition: 'color 0.15s',
-                }}
-              >
-                <span className="material-icons" style={{ fontSize: 16 }}>{tab.icon}</span>
-                {tab.label}
-                {tab.id === 'watchlist' && (
-                  <span style={{ fontSize: 11, background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 10, padding: '1px 7px', color: 'var(--nd-text-3)', fontWeight: 400 }}>
-                    AI
-                  </span>
-                )}
-              </button>
-            );
-          })}
+      {/* Stocks — AI Watchlist (scanner picks with grades/signals/auto-trade) and
+          the full All Stocks directory, merged into one tabbed card. Watchlist
+          is the default/first tab — it's the higher-signal view most people want;
+          the full directory is there for lookup/search. */}
+      <div className="nd-card" style={{ padding: 0, overflow: 'hidden' }}>
+        <div style={{ padding: '12px 16px 0' }}>
+          <div className="nd-pill-tabs" style={{ marginBottom: 12 }}>
+            <button onClick={() => setStocksTab('watchlist')} className="nd-pill-tab"
+              style={{ background: stocksTab === 'watchlist' ? 'var(--nd-green)' : 'transparent', color: stocksTab === 'watchlist' ? '#fff' : 'var(--nd-text-2)' }}>
+              <span className="material-icons" style={{ fontSize: 15 }}>auto_awesome</span>
+              AI Watchlist
+            </button>
+            <button onClick={() => setStocksTab('directory')} className="nd-pill-tab"
+              style={{ background: stocksTab === 'directory' ? 'var(--nd-green)' : 'transparent', color: stocksTab === 'directory' ? '#fff' : 'var(--nd-text-2)' }}>
+              <span className="material-icons" style={{ fontSize: 15 }}>format_list_bulleted</span>
+              All Stocks
+            </button>
+          </div>
         </div>
-
-        {/* Tab content */}
-        <div style={{ padding: '16px 20px 20px' }}>
-          {activeTab === 'watchlist' && <AiWatchlistTab />}
-          {activeTab === 'directory' && <DirectoryTab />}
+        <div style={{ padding: '0 20px 20px' }}>
+          {stocksTab === 'watchlist' ? <AiWatchlistTab /> : <DirectoryTab />}
         </div>
       </div>
     </div>

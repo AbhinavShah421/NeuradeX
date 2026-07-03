@@ -310,6 +310,89 @@ async def _feed_memory(symbol: str, fp, regime: str, pnl_pct: float, entry: floa
         logger.debug("session memory feed skipped: %s", exc)
 
 
+async def _persist_session_decision(session_id: str, symbol: str, decision: dict) -> None:
+    """Write one candle decision to session_decisions table (permanent, unlike Redis rolling window)."""
+    try:
+        import json as _json
+        from sqlalchemy import text
+        from app.database.postgres import engine
+        async with engine.begin() as conn:
+            await conn.execute(text("""
+                INSERT INTO session_decisions
+                    (session_id, symbol, candle_time, price, action, executed,
+                     confidence, reason, indicators, agents, trade)
+                VALUES (:sid, :sym, :ct, :price, :action, :executed,
+                        :conf, :reason, :indicators, :agents, :trade)
+            """), {
+                "sid":        session_id,
+                "sym":        symbol,
+                "ct":         decision.get("time"),
+                "price":      decision.get("price"),
+                "action":     decision.get("action"),
+                "executed":   bool(decision.get("executed", False)),
+                "conf":       decision.get("confidence"),
+                "reason":     decision.get("reason"),
+                "indicators": _json.dumps(decision.get("indicators", {})),
+                "agents":     _json.dumps(decision.get("agents", [])),
+                "trade":      _json.dumps(decision["trade"]) if decision.get("trade") else None,
+            })
+    except Exception as exc:
+        logger.debug("persist_session_decision failed: %s", exc)
+
+
+async def _finalize_session(s: dict) -> None:
+    """Persist session summary to session_metadata. Called once when session reaches a terminal state."""
+    if s.get("_finalized"):
+        return
+    s["_finalized"] = True
+    try:
+        import json as _json
+        from sqlalchemy import text
+        from app.database.postgres import engine
+        metrics = s.get("metrics", {})
+        sells   = [t for t in (s.get("trades") or []) if t.get("action") == "SELL"]
+        wins    = sum(1 for t in sells if t.get("pnl", 0) > 0)
+        async with engine.begin() as conn:
+            await conn.execute(text("""
+                INSERT INTO session_metadata
+                    (session_id, symbol, mode, date, status, capital, final_cash,
+                     trade_count, win_count, total_pnl_abs, total_pnl_pct,
+                     candle_count, completed_at, session_data)
+                VALUES (:sid, :sym, :mode, :date, :status, :capital, :cash,
+                        :tc, :wc, :pnl_abs, :pnl_pct, :candles, NOW(), :data)
+                ON CONFLICT (session_id) DO UPDATE SET
+                    status       = EXCLUDED.status,
+                    final_cash   = EXCLUDED.final_cash,
+                    trade_count  = EXCLUDED.trade_count,
+                    win_count    = EXCLUDED.win_count,
+                    total_pnl_abs= EXCLUDED.total_pnl_abs,
+                    total_pnl_pct= EXCLUDED.total_pnl_pct,
+                    candle_count = EXCLUDED.candle_count,
+                    completed_at = EXCLUDED.completed_at,
+                    session_data = EXCLUDED.session_data
+            """), {
+                "sid":     s["id"],
+                "sym":     s.get("symbol", ""),
+                "mode":    s.get("mode", "paper"),
+                "date":    s.get("date", ""),
+                "status":  s.get("status", "done"),
+                "capital": s.get("capital"),
+                "cash":    s.get("cash"),
+                "tc":      len(sells),
+                "wc":      wins,
+                "pnl_abs": metrics.get("total_pnl", 0),
+                "pnl_pct": metrics.get("total_return_pct", 0),
+                "candles": s.get("current_idx", 0),
+                "data":    _json.dumps(metrics),
+            })
+        logger.info("Session finalized to DB", extra={
+            "log_type": "session_event", "event": "session_finalized",
+            "session_id": s["id"], "status": s.get("status"), "trades": len(sells),
+        })
+    except Exception as exc:
+        logger.warning("_finalize_session failed: %s", exc)
+
+
 _PAPER_DROP_CANDLES = 6     # N consecutive lower closes = drop pattern (3 was triggering on normal chop)
 _LOSS_COOLDOWN_MIN  = 10    # after a losing exit, block new entries for this many minutes
                             # (stops the system re-scalping the same chop range — the
@@ -317,6 +400,8 @@ _LOSS_COOLDOWN_MIN  = 10    # after a losing exit, block new entries for this ma
 _LATE_ENTRY_CUTOFF_MIN = 14 * 60   # 14:00 IST — no new entries after this in replay/
                                    # backtest (paper uses its own configurable cutoff).
                                    # Afternoon win-rate is 22-24% vs ~31% in the morning.
+_MARKET_CLOSE_MINUTES = 15 * 60 + 30   # 15:30 IST NSE close — after this, today's
+                                       # session is finished and backtestable.
 
 
 def _timing_block_reason(ind: dict, candle: dict) -> str:
@@ -625,7 +710,7 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
                 except Exception:
                     logger.warning("session %s RL state extraction failed for %s; continuing without RL state",
                                    s.get("id"), symbol, exc_info=True)
-                ctx = {"symbol": symbol, "capital": s["capital"], "position": "NONE"}
+                ctx = {"symbol": symbol, "capital": s["capital"], "position": "NONE", "session_id": s["id"]}
                 await get_learning().store_prediction(decision, candle["time"], ctx, rl_state, None)
                 s["position"]["prediction_id"] = decision.prediction_id
             except Exception as exc:
@@ -741,7 +826,8 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         log[-1] = decision
     else:
         log.append(decision)
-    s["decision_log"] = log[-30:]    # keep last 30 candles (~30 min) — was 120, saves ~60 KB/session
+    s["decision_log"] = log[-30:]    # keep last 30 candles (~30 min) in Redis for the UI
+    asyncio.create_task(_persist_session_decision(s["id"], symbol, decision))
 
 
 # ── Advancement (called by the background loop) ───────────────────────────────
@@ -883,6 +969,16 @@ async def _advance_paper(s: dict) -> None:
             await pt._get_yahoo_cached(symbol, cur)
         except Exception:
             logger.warning("session %s Yahoo candle refresh failed for %s", s.get("id"), symbol, exc_info=True)
+        # 3. Final fallback: Yahoo's real-time market price (meta.regularMarketPrice,
+        #    refreshed by the chart fetch above). Keeps the live bar + P&L moving at
+        #    ~15s freshness even with no Groww/Angel tick, instead of waiting for
+        #    Yahoo's next completed 1-min candle (~1-2 min gap).
+        if ltp <= 0:
+            y_ltp = pt.get_yahoo_live_ltp(symbol)
+            if y_ltp > 0:
+                ltp = y_ltp
+                src = "yahoo_live"
+                pt._accumulate_tick(symbol, ltp, ts)
         candles = pt._get_merged_candles(symbol, ltp, ts)
         if candles:
             s["candles"]      = candles
@@ -930,6 +1026,13 @@ async def _advance(s: dict) -> None:
             s["status"] = "error"
             logger.error("session %s halted after %d consecutive errors",
                          s.get("id"), error_count)
+
+    # Persist summary to PostgreSQL the first time a session reaches a terminal state.
+    # _finalize_session sets s["_finalized"]=True before we save_session, so subsequent
+    # ticks skip it even if Redis still holds the session blob.
+    if s.get("status") in ("done", "stopped", "error") and not s.get("_finalized"):
+        await _finalize_session(s)
+
     await save_session(s)
 
 
@@ -1086,8 +1189,15 @@ async def start_session(req: StartSessionRequest):
             req_date = datetime.strptime(req.date, "%Y-%m-%d").date()
         except ValueError:
             raise HTTPException(400, "date must be YYYY-MM-DD")
-        if req_date >= now.date():
-            raise HTTPException(400, "Replay needs a completed past trading day.")
+        # A trading day is backtestable once it's finished. That means any past
+        # day, OR today *after the 15:30 IST close* — by then the tick-store holds
+        # today's full session, so a same-day recording (which the Recordings page
+        # marks "completed" post-close) can be replayed immediately rather than
+        # forcing the user to wait until tomorrow.
+        market_closed_today = (now.hour * 60 + now.minute) >= _MARKET_CLOSE_MINUTES
+        if req_date > now.date() or (req_date == now.date() and not market_closed_today):
+            raise HTTPException(400, "Replay needs a completed trading day (today is only "
+                                     "available after the 15:30 IST close).")
         if req_date.weekday() >= 5:
             raise HTTPException(400, "Selected date is a weekend. Pick a weekday.")
 
@@ -1130,17 +1240,10 @@ async def start_session(req: StartSessionRequest):
             "date": _today_str(), "candles": candles, "prev_day_candles": [],
             "current_time": cur, "data_source": src,
         })
-        # Ensure this paper-traded symbol's 1s candles are ALSO captured into the
-        # dataset — add it to the capture allowlist and the feed subscription so the
-        # session runs on (and saves) real Groww stream data even if it isn't one of
-        # the baseline allowlisted symbols.
-        try:
-            from app.utils.redis_client import get_redis
-            from app.utils import groww_feed
-            await get_redis().sadd("candle_capture:symbols", symbol)
-            await groww_feed.request_symbols([symbol])
-        except Exception as exc:
-            logger.debug("paper capture-arm skipped for %s: %s", symbol, exc)
+        # NOTE: paper sessions no longer arm dataset capture. Recording which stocks
+        # to capture into the 1-second dataset is now a dedicated, explicit feature
+        # (see app/api/recordings.py) so the dataset only holds the stocks you chose
+        # to record, not incidental paper-traded symbols.
         # Let the background loop handle the first step to avoid blocking the response.
 
     await save_session(base)
@@ -1238,6 +1341,8 @@ async def stop_session(session_id: str):
     if s.get("status") == "running":
         s["status"] = "stopped"
         s["updated_at"] = datetime.now(IST).isoformat()
+        if not s.get("_finalized"):
+            await _finalize_session(s)
         await save_session(s)
     return {"status": "success", "data": _summary(s)}
 

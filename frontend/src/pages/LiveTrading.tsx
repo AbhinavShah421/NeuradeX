@@ -624,7 +624,9 @@ const LiveTrading: React.FC = () => {
                   </div>
                 </div>
                 <button
-                  style={{ ...btn(red, 'transparent', red), fontSize: 11, padding: '6px 10px' }}
+                  // Closes a real-money position — kept at the same ~36px tap
+                  // target as every other button on this page, not shrunk.
+                  style={{ ...btn(red, 'transparent', red), fontSize: 12, padding: '8px 14px' }}
                   onClick={() => handleSquareoff(pos.symbol)}
                   disabled={orderLoading}
                 >

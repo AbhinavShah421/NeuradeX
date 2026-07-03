@@ -111,12 +111,18 @@ const MutualFunds: React.FC = () => {
       </div>
 
       <div className="nd-card" style={{ padding: 0 }}>
-        <div style={{ display: 'flex', borderBottom: '1px solid var(--nd-border)', padding: '0 16px' }}>
+        {/* Scrolls horizontally instead of overflowing the whole page — 4 tabs
+            don't fit a 390px screen at this padding/font-size. */}
+        <div style={{
+          display: 'flex', borderBottom: '1px solid var(--nd-border)', padding: '0 16px',
+          overflowX: 'auto', scrollbarWidth: 'none', WebkitOverflowScrolling: 'touch',
+        }}>
           {([['holdings', 'My Funds'], ['optimize', 'Optimize'], ['screener', 'Screener'], ['all', 'All Funds']] as [Tab, string][]).map(([id, label]) => (
             <button key={id} onClick={() => setTab(id)} style={{
               padding: '12px 16px', border: 'none', background: 'none', cursor: 'pointer', fontSize: 13,
               fontWeight: tab === id ? 700 : 500, color: tab === id ? 'var(--nd-green)' : 'var(--nd-text-2)',
               borderBottom: tab === id ? '2px solid var(--nd-green)' : '2px solid transparent', marginBottom: -1,
+              whiteSpace: 'nowrap', flexShrink: 0,
             }}>{label}</button>
           ))}
         </div>
@@ -175,7 +181,11 @@ const MutualFunds: React.FC = () => {
                         <td style={{ textAlign: 'right', padding: '8px 10px', whiteSpace: 'nowrap' }}>₹{f.nav}</td>
                         <td style={{ textAlign: 'right', padding: '8px 10px', whiteSpace: 'nowrap' }}>{f.currentValue ? `₹${inr(f.currentValue)}` : '—'}</td>
                         <ReturnCells f={f} />
-                        <td style={{ textAlign: 'right', padding: '8px 10px' }}><button onClick={() => removeFund(f.schemeCode)} style={{ background: 'none', border: 'none', color: 'var(--nd-red)', cursor: 'pointer', fontSize: 16 }}>×</button></td>
+                        <td style={{ textAlign: 'right', padding: '8px 10px' }}>
+                          {/* padding + minHeight/minWidth turn a bare glyph into a real ~34px tap target */}
+                          <button onClick={() => removeFund(f.schemeCode)} title="Remove fund"
+                            style={{ background: 'none', border: 'none', color: 'var(--nd-red)', cursor: 'pointer', fontSize: 18, padding: 8, minWidth: 34, minHeight: 34, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>×</button>
+                        </td>
                       </tr>
                     ))}
                   </tbody>

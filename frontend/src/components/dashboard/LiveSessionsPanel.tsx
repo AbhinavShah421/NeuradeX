@@ -148,20 +148,27 @@ const SessionModal: React.FC<{ id: string; onClose: () => void }> = ({ id, onClo
     <div onClick={e => { if (e.target === e.currentTarget) onClose(); }}
       style={{ position: 'fixed', inset: 0, background: '#000000aa', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 12 }}>
       <div style={{ background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 16, width: '100%', maxWidth: 840, maxHeight: '92vh', overflow: 'auto', boxShadow: '0 24px 64px #00000060' }}>
-        {/* Header */}
-        <div style={{ position: 'sticky', top: 0, background: 'var(--nd-bg)', zIndex: 2, padding: '16px 20px', borderBottom: '1px solid var(--nd-border)', display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span style={{ fontSize: 18, fontWeight: 700, color: 'var(--nd-text-1)' }}>{d?.symbol ?? '…'}</span>
-          {d?.mode && <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 4, background: `${modeColor[d.mode] ?? '#888'}22`, color: modeColor[d.mode] ?? 'var(--nd-text-3)' }}>{d.mode.toUpperCase()}</span>}
-          <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 10, background: running ? 'rgba(16,185,129,0.15)' : 'var(--nd-surface)', color: running ? 'var(--nd-green)' : 'var(--nd-text-3)', fontWeight: 600 }}>
-            {running ? 'LIVE' : (d?.status ?? '—')}
-          </span>
-          <span style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>{d?.currentTime ? `@ ${d.currentTime}` : ''}{d?.date ? ` · ${d.date}` : ''}</span>
-          <span style={{ marginLeft: 'auto', fontSize: 14, fontWeight: 700, color: (d?.pnl ?? 0) >= 0 ? 'var(--nd-green)' : 'var(--nd-red)' }}>
-            {(d?.pnl ?? 0) >= 0 ? '+' : ''}{inr(d?.pnl ?? 0)} <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>({(d?.pnlPct ?? 0).toFixed(2)}%)</span>
-          </span>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', marginLeft: 4 }}>
-            <span className="material-icons" style={{ color: 'var(--nd-text-3)', fontSize: 20 }}>close</span>
-          </button>
+        {/* Header — two explicit rows (not one flex row with marginLeft:auto).
+            The single-row version squeezed the date span into whatever px was
+            left after the P&L block claimed the right edge, word-wrapping
+            "@ 15:13 · 2026-07-02" into 4 stacked lines on a phone. */}
+        <div style={{ position: 'sticky', top: 0, background: 'var(--nd-bg)', zIndex: 2, padding: '14px 20px', borderBottom: '1px solid var(--nd-border)', display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ fontSize: 18, fontWeight: 700, color: 'var(--nd-text-1)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d?.symbol ?? '…'}</span>
+            {d?.mode && <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 4, background: `${modeColor[d.mode] ?? '#888'}22`, color: modeColor[d.mode] ?? 'var(--nd-text-3)', flexShrink: 0 }}>{d.mode.toUpperCase()}</span>}
+            <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 10, background: running ? 'rgba(16,185,129,0.15)' : 'var(--nd-surface)', color: running ? 'var(--nd-green)' : 'var(--nd-text-3)', fontWeight: 600, flexShrink: 0 }}>
+              {running ? 'LIVE' : (d?.status ?? '—')}
+            </span>
+            <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', marginLeft: 'auto', flexShrink: 0, display: 'flex' }}>
+              <span className="material-icons" style={{ color: 'var(--nd-text-3)', fontSize: 20 }}>close</span>
+            </button>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 12, color: 'var(--nd-text-3)', whiteSpace: 'nowrap' }}>{d?.currentTime ? `@ ${d.currentTime}` : ''}{d?.date ? ` · ${d.date}` : ''}</span>
+            <span style={{ fontSize: 14, fontWeight: 700, color: (d?.pnl ?? 0) >= 0 ? 'var(--nd-green)' : 'var(--nd-red)', whiteSpace: 'nowrap' }}>
+              {(d?.pnl ?? 0) >= 0 ? '+' : ''}{inr(d?.pnl ?? 0)} <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>({(d?.pnlPct ?? 0).toFixed(2)}%)</span>
+            </span>
+          </div>
         </div>
 
         <div style={{ padding: '16px 20px' }}>
@@ -192,7 +199,7 @@ const SessionModal: React.FC<{ id: string; onClose: () => void }> = ({ id, onClo
                   <Kv k="Qty" v={pos.quantity ?? 0} />
                   <Kv k="Unrealised P&L" v={`₹${(pos.current_pnl ?? 0).toFixed(2)}`} c={(pos.current_pnl ?? 0) >= 0 ? 'var(--nd-green)' : 'var(--nd-red)'} />
                   <Kv k="Trades" v={d?.trades ?? 0} />
-                  <Kv k="Cash" v={`₹${inr(d?.cash ?? 0)}`} />
+                  <Kv k="Cash" v={inr(d?.cash ?? 0)} />
                 </div>
               </Section>
 
@@ -488,7 +495,9 @@ const LiveSessionsPanel: React.FC = () => {
                 <td style={{ padding: '7px 10px', color: 'var(--nd-text-3)' }}>{s.trades ?? 0}</td>
                 <td style={{ padding: '7px 10px', textAlign: 'right' }}>
                   <button onClick={e => { e.stopPropagation(); stop(s.id); }} disabled={busy === s.id}
-                    style={{ padding: '3px 10px', borderRadius: 6, border: '1px solid var(--nd-border)', background: 'var(--nd-surface)', color: 'var(--nd-red)', cursor: 'pointer', fontSize: 11, fontWeight: 600 }}>
+                    // Kills a live auto-trading session — minHeight keeps the
+                    // tap target real-sized even though the row is dense.
+                    style={{ padding: '6px 12px', minHeight: 34, borderRadius: 6, border: '1px solid var(--nd-border)', background: 'var(--nd-surface)', color: 'var(--nd-red)', cursor: 'pointer', fontSize: 11.5, fontWeight: 600 }}>
                     {busy === s.id ? '…' : 'Stop'}
                   </button>
                 </td>

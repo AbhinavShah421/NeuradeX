@@ -30,13 +30,19 @@ const NAV_LEFT = [
   { to: '/mutual-funds', label: 'Funds' },
 ];
 
-// AI Engine sub-menu items
+// AI Engine sub-menu items — must mirror AIEngineLayout's SUB_NAV exactly (that
+// page's own tab strip is the source of truth for what routes exist under
+// /ai-engine). A route missing here is invisible until the user is already on
+// some /ai-engine/* page — this list previously omitted Recordings and Live
+// Trading, so mobile users had no way to find them from the hamburger menu.
 const AI_ENGINE_ITEMS = [
-  { to: '/ai-engine',               label: 'Live Analysis',  icon: 'psychology' },
-  { to: '/ai-engine/agents',        label: 'AI Agents',      icon: 'smart_toy' },
-  { to: '/ai-engine/backtest',      label: 'Backtesting',    icon: 'history_edu' },
-  { to: '/ai-engine/paper-trading', label: 'Paper Trading',  icon: 'receipt_long' },
+  { to: '/ai-engine',               label: 'Live Analysis',   icon: 'psychology' },
+  { to: '/ai-engine/agents',        label: 'AI Agents',       icon: 'smart_toy' },
+  { to: '/ai-engine/backtest',      label: 'Backtesting',     icon: 'history_edu' },
+  { to: '/ai-engine/recordings',    label: 'Recordings',      icon: 'radio_button_checked' },
+  { to: '/ai-engine/paper-trading', label: 'Paper Trading',   icon: 'receipt_long' },
   { to: '/ai-engine/memory',        label: 'Agents & Memory', icon: 'memory' },
+  { to: '/ai-engine/live-trading',  label: 'Live Trading',    icon: 'bolt' },
 ];
 
 // Main nav items (right of AI Engine)
@@ -53,7 +59,7 @@ const BROKER_COLORS: Record<string, string> = {
 };
 
 const Layout: React.FC<LayoutProps> = ({ children }) => {
-  const { theme, setTheme } = useAppStore();
+  const { theme, setTheme, setCommandPaletteOpen } = useAppStore();
   const { broker, profile, clearAuth } = useAuthStore();
   const [, setIsConnected] = useState(false);
   const [userDropdownOpen, setUserDropdownOpen] = useState(false);
@@ -218,6 +224,12 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
           </nav>
 
           <div className="nd-header-right">
+            {/* Command palette — the only way in was Ctrl/Cmd+K, unreachable on a
+                touchscreen. Visible on every breakpoint (not hide-mobile). */}
+            <button className="nd-theme-btn" onClick={() => setCommandPaletteOpen(true)} aria-label="Search">
+              <span className="material-icons">search</span>
+            </button>
+
             {/* Groww API token status — hidden on mobile (lives in hamburger menu) */}
             <span className="nd-hide-mobile"><GrowwStatusBadge /></span>
 

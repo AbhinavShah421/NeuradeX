@@ -66,8 +66,51 @@ CREATE TABLE IF NOT EXISTS trade_records (
 );
 ALTER TABLE trade_records ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
-CREATE INDEX IF NOT EXISTS idx_trade_records_symbol ON trade_records (symbol, timestamp_open DESC);
+ALTER TABLE trade_records ADD COLUMN IF NOT EXISTS session_id TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_trade_records_symbol  ON trade_records (symbol, timestamp_open DESC);
 CREATE INDEX IF NOT EXISTS idx_trade_records_outcome ON trade_records (outcome, timestamp_open DESC);
+CREATE INDEX IF NOT EXISTS idx_trade_records_session ON trade_records (session_id) WHERE session_id IS NOT NULL;
+
+-- One row per completed session — survives Redis TTL expiry
+CREATE TABLE IF NOT EXISTS session_metadata (
+    id              SERIAL PRIMARY KEY,
+    session_id      TEXT             UNIQUE NOT NULL,
+    symbol          TEXT             NOT NULL,
+    mode            TEXT             NOT NULL,   -- paper / replay / backtest
+    date            TEXT             NOT NULL,   -- YYYY-MM-DD
+    status          TEXT             NOT NULL,   -- done / stopped / error
+    capital         DOUBLE PRECISION,
+    final_cash      DOUBLE PRECISION,
+    trade_count     INTEGER          DEFAULT 0,
+    win_count       INTEGER          DEFAULT 0,
+    total_pnl_abs   DOUBLE PRECISION,
+    total_pnl_pct   DOUBLE PRECISION,
+    candle_count    INTEGER          DEFAULT 0,
+    created_at      TIMESTAMPTZ      NOT NULL DEFAULT NOW(),
+    completed_at    TIMESTAMPTZ,
+    session_data    JSONB            -- full metrics snapshot
+);
+
+-- One row per candle decision — full log, not the 30-candle rolling Redis window
+CREATE TABLE IF NOT EXISTS session_decisions (
+    id          BIGSERIAL PRIMARY KEY,
+    session_id  TEXT             NOT NULL,
+    symbol      TEXT             NOT NULL,
+    candle_time TEXT             NOT NULL,   -- HH:MM
+    price       DOUBLE PRECISION,
+    action      TEXT,
+    executed    BOOLEAN          DEFAULT FALSE,
+    confidence  DOUBLE PRECISION,
+    reason      TEXT,
+    indicators  JSONB,
+    agents      JSONB,
+    trade       JSONB,           -- non-null only on BUY/SELL execution
+    created_at  TIMESTAMPTZ      NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_decisions_session
+    ON session_decisions (session_id, candle_time);
 
 -- RL agent experience replay buffer (recent 10k tuples)
 CREATE TABLE IF NOT EXISTS rl_experiences (

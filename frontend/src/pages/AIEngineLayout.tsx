@@ -25,6 +25,13 @@ const SUB_NAV = [
     description: 'Simulate strategies on historical data',
   },
   {
+    to: '/ai-engine/recordings',
+    exact: false,
+    label: 'Recordings',
+    icon: 'radio_button_checked',
+    description: 'Capture a full trading day from the Groww stream into the dataset',
+  },
+  {
     to: '/ai-engine/paper-trading',
     exact: false,
     label: 'Paper Trading',

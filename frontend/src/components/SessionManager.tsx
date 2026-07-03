@@ -85,7 +85,14 @@ const card: React.CSSProperties = {
   background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 12, padding: 16,
 };
 const fieldStyle: React.CSSProperties = { width: '100%', boxSizing: 'border-box' };
-const btnGhost: React.CSSProperties = { background: 'transparent', border: '1px solid var(--nd-border)', borderRadius: 6, padding: '4px 10px', fontSize: 11, fontWeight: 500, color: 'var(--nd-text-2)', cursor: 'pointer' };
+// minHeight (not just padding) guarantees a real ~34px tap target regardless of
+// font metrics — these buttons (Stop/Remove a running session, change replay
+// speed) are the ones most likely to be tapped one-handed on a phone.
+const btnGhost: React.CSSProperties = {
+  background: 'transparent', border: '1px solid var(--nd-border)', borderRadius: 6,
+  padding: '6px 12px', fontSize: 12, fontWeight: 500, color: 'var(--nd-text-2)', cursor: 'pointer',
+  minHeight: 34, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+};
 const th: React.CSSProperties = { padding: '6px 8px', fontWeight: 500 };
 const td: React.CSSProperties = { padding: '6px 8px', color: 'var(--nd-text-1)' };
 
@@ -228,7 +235,7 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
       {/* New session */}
       <div style={{ ...card, marginBottom: 16 }}>
         <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--nd-text-1)', marginBottom: 14 }}>Start a new session</div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 12 }}>
+        <div className="nd-session-form-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 12 }}>
           {!fixedMode && (
             <Field label="Mode" full>
               <select className="nd-select" value={mode} onChange={e => setMode(e.target.value as 'replay' | 'paper')} style={fieldStyle}>
@@ -302,7 +309,7 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
                   <span>{s.date} · {s.currentTime}</span>
                   <span>{s.trades} trades · {s.position}</span>
                 </div>
-                <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+                <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap' }}>
                   <button onClick={(e) => { e.stopPropagation(); setSelectedId(s.id); }} style={{ ...btnGhost, color: 'var(--nd-green)', borderColor: 'var(--nd-green)' }}>View chart</button>
                   <button onClick={(e) => { e.stopPropagation(); stopSession(s.id); }} style={btnGhost}>Stop</button>
                   <button onClick={(e) => { e.stopPropagation(); deleteSession(s.id); }} style={btnGhost}>Remove</button>

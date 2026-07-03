@@ -167,8 +167,8 @@ const StockDetail: React.FC = () => {
             { label: 'Day Low',   value: inr(stock.low),     icon: 'arrow_downward', color: 'var(--nd-red)' },
             { label: 'Volume',    value: `${(stock.volume / 1_000_000).toFixed(2)}M`, icon: 'bar_chart', color: 'var(--nd-blue)' },
             { label: 'P/E Ratio', value: stock.peRatio ? stock.peRatio.toFixed(2) : '—', icon: 'analytics', color: 'var(--nd-purple)' },
-          ].map((s, i) => (
-            <div key={s.label} style={{ padding: '0 20px', borderLeft: i > 0 ? '1px solid var(--nd-border)' : 'none' }}>
+          ].map((s) => (
+            <div key={s.label} className="nd-sd-stat">
               <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 4 }}>
                 <span className="material-icons" style={{ fontSize: 13, color: s.color }}>{s.icon}</span>
                 <p className="nd-label" style={{ margin: 0 }}>{s.label}</p>

@@ -17,25 +17,31 @@ interface Cmd {
 
 const CommandPalette: React.FC = () => {
   const navigate = useNavigate();
-  const { theme, setTheme } = useAppStore();
-  const [open, setOpen] = useState(false);
+  const { theme, setTheme, commandPaletteOpen: open, setCommandPaletteOpen: setOpen } = useAppStore();
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const [isNarrow, setIsNarrow] = useState(typeof window !== 'undefined' && window.innerWidth < 640);
+  useEffect(() => {
+    const onResize = () => setIsNarrow(window.innerWidth < 640);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
 
-  // ── Global hotkey ──────────────────────────────────────────────────────────
+  // ── Global hotkey (desktop) — mobile opens via the header search button,
+  // which calls setCommandPaletteOpen directly (see Layout.tsx) ───────────────
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
         e.preventDefault();
-        setOpen(o => !o);
+        setOpen(!open);
       } else if (e.key === 'Escape') {
         setOpen(false);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  }, [open, setOpen]);
 
   useEffect(() => {
     if (open) { setQuery(''); setActive(0); setTimeout(() => inputRef.current?.focus(), 30); }
@@ -86,7 +92,11 @@ const CommandPalette: React.FC = () => {
   return (
     <div onClick={() => setOpen(false)} style={{
       position: 'fixed', inset: 0, zIndex: 20000, background: 'rgba(0,0,0,0.55)',
-      display: 'flex', alignItems: 'flex-start', justifyContent: 'center', paddingTop: '12vh',
+      display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
+      // Less top offset on phones: the on-screen keyboard eats ~40-50% of the
+      // viewport once the input is focused, so a 12vh push leaves little room
+      // for results underneath it.
+      paddingTop: isNarrow ? '4vh' : '12vh',
     }}>
       <div onClick={e => e.stopPropagation()} style={{
         width: 'min(560px, 92vw)', background: 'var(--nd-surface)',
@@ -98,17 +108,23 @@ const CommandPalette: React.FC = () => {
           <input
             ref={inputRef} value={query} onChange={e => setQuery(e.target.value)} onKeyDown={onKeyDown}
             placeholder="Jump to a page, type a symbol, or run an action…"
-            style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: 'var(--nd-text-1)', fontSize: 14 }}
+            // 16px, not 14px: iOS Safari auto-zooms the page on focusing an input under 16px.
+            style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: 'var(--nd-text-1)', fontSize: 16 }}
           />
-          <kbd style={{ fontSize: 10, color: 'var(--nd-text-3)', border: '1px solid var(--nd-border)', borderRadius: 5, padding: '2px 6px' }}>ESC</kbd>
+          {!isNarrow && <kbd style={{ fontSize: 10, color: 'var(--nd-text-3)', border: '1px solid var(--nd-border)', borderRadius: 5, padding: '2px 6px' }}>ESC</kbd>}
+          {isNarrow && (
+            <button onClick={() => setOpen(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--nd-text-3)', display: 'flex', padding: 4 }}>
+              <span className="material-icons" style={{ fontSize: 20 }}>close</span>
+            </button>
+          )}
         </div>
-        <div style={{ maxHeight: '46vh', overflowY: 'auto', padding: 6 }}>
+        <div style={{ maxHeight: isNarrow ? '60vh' : '46vh', overflowY: 'auto', padding: 6 }}>
           {filtered.length === 0 && (
             <div style={{ padding: '18px 14px', color: 'var(--nd-text-3)', fontSize: 13 }}>No matches.</div>
           )}
           {filtered.map((c, i) => (
             <div key={c.id} onMouseEnter={() => setActive(i)} onClick={() => c.run()} style={{
-              display: 'flex', alignItems: 'center', gap: 10, padding: '9px 12px', borderRadius: 8, cursor: 'pointer',
+              display: 'flex', alignItems: 'center', gap: 10, padding: isNarrow ? '12px' : '9px 12px', borderRadius: 8, cursor: 'pointer',
               background: i === active ? 'var(--nd-green)' : 'transparent',
               color: i === active ? '#fff' : 'var(--nd-text-1)',
             }}>
@@ -118,9 +134,12 @@ const CommandPalette: React.FC = () => {
             </div>
           ))}
         </div>
-        <div style={{ display: 'flex', gap: 14, padding: '8px 14px', borderTop: '1px solid var(--nd-border)', fontSize: 10.5, color: 'var(--nd-text-3)' }}>
-          <span>↑↓ navigate</span><span>↵ open</span><span>Ctrl/⌘K toggle</span>
-        </div>
+        {/* Keyboard hints are meaningless on a touchscreen — hide below 640px */}
+        {!isNarrow && (
+          <div style={{ display: 'flex', gap: 14, padding: '8px 14px', borderTop: '1px solid var(--nd-border)', fontSize: 10.5, color: 'var(--nd-text-3)' }}>
+            <span>↑↓ navigate</span><span>↵ open</span><span>Ctrl/⌘K toggle</span>
+          </div>
+        )}
       </div>
     </div>
   );

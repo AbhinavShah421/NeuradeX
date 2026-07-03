@@ -1,4 +1,4 @@
-# NeuradeX startup script - launches all Docker services, prints the ngrok public
+﻿# NeuradeX startup script - launches all Docker services, prints the ngrok public
 # URL, and publishes it to LIVE_URL.txt (committed to the repo so it's visible
 # from anywhere). Safe to run manually or at logon/boot (see install-autostart.ps1).
 
@@ -46,29 +46,26 @@ if (-not $dockerReady) {
     # Do NOT exit: VS Code + Claude Code should still launch so the user can see status.
 }
 
-# --- Start Ollama if not already running ---
-$ollamaReady = $false
-try {
-    Invoke-RestMethod "http://localhost:11434/api/tags" -ErrorAction Stop | Out-Null
-    $ollamaReady = $true
-    Write-Host "Ollama already running." -ForegroundColor DarkGray
-} catch {}
+# Ollama runs inside Docker (stock-prediction-ollama container).
+# Do NOT start host Ollama here - it would bind port 11434 and block the container.
 
-if (-not $ollamaReady) {
-    Write-Host "Starting Ollama..." -ForegroundColor Yellow
-    $ollamaExe = "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe"
-    Start-Process -FilePath $ollamaExe -ArgumentList "serve" -WindowStyle Hidden
-    for ($i = 0; $i -lt 15; $i++) {
-        Start-Sleep -Seconds 2
-        try {
-            Invoke-RestMethod "http://localhost:11434/api/tags" -ErrorAction Stop | Out-Null
-            $ollamaReady = $true
-            Write-Host "Ollama ready." -ForegroundColor Green
-            break
-        } catch {}
-    }
-    if (-not $ollamaReady) {
-        Write-Host "Warning: Ollama did not start - LLM will fall back to Anthropic or be unavailable." -ForegroundColor Yellow
+# Bootstrap .env.ngrok so docker compose never fails on a missing env_file.
+# Written only when the file is absent (e.g. fresh clone / first cold boot).
+# start-ngrok.ps1 overwrites it per-attempt with the active token anyway.
+$ngrokEnvFile = Join-Path (Get-Location) '.env.ngrok'
+if (-not (Test-Path $ngrokEnvFile)) {
+    Write-Host "  .env.ngrok not found - creating from first available token..." -ForegroundColor Yellow
+    $firstToken = Get-Content '.env' |
+                  Where-Object { $_ -match '^\s*NGROK_AUTHTOKEN_\d+\s*=\s*(.+?)\s*$' } |
+                  ForEach-Object { $Matches[1].Trim('"').Trim("'") } |
+                  Where-Object { $_ -ne '' } |
+                  Select-Object -First 1
+    if ($firstToken) {
+        "NGROK_AUTHTOKEN=$firstToken" | Set-Content $ngrokEnvFile -Encoding ascii
+        Write-Host "  .env.ngrok created. Rotation will verify the token shortly." -ForegroundColor DarkGray
+    } else {
+        Write-Host "  No tokens found in .env - add NGROK_AUTHTOKEN_1=<token> to enable ngrok." -ForegroundColor Yellow
+        "NGROK_AUTHTOKEN=" | Set-Content $ngrokEnvFile -Encoding ascii
     }
 }
 
@@ -85,20 +82,9 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
-Write-Host "Waiting for ngrok tunnel..." -ForegroundColor Yellow
+Write-Host "Starting ngrok tunnel (multi-token rotation)..." -ForegroundColor Yellow
 
-$url    = $null
-$waited = 0
-
-while (-not $url -and $waited -lt 90) {
-    Start-Sleep -Seconds 2
-    $waited += 2
-    try {
-        $resp = Invoke-RestMethod "http://localhost:4040/api/tunnels" -ErrorAction Stop
-        $t    = $resp.tunnels | Where-Object { $_.proto -eq "https" } | Select-Object -First 1
-        if ($t) { $url = $t.public_url }
-    } catch {}
-}
+$url = & (Join-Path $PSScriptRoot 'start-ngrok.ps1')
 
 if ($url) {
     Write-Host ""
@@ -118,13 +104,13 @@ if ($url) {
     Write-Host ""
     Write-Host "=============================================" -ForegroundColor Green
 
-    # Copy app URL to clipboard silently
-    try { $url + "/neuradex" | Set-Clipboard } catch {}
+    try { "$url/neuradex" | Set-Clipboard } catch {}
     Write-Host "  (App URL copied to clipboard)" -ForegroundColor DarkGray
     Write-Host ""
 } else {
     Write-Host ""
-    Write-Host "Timed out waiting for ngrok. Services are running but tunnel URL unknown." -ForegroundColor Yellow
+    Write-Host "All ngrok tokens failed - services are up but no public tunnel." -ForegroundColor Red
+    Write-Host "Add tokens to .env as NGROK_AUTHTOKEN_1=..., NGROK_AUTHTOKEN_2=... etc." -ForegroundColor Yellow
     Write-Host "Check the inspector at http://localhost:4040" -ForegroundColor Yellow
     Write-Host ""
 }
@@ -138,9 +124,15 @@ if ($url) {
 function Test-NeuradeXServices {
     $s = [ordered]@{}
 
-    # Docker: any containers that have exited unexpectedly?
-    $exited = docker compose ps -q --status exited 2>$null
-    $s["Docker containers"] = [string]::IsNullOrWhiteSpace($exited)
+    # Docker: any containers that exited abnormally? One-shot init containers
+    # (e.g. ollama-init) exit 0 by design and must not count as failures.
+    $badExits = @()
+    try {
+        $badExits = @(docker compose ps -a --format json 2>$null |
+                      ForEach-Object { try { $_ | ConvertFrom-Json } catch {} } |
+                      Where-Object { $_.State -eq 'exited' -and [int]$_.ExitCode -ne 0 })
+    } catch {}
+    $s["Docker containers"] = ($badExits.Count -eq 0)
 
     # Ollama
     try {
@@ -203,20 +195,14 @@ if ($anyDown) {
     docker compose down
     Start-Sleep -Seconds 5
 
-    # Stop Ollama if it is running
-    Write-Host "  Stopping Ollama..." -ForegroundColor Yellow
+    # ── Clean restart ──────────────────────────────────────────────────────
+    # Kill any host-level Ollama process that may be squatting port 11434
+    # (Docker now runs Ollama; a host Ollama would block the container's port bind).
     $ollamaProcs = Get-Process "ollama" -ErrorAction SilentlyContinue
     if ($ollamaProcs) {
+        Write-Host "  Stopping host Ollama (port 11434 must be free for Docker)..." -ForegroundColor Yellow
         $ollamaProcs | Stop-Process -Force -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 3
-    }
-
-    # ── Clean restart ──────────────────────────────────────────────────────
-    Write-Host "  Starting Ollama..." -ForegroundColor Yellow
-    $ollamaExe = "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe"
-    if (Test-Path $ollamaExe) {
-        Start-Process -FilePath $ollamaExe -ArgumentList "serve" -WindowStyle Hidden
-        Start-Sleep -Seconds 5
     }
 
     Write-Host "  Starting all Docker containers..." -ForegroundColor Yellow
@@ -364,3 +350,5 @@ public class NxFocus {
 
     Write-Host "Claude Code /remote-control submitted" -ForegroundColor Green
 }
+
+exit 0

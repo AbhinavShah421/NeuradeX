@@ -14,7 +14,7 @@ from app.config import settings
 from app.database.mongodb import init_mongodb, close_mongodb
 from app.database.postgres import init_postgres, close_postgres
 from app.utils.redis_client import init_redis, close_redis
-from app.api import stocks, predictions, portfolio, risk, orders, agent, backtest, auth, paper_trading, ai_engine, mlflow_proxy, sessions, user_settings, mutual_funds, delivery_paper, live_trading, system
+from app.api import stocks, predictions, portfolio, risk, orders, agent, backtest, auth, paper_trading, ai_engine, mlflow_proxy, sessions, user_settings, mutual_funds, delivery_paper, live_trading, system, recordings
 from app.websocket.socket_manager import sio
 from app.ml_core.initializer import initialize_ml_models
 from app.utils.groww_client import init_groww_client
@@ -108,6 +108,16 @@ async def lifespan(app: FastAPI):
                             extra={"log_type": "app_lifecycle", "event": "candle_capture_scheduled"})
             except Exception as exc:
                 logger.warning("Could not start candle capture: %s", exc)
+
+            # Recordings maintenance — keeps the capture allowlist in sync with the
+            # scheduled/active recordings across day rollovers.
+            try:
+                from app.api.recordings import recordings_maintenance_loop
+                app.state.recordings_maint_task = asyncio.create_task(recordings_maintenance_loop())
+                logger.info("recordings maintenance scheduled",
+                            extra={"log_type": "app_lifecycle", "event": "recordings_maint_scheduled"})
+            except Exception as exc:
+                logger.warning("Could not start recordings maintenance: %s", exc)
 
         if _role in ("full", "api"):
             # Delivery (multi-day) paper-trading autopilot — ticks once a day
@@ -224,6 +234,7 @@ app.include_router(paper_trading.router, prefix="/api/paper-trading", tags=["pap
 app.include_router(ai_engine.router, prefix="/api/ai-engine", tags=["ai-engine"])
 app.include_router(mlflow_proxy.router, prefix="/api/mlflow", tags=["mlflow"])
 app.include_router(sessions.router, prefix="/api/sessions", tags=["sessions"])
+app.include_router(recordings.router, prefix="/api/recordings", tags=["recordings"])
 app.include_router(user_settings.router, prefix="/api/settings", tags=["settings"])
 app.include_router(mutual_funds.router, prefix="/api/mutual-funds", tags=["mutual-funds"])
 app.include_router(delivery_paper.router, prefix="/api/delivery-paper", tags=["delivery-paper"])
