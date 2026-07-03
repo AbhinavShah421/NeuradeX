@@ -208,7 +208,8 @@ const AiWatchlistTab: React.FC = () => {
   const [diff, setDiff]         = useState<ScanDiff | null>(null);
   const [sel, setSel]           = useState<WatchlistStock | null>(null);
   const [tab, setTab]           = useState<'intraday' | 'delivery' | 'fno'>('intraday');
-  const [holdCap, setHoldCap]   = useState<number>(30);     // per-trade hold cap (min)
+  const [holdCap, setHoldCap]   = useState<number>(60);     // per-trade hold cap (min) —
+  // 60 is the A/B-winning default: 30-min exits won 21.6% vs 33.5% at 60 with the wide-stop policy
   const [tradingSym, setTradingSym] = useState<string | null>(null);
   const [autoMsg, setAutoMsg]   = useState<string | null>(null);
 

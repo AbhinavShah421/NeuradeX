@@ -10,7 +10,8 @@ Locks in:
     pattern/sentiment-only reliable set, 13:30 entry cutoff).
 """
 from app.agents.counterfactual import (
-    BASELINE_POLICY, EXIT_VARIANTS, _day_indicators, _simulate_policy, _simulate_long,
+    BASELINE_POLICY, LIVE_POLICY, EXIT_VARIANTS, _day_indicators,
+    _simulate_policy, _simulate_long,
 )
 from app.services.sessions_service import (
     TRADE_GATES, _RELIABLE_BUY_AGENTS, _LATE_ENTRY_CUTOFF_MIN, _PAPER_CONFIG_DEFAULT,
@@ -29,10 +30,11 @@ def _flat(n: int = 60, px: float = 100.0) -> list[dict]:
     return [_bar(_mins(i), px, px, px, px) for i in range(n)]
 
 
-# ── Baseline parity ───────────────────────────────────────────────────────────
+# ── Live-policy parity ────────────────────────────────────────────────────────
 
-def test_simulate_long_equals_policy_baseline():
-    # A wavy day: dip then recovery — exercises stop/cut paths.
+def test_simulate_long_equals_live_policy():
+    # CF labels must reflect what the live sessions would actually do —
+    # _simulate_long ≡ _simulate_policy(LIVE_POLICY). Wavy day: dip then recovery.
     bars = []
     px = 100.0
     for i in range(50):
@@ -41,7 +43,16 @@ def test_simulate_long_equals_policy_baseline():
         bars.append(_bar(_mins(i), o, max(o, px), min(o, px), px))
     inds = _day_indicators(bars)
     for entry in (1, 5, 12):
-        assert _simulate_long(bars, entry) == _simulate_policy(bars, inds, entry, BASELINE_POLICY)
+        assert _simulate_long(bars, entry) == _simulate_policy(bars, inds, entry, LIVE_POLICY)
+
+
+def test_live_policy_is_the_ab_winner():
+    # The live policy must equal the wide_hold60 variant that won the A/B —
+    # if someone tweaks one side, this forces them to reconcile both.
+    assert LIVE_POLICY == EXIT_VARIANTS["wide_hold60"]
+    # ...and the "baseline" variant stays the OLD tight policy for continuity.
+    assert EXIT_VARIANTS["baseline"] == BASELINE_POLICY
+    assert BASELINE_POLICY["stop_floor"] == 1.0 and BASELINE_POLICY["fast_cut"] is True
 
 
 # ── Variant behaviour ─────────────────────────────────────────────────────────
