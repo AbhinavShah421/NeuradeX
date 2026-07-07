@@ -489,6 +489,75 @@ async def train_gbm_model(symbols: list[str] | None = None, lookback_days: int =
         return res
 
 
+async def train_gbm_intraday(days: int = 10, horizon_min: int = 30, stride: int = 3,
+                             max_symbols_per_day: int = 400,
+                             trigger: str = "manual") -> dict:
+    """Train the INTRADAY GBM (slot 2) on 1-min bars from the own tick store:
+    fingerprint at bar i → label 1 if the close `horizon_min` minutes later is
+    >= +_LABEL_UP_INTRADAY%. This answers the question paper sessions actually
+    ask (the daily model was voting SELL on 97% of 1-min bars — see gbm_agent).
+    The tick store only grows from live streaming, so every sample is real
+    exchange data with no survivorship or lookahead."""
+    if _train_lock.locked():
+        return {"status": "already_running"}
+    async with _train_lock:
+        from app.agents.gbm_model import get_gbm_intraday_model
+        from app.data import candle_store
+
+        gbm = get_gbm_intraday_model()
+        await gbm.init_db()
+        started = time.time()
+
+        samples: list[tuple[list[float], int]] = []
+        day_list: list[str] = []
+        d = datetime.now()
+        while len(day_list) < days and (datetime.now() - d).days <= days * 3:
+            ds = d.strftime("%Y-%m-%d")
+            if candle_store.symbols_with_ticks(ds):
+                day_list.append(ds)
+            d -= timedelta(days=1)
+
+        sym_days = 0
+        for ds in day_list:
+            syms = candle_store.symbols_with_ticks(ds)[:max_symbols_per_day]
+            for sym in syms:
+                try:
+                    bars = candle_store.read_bars(sym, ds, bar_seconds=60)
+                except Exception:
+                    continue
+                if len(bars) < 30 + horizon_min:
+                    continue
+                sym_days += 1
+                for i in range(20, len(bars) - horizon_min, max(1, stride)):
+                    fp = build_fingerprint(bars[: i + 1])
+                    if fp is None:
+                        continue
+                    c0 = float(bars[i]["close"]); cf = float(bars[i + horizon_min]["close"])
+                    if c0 <= 0:
+                        continue
+                    ret = (cf - c0) / c0 * 100
+                    samples.append((fp, 1 if ret >= _LABEL_UP_INTRADAY else 0))
+
+        if len(samples) < 500:
+            return {"status": "no_data", "samples": len(samples),
+                    "days": day_list, "symbol_days": sym_days}
+        res = await gbm.fit(samples, note=f"{trigger}:intraday {len(day_list)}d/"
+                                          f"{sym_days} sym-days/h{horizon_min}m")
+        res.update({"days": day_list, "symbol_days": sym_days,
+                    "duration_secs": round(time.time() - started, 1)})
+        logger.info("intraday gbm training done: %s", res)
+        return res
+
+
+# Label threshold for the intraday model. Near the MEDIAN 30-min return on
+# purpose: every consumer (gbm_agent's 0.58/0.42 action bands, the pattern
+# grade bands) assumes 0.5-neutral probabilities. A +0.25% threshold gave
+# pos_rate 0.22, so the model's "slightly bullish" (p=0.24, above ITS base
+# rate) read as a confident SELL downstream. 0.05% skips pure-noise ties while
+# keeping classes balanced; "is this move tradeable" stays the gates' job.
+_LABEL_UP_INTRADAY = 0.05
+
+
 def _seconds_until_hour_ist(hour: int) -> float:
     from datetime import timezone
     ist = timezone(timedelta(hours=5, minutes=30))
@@ -514,6 +583,12 @@ async def gbm_autotrain_loop() -> None:
             await train_gbm_model(
                 max_symbols=getattr(settings, "GBM_AUTOTRAIN_MAX_SYMBOLS", 250),
                 trigger="scheduled")
+            # The intraday slot retrains nightly too — the tick store grows
+            # every live session, so the model keeps absorbing fresh regimes.
+            try:
+                await train_gbm_intraday(trigger="scheduled")
+            except Exception as exc:
+                logger.error("Scheduled intraday GBM retrain error: %s", exc)
         except asyncio.CancelledError:
             break
         except Exception as exc:

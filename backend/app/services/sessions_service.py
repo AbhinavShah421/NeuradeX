@@ -890,7 +890,15 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
             (candle["close"] - s["position"]["entry_price"]) * s["position"]["quantity"], 2)
 
     s["current_time"]   = candle["time"]
-    s["metrics"]        = _compute_metrics(s["cash"], s["capital"], s["trades"])
+    # Equity = cash + open-position market value. _compute_metrics does
+    # cash - capital, which reads an open LONG as a ~95% "loss" (the buy
+    # debited cash but the holding was never counted). Invisible for weeks
+    # because sessions never held positions; surfaced by the 2026-07-07
+    # entry-policy fixes.
+    equity = s["cash"]
+    if s["position"]["status"] == "LONG":
+        equity += s["position"]["quantity"] * candle["close"]
+    s["metrics"]        = _compute_metrics(equity, s["capital"], s["trades"])
     s["agent_decision"] = {"action": action, "confidence": round(conf, 3), "reason": reason,
                            "trade_executed": trade_executed}
     s["agents"]         = agents

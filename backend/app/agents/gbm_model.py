@@ -35,10 +35,18 @@ CREATE TABLE IF NOT EXISTS gbm_model_state (
 
 
 class GBMPatternModel:
-    def __init__(self) -> None:
+    """One model per timeframe SLOT. Slot 1 = daily fingerprints (3-day
+    horizon), slot 2 = intraday 1-min fingerprints (30-min horizon). A model
+    must only answer questions from its own timeframe: the daily model spent
+    weeks voting SELL on 97% of live 1-min bars because every intraday
+    fingerprint looks dead-flat at daily scale (found 2026-07-07)."""
+
+    def __init__(self, slot: int = 1, timeframe: str = "daily") -> None:
+        self.slot = int(slot)
+        self.timeframe = timeframe
         self.clf = None
         self.meta: dict = {"trained_at": None, "samples": 0, "accuracy": None,
-                           "auc": None, "pos_rate": None}
+                           "auc": None, "pos_rate": None, "timeframe": timeframe}
         self._ready = False
 
     async def init_db(self) -> None:
@@ -57,7 +65,8 @@ class GBMPatternModel:
         try:
             async with engine.begin() as conn:
                 row = (await conn.execute(text(
-                    "SELECT blob, meta FROM gbm_model_state WHERE id=1"))).fetchone()
+                    "SELECT blob, meta FROM gbm_model_state WHERE id=:slot"),
+                    {"slot": self.slot})).fetchone()
             if row and row[0]:
                 self.clf = pickle.loads(base64.b64decode(row[0]))
                 self.meta = row[1] if isinstance(row[1], dict) else json.loads(row[1] or "{}")
@@ -73,9 +82,9 @@ class GBMPatternModel:
         async with engine.begin() as conn:
             await conn.execute(text("""
                 INSERT INTO gbm_model_state (id, blob, meta, updated_at)
-                VALUES (1, :b, :m, NOW())
+                VALUES (:slot, :b, :m, NOW())
                 ON CONFLICT (id) DO UPDATE SET blob=:b, meta=:m, updated_at=NOW()
-            """), {"b": blob, "m": json.dumps(self.meta)})
+            """), {"slot": self.slot, "b": blob, "m": json.dumps(self.meta)})
 
     @property
     def is_trained(self) -> bool:
@@ -127,17 +136,29 @@ class GBMPatternModel:
         self.meta = {"trained_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                      "samples": int(len(y)), "accuracy": (round(acc, 4) if acc is not None else None),
                      "auc": (round(auc, 4) if auc is not None else None),
-                     "pos_rate": round(float(y.mean()), 4), "note": note}
+                     "pos_rate": round(float(y.mean()), 4), "note": note,
+                     "timeframe": self.timeframe}
         await self.save()
         logger.info("GBM trained: n=%d acc=%s auc=%s", len(y), acc, auc)
         return {"status": "ok", **self.meta}
 
 
 _gbm: GBMPatternModel | None = None
+_gbm_intraday: GBMPatternModel | None = None
 
 
 def get_gbm_model() -> GBMPatternModel:
+    """Daily-timeframe model (slot 1): daily fingerprints, 3-day horizon."""
     global _gbm
     if _gbm is None:
-        _gbm = GBMPatternModel()
+        _gbm = GBMPatternModel(slot=1, timeframe="daily")
     return _gbm
+
+
+def get_gbm_intraday_model() -> GBMPatternModel:
+    """Intraday model (slot 2): 1-min fingerprints from the tick store,
+    30-minute horizon — the question paper sessions actually ask."""
+    global _gbm_intraday
+    if _gbm_intraday is None:
+        _gbm_intraday = GBMPatternModel(slot=2, timeframe="intraday")
+    return _gbm_intraday

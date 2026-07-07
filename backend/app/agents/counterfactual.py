@@ -131,6 +131,12 @@ EXIT_VARIANTS: dict[str, dict] = {
                     "rsi_exit": False, "grace_min": 10, "hold_cap": 60},
     # Isolate the fast-cut/rsi effect: baseline stops, no cuts, same 30-min cap.
     "no_cut30":    {**BASELINE_POLICY, "fast_cut": False, "rsi_exit": False},
+    # Live policy with an earlier profit lock (0.8% vs 1.2%). Motivated by the
+    # 2026-07-07 AVANTEL replay: +1.01% MFE decayed to flat because the lock
+    # never armed at 1.2%. Candidate — adopt only if the A/B proves it.
+    "wide_hold60_lock08": {**BASELINE_POLICY, "stop_atr_mult": 1.5, "stop_floor": 1.5,
+                           "fast_cut": False, "grace_min": 10, "hold_cap": 60,
+                           "lock_gain": 0.8},
 }
 
 
