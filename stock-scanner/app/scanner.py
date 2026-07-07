@@ -623,9 +623,9 @@ def _analyze(candles: list[dict], regime: int = 0, calib: dict | None = None) ->
 
 # ── Data fetch ────────────────────────────────────────────────────────────────
 
-async def _fetch_chart(client: httpx.AsyncClient, ysym: str) -> list[dict]:
+async def _fetch_chart(client: httpx.AsyncClient, ysym: str, days: int = 140) -> list[dict]:
     p2 = int(time.time())
-    p1 = p2 - 140 * 86400
+    p1 = p2 - days * 86400
     # Retry with backoff on rate-limiting (429) — essential when sweeping the
     # full ~1800-symbol NSE universe so Yahoo doesn't shut us out mid-scan.
     for attempt in range(3):
@@ -762,7 +762,9 @@ async def _load_universe() -> dict[str, str]:
 async def _market_regime(client: httpx.AsyncClient) -> tuple[int, dict]:
     """+1 bullish / -1 bearish / 0 neutral, from NIFTY 50 trend (SMA20 vs SMA50 + momentum).
     Returns (score, detail_dict) — detail carries all raw indicators for the UI modal."""
-    candles = await _fetch_chart(client, "%5ENSEI")  # ^NSEI
+    # 500 calendar days ≈ 340 sessions — the AI forecaster trains on this
+    # history; the rule-based label below only needs the last 50.
+    candles = await _fetch_chart(client, "%5ENSEI", days=500)  # ^NSEI
     if len(candles) < 50:
         return 0, {}
     closes = [c["c"] for c in candles]
@@ -804,6 +806,13 @@ async def _market_regime(client: httpx.AsyncClient) -> tuple[int, dict]:
         "candles_used": len(closes),
         "updated_at":   _ist_now().isoformat(),
     }
+    # AI next-session forecast + its out-of-sample accuracy record. Guarded:
+    # a forecaster bug must never take down the regime classifier itself.
+    try:
+        from .regime_ai import regime_forecast
+        detail["ai"] = regime_forecast(candles)
+    except Exception as exc:
+        logger.debug("regime AI forecast failed: %s", exc)
     return score, detail
 
 
