@@ -575,6 +575,26 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
             support_ok = False
             blocked.append("no proven BUY voter (pattern/sentiment) co-signed — "
                            "generic consensus alone historically loses")
+        # ── Panel dissent rules (CF-validated 2026-07-07, n=17 entry bars) ────
+        # The gate counted BUY voters but was blind to SELL dissent: CMPDI
+        # 09:39 entered 2-BUY-vs-2-SELL with meanrev screaming SELL at 0.84
+        # and lost -1.66%. On CF-labeled entries, NET consensus (buys - sells)
+        # >= 2 won 89% (+0.82%) vs 25% (-0.28%) below it; and a reliable agent
+        # dissenting at >=0.75 never occurs on winning entries. Small sample —
+        # re-audit after a week of live entries.
+        sell_voters_n = sum(1 for a in agents if a.get("action") == "SELL")
+        net_consensus = buy_votes - sell_voters_n
+        if support_ok and net_consensus < 2:
+            support_ok = False
+            blocked.append(f"panel dissent: net consensus {buy_votes} BUY - {sell_voters_n} SELL "
+                           f"= {net_consensus} (need >= 2) — divided experts historically lose")
+        rel_dissent = max((float(a.get("confidence") or 0) for a in agents
+                           if a.get("action") == "SELL"
+                           and a.get("agent_name") in _RELIABLE_BUY_AGENTS), default=0.0)
+        if support_ok and rel_dissent >= 0.75:
+            support_ok = False
+            blocked.append(f"trusted-expert dissent: a proven agent votes SELL at "
+                           f"{rel_dissent:.0%} — not entering against it")
         if tsig == -1:
             blocked.append("intraday signal bearish (downtrend) — skipping entry")
         # ── Cold-streak symbol throttle ───────────────────────────────────────
@@ -725,10 +745,21 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         # Flat/losing positions still exit on an ensemble SELL (cut losers fast).
         gain_pct = ((candle["close"] - entry_price) / entry_price * 100) if entry_price else 0.0
         ens_sell_strong = (ens_action == "SELL" and conf >= 0.78)
+        # Grace debounce for ensemble-SELL exits (2026-07-07 AEGISVOPAK replay:
+        # day_structure flipped BUY 0.75 → SELL 0.88 on the bar its support
+        # broke, dumping the position 8 min in, within pennies of the dip low —
+        # the stock recovered all afternoon). Inside the entry's grace window a
+        # ONE-BAR ensemble flip is capitulation noise: require two consecutive
+        # SELL bars before an ensemble exit. Stops/trend-break (tsig) are
+        # untouched and still protect immediately.
+        streak = (s["position"].get("ens_sell_streak", 0) + 1) if ens_action == "SELL" else 0
+        s["position"]["ens_sell_streak"] = streak
+        in_grace = held_minutes is not None and held_minutes < 10
+        ens_sell_exit = ens_action == "SELL" and not (in_grace and streak < 2)
         if gain_pct >= 0.4 and not ens_sell_strong:
             action = "SELL" if tsig == -1 else "HOLD"      # winner — let it run
         else:
-            action = "SELL" if (tsig == -1 or ens_action == "SELL") else "HOLD"
+            action = "SELL" if (tsig == -1 or ens_sell_exit) else "HOLD"
         if action == "SELL":
             reason = f"Exit: intraday signal/ensemble {ens_action}. {reason}".strip()
         elif gain_pct >= 0.4:
