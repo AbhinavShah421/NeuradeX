@@ -161,12 +161,29 @@ class MeanReversionAgent(BaseAgent):
             if score < 0 and last_up:
                 score *= 0.6
 
+        # ── Shared level map: a fade-the-drop entry is materially better when
+        # the drop landed ON a tested support (the level provides the floor the
+        # reversion thesis assumes). Levels come from the ensemble's shared
+        # full-day map; ±0.30% of a 2+-touch support counts as "on it".
+        at_support = None
+        try:
+            sup = [l for l in ((context or {}).get("levels") or {}).get("supports", [])
+                   if l.get("touches", 1) >= 2 and l.get("dist_pct", 99) <= 0.30]
+            if sup:
+                at_support = sup[0]
+        except Exception:
+            at_support = None
+
         # ── Decision ─────────────────────────────────────────────────────────
         if score >= 0.30:
             action = "BUY"
             conf   = min(0.9, 0.5 + score)
             reason = (f"Mean-reversion BUY: z {z:.1f} (thresh ±{z_mild:.1f}/{z_strong:.1f}), "
                       f"RSI {rsi:.0f}, HL {hl:.0f}b — fade the drop.")
+            if at_support:
+                conf = min(0.92, conf + 0.08)
+                reason += (f" On {at_support['touches']}x-tested support "
+                           f"₹{at_support['price']:.2f} — floor confirmed.")
         elif score <= -0.30:
             action = "SELL"
             conf   = min(0.9, 0.5 + abs(score))

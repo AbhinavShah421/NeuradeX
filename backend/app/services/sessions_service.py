@@ -669,6 +669,29 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
                     f"day-structure veto: {(rng_pct or 0)*100:.0f}% of day range, "
                     f"R/R {(rr or 0):.1f}× — unfavorable risk/reward for a long entry"
                 )
+        # ── Tested-ceiling veto ───────────────────────────────────────────────
+        # Never open a long INTO a multi-tested resistance from the shared
+        # full-day level map: buying <0.15% under a 2+-touch ceiling is the
+        # 2026-07-07 AEGISVOPAK 10:11 pattern (entered 0.04% under the level,
+        # stopped out in 7 min). A tested level must first break to be a trade.
+        if enter:
+            lv_res = ind_ds.get("levels_res") or []
+            lv_sup = ind_ds.get("levels_sup") or []
+            ceiling = next((l for l in lv_res
+                            if l.get("touches", 1) >= 2 and l.get("dist_pct", 99) <= 0.15), None)
+            # Coil exception: price simultaneously ON a tested support (2+
+            # touches within 0.10%) is a compression setup, not a ceiling
+            # chase — AVANTEL 11:17 (5x support under a 4x ceiling) broke UP
+            # +0.8%. Veto only the naked approach into the ceiling.
+            coil = any(l.get("touches", 1) >= 2 and l.get("dist_pct", 99) <= 0.10
+                       for l in lv_sup)
+            if ceiling and not coil:
+                enter = False
+                blocked.append(
+                    f"tested-ceiling veto: {ceiling['touches']}x-tested resistance "
+                    f"₹{ceiling['price']:.2f} only {ceiling['dist_pct']:.2f}% overhead — "
+                    f"wait for the break or a pullback"
+                )
         # Pattern-quality gate (shared pattern AI engine): only trade good patterns.
         # Backtest/replay require an A-grade pattern; paper/live require ≥ B.
         if enter:

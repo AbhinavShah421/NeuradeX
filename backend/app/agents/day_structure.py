@@ -71,13 +71,30 @@ class DayStructureAgent(BaseAgent):
         # ── Swing S/R detection ───────────────────────────────────────────────
         sw_highs, sw_lows = self._find_swings(candles, _SWING_WINDOW)
 
-        # Nearest resistance above price (prefer swing highs; fallback to day high)
-        resistances = [h for h in sw_highs if h > price * 1.001]
-        nearest_res = min(resistances) if resistances else day_high
-
-        # Nearest support below price (prefer swing lows; fallback to day low)
-        supports    = [l for l in sw_lows if l < price * 0.999]
-        nearest_sup = max(supports) if supports else day_low
+        # Prefer the SHARED clustered level map (ensemble injects it — the same
+        # full-day structure every expert sees). Clustered levels carry touch
+        # counts, so "resistance" here means a TESTED ceiling, not one stray
+        # pivot. Fall back to raw swings when running outside the ensemble.
+        lv = (context or {}).get("levels") or {}
+        lv_res = [l for l in lv.get("resistances", []) if not l.get("at_price")]
+        lv_sup = [l for l in lv.get("supports", []) if not l.get("at_price")]
+        res_touches = sup_touches = 1
+        if lv.get("ok") and (lv_res or lv_sup):
+            if lv_res:
+                nearest_res = lv_res[0]["price"]
+                res_touches = int(lv_res[0].get("touches", 1))
+            else:
+                nearest_res = day_high
+            if lv_sup:
+                nearest_sup = lv_sup[0]["price"]
+                sup_touches = int(lv_sup[0].get("touches", 1))
+            else:
+                nearest_sup = day_low
+        else:
+            resistances = [h for h in sw_highs if h > price * 1.001]
+            nearest_res = min(resistances) if resistances else day_high
+            supports    = [l for l in sw_lows if l < price * 0.999]
+            nearest_sup = max(supports) if supports else day_low
 
         dist_res = (nearest_res - price) / price * 100   # % above price
         dist_sup = (price - nearest_sup) / price * 100   # % below price
@@ -120,11 +137,16 @@ class DayStructureAgent(BaseAgent):
         elif rr > 1.5:
             score += 0.10
 
-        # Touching a key level
+        # Touching a key level — a level tested multiple times carries more
+        # weight than a single stray pivot (touch counts from the shared map).
         if dist_res < _NEAR_LEVEL_PCT:
-            score -= 0.25; evidence.append(f"at resistance ₹{nearest_res:.2f} ({dist_res:.2f}% away)")
+            pen = 0.25 + 0.08 * min(3, res_touches - 1)
+            score -= pen
+            evidence.append(f"at {res_touches}x-tested resistance ₹{nearest_res:.2f} ({dist_res:.2f}% away)")
         if dist_sup < _NEAR_LEVEL_PCT and not (dist_res < _NEAR_LEVEL_PCT):
-            score += 0.22; evidence.append(f"at support ₹{nearest_sup:.2f} ({dist_sup:.2f}% away)")
+            bonus = 0.22 + 0.07 * min(3, sup_touches - 1)
+            score += bonus
+            evidence.append(f"at {sup_touches}x-tested support ₹{nearest_sup:.2f} ({dist_sup:.2f}% away)")
 
         # Morning range context
         if morning_bias == "above":
@@ -178,6 +200,13 @@ class DayStructureAgent(BaseAgent):
                 "move_from_open":   round(move_from_open, 3),
                 "swing_highs_n":    len(sw_highs),
                 "swing_lows_n":     len(sw_lows),
+                "res_touches":      res_touches,
+                "sup_touches":      sup_touches,
+                # Top shared levels (nearest first) — for the UI and the gate.
+                "levels_res":       [{"price": l["price"], "touches": l["touches"],
+                                      "dist_pct": l["dist_pct"]} for l in lv_res[:3]],
+                "levels_sup":       [{"price": l["price"], "touches": l["touches"],
+                                      "dist_pct": l["dist_pct"]} for l in lv_sup[:3]],
                 "score":            round(score, 3),
             },
         )

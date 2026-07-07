@@ -176,6 +176,16 @@ class EnsembleEngine:
         learned      = await _get_learned_weights()   # overall weights, updated after every trade
         action_rates = await _get_action_rates()       # per-action accuracy rates
         mode = context.get("mode", "paper")
+
+        # Shared intraday level map — computed ONCE from the full day's graph
+        # and given to every agent, so the experts deliberate over the same
+        # support/resistance structure instead of private last-few-bar views.
+        try:
+            from .levels import compute_levels
+            context["levels"] = compute_levels(candles)
+        except Exception:
+            logger.debug("level map computation failed", exc_info=True)
+            context["levels"] = {"ok": False, "supports": [], "resistances": []}
         active = [a for a in self.agents if is_enabled(reg, a.name)]
         if mode in ("replay", "backtest"):
             active = [a for a in active if a.name not in _REPLAY_SKIP_AGENTS]
