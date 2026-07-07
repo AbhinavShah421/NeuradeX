@@ -65,7 +65,12 @@ TRADE_GATE_KEY = "ai_engine:trade_gate"
 # sentiment BUY 44.1% / +0.27% — the only two positive-EV BUY voters. memory
 # (21.8%) and gbm (~base-rate) were previously in this set on older, smaller
 # analysis and are removed: their BUYs showed no edge at scale.
-_RELIABLE_BUY_AGENTS = frozenset({"sentiment", "pattern"})
+# rl + meanrev added 2026-07-07: forward-return audit of that day's 2,531 live
+# bars showed rl BUY 65% hit / +0.39% avg-30m (n=100) and meanrev 60% / +0.17%
+# (n=310), while pattern was near-mute on 1-min bars (since fixed) — the old
+# two-agent set left the co-sign gate resting on sentiment alone. Single-day
+# evidence at 1-min scale: re-audit after a week of live entries.
+_RELIABLE_BUY_AGENTS = frozenset({"sentiment", "pattern", "rl", "meanrev"})
 
 # Trade-gate tuning is data-driven (see analysis):
 #   • BUY-vote count predicts win-rate: 1→21%, 2→41%, 3→50% (real ensemble tops
@@ -333,7 +338,7 @@ async def _ensemble_decision(symbol: str, candles: list[dict], capital: float, p
     agents = [
         {"agent_name": a.agent_name, "action": a.action,
          "confidence": a.confidence, "weight": round(a.weight, 3),
-         "reasoning": a.reasoning}
+         "reasoning": a.reasoning, "indicators": a.indicators}
         for a in decision.agents
     ]
     return decision, agents
@@ -606,10 +611,17 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         max_conf = gate.get("max_conf", 1.01)
         conf_ok = True
         if ens_action == "BUY":
+            # The over-confidence ceiling was calibrated on the LEGACY confidence
+            # scale, where a high value meant one lopsided voice. On the
+            # directional scale high confidence means unanimity — no dissenting
+            # SELL voter anywhere — and CF-labeled data shows those are the best
+            # entries (conf>0.90: 8/8 wins +0.94% avg vs 40% in the 0.50-0.80
+            # band). Floor still applies in both modes; ceiling is legacy-only.
+            directional = getattr(decision, "vote_mode", "legacy") == "directional"
             if conf < gate["min_conf"]:
                 blocked.append(f"BUY confidence {conf:.0%} below the {gate['min_conf']:.0%} floor")
                 conf_ok = False
-            elif conf > max_conf:
+            elif conf > max_conf and not directional:
                 blocked.append(f"BUY confidence {conf:.0%} above the {max_conf:.0%} ceiling (over-confident setups historically reverse)")
                 conf_ok = False
         # ── Confident-override veto (Mistake #1: confidence is anti-predictive) ──

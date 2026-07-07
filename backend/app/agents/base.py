@@ -28,6 +28,10 @@ class EnsembleDecision:
     reasoning:       str
     prediction_id:   Optional[str]      = None
     timestamp:       Optional[datetime] = None
+    # Which vote policy produced `action`/`confidence`: "legacy" max-vote or
+    # "directional" contest. Confidence scales differ between the two — gates
+    # calibrated on one must not blindly apply their bands to the other.
+    vote_mode:       str                = "legacy"
 
 
 class BaseAgent(ABC):
