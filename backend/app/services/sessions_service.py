@@ -162,7 +162,9 @@ _PAPER_CONFIG_KEY     = "paper_trading:config"
 # Entry cutoff 13:30 (was 14:00): entries in the 14:00 hour win 23.6% and the
 # 15:00 hour 21.5%, vs ~30-31% before noon (12.6k-trade forensics). The last
 # pre-cutoff hour (13:00) still wins 30.4% — the cliff is at 14:00.
-_PAPER_CONFIG_DEFAULT = {"no_entry_after": "13:30", "squareoff_after": "14:30"}
+# no_entry_after 13:30 → 13:00 (2026-07-08): 13:00-13:30 entries went 0/8 on
+# CF labels (-0.45% avg); the broad population confirms post-13:00 decay (36%).
+_PAPER_CONFIG_DEFAULT = {"no_entry_after": "13:00", "squareoff_after": "14:30"}
 _paper_cfg_cache: dict = {}
 _paper_cfg_ts: float = 0.0
 
@@ -468,7 +470,7 @@ _PAPER_DROP_CANDLES = 6     # N consecutive lower closes = drop pattern (3 was t
 _LOSS_COOLDOWN_MIN  = 10    # after a losing exit, block new entries for this many minutes
                             # (stops the system re-scalping the same chop range — the
                             #  TITAN-style 6-losing-round-trips-in-an-afternoon pattern)
-_LATE_ENTRY_CUTOFF_MIN = 13 * 60 + 30   # 13:30 IST — no new entries after this in
+_LATE_ENTRY_CUTOFF_MIN = 13 * 60   # 13:00 IST — no new entries after this in
                                         # replay/backtest (paper uses its own
                                         # configurable cutoff). 14:00-hour entries win
                                         # 23.6% and 15:00-hour 21.5% vs ~30-31% before
@@ -622,9 +624,17 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         # require positive momentum: a pullback within the uptrend is a better long
         # than chasing strength, so a mildly-negative mom is fine.)
         rsi_now = ind.get("rsi", 50.0)
-        good_timing = rsi_now <= 70
-        if not good_timing:
+        # RSI entry band [45, 70]. Ceiling: overbought chases reverse. Floor
+        # (added 2026-07-08): "pullback" entries with RSI<45 inside an uptrend
+        # are failing bounces — 0/8 winners, -0.65% avg on the CF-labeled
+        # strict entry population (n=112). Momentum data agrees: entries with
+        # mom>+0.3% won 84%, dip entries (mom<0) 51%.
+        good_timing = 45 <= rsi_now <= 70
+        if rsi_now > 70:
             blocked.append(f"overbought (RSI {rsi_now:.0f}>70) — wait for a pullback")
+        elif rsi_now < 45:
+            blocked.append(f"failing bounce (RSI {rsi_now:.0f}<45) — dip entries in "
+                           f"uptrends lost 8/8 on CF labels; wait for strength")
         # The confidence band only describes a BUY decision. When the ensemble's
         # winning action is HOLD (gentle/loose entering on BUY support), its
         # confidence is the HOLD confidence — irrelevant to the BUY, so skip it.
