@@ -241,11 +241,14 @@ class EnsembleEngine:
         vote: dict[str, float] = {"BUY": 0.0, "SELL": 0.0, "HOLD": 0.0}
         for s in signals:
             base_w = s.weight or 1.0
-            if s.action in ("BUY", "SELL"):
-                rate        = rate_table.get(s.agent_name, {}).get(s.action)
-                effective_w = base_w * _action_factor(rate, rate_base.get(s.action))
-            else:
-                effective_w = base_w   # HOLD: use base weight unchanged
+            # Every vote is scaled by the agent's accuracy FOR THAT ACTION —
+            # three independent weights per agent (BUY/SELL/HOLD), so a good
+            # bear with a bad bull record (e.g. sentiment: SELL 1.11x lift,
+            # BUY 0.83x) amplifies where it has skill and damps where it
+            # doesn't. HOLD included since 2026-07-08: a skill-less HOLD
+            # flood was previously passed through at full base weight.
+            rate        = rate_table.get(s.agent_name, {}).get(s.action)
+            effective_w = base_w * _action_factor(rate, rate_base.get(s.action))
             s.weight = round(effective_w, 3)   # persist effective weight for logging/UI
             vote[s.action] += s.confidence * effective_w
 
