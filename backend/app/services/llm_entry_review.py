@@ -104,7 +104,19 @@ def _parse_verdict(reply: str) -> tuple[str, float | None, str]:
 async def _review(dossier: dict, session_id: str | None) -> None:
     from app.utils.llm_client import llm_chat, active_model
     started = time.monotonic()
-    prompt = "Entry dossier:\n" + json.dumps(dossier, default=str)
+    # Prepend the distilled lessons from past losing trades (post-mortem loop,
+    # ai_engine:active_lessons) so the reviewer judges each entry against the
+    # system's own recorded failure modes — e.g. "chasing momentum into
+    # resistance (12x)". Same cache the AIEngine manual analysis consults.
+    lessons = ""
+    try:
+        from app.utils.redis_client import cache_get
+        raw = await cache_get("ai_engine:active_lessons")
+        if raw:
+            lessons = f"{raw}\n\n"
+    except Exception:
+        pass
+    prompt = lessons + "Entry dossier:\n" + json.dumps(dossier, default=str)
     # Generous budget: 8B on CPU needs ~40s model reload after idle plus
     # prefill+generation. Shadow reviews are async — latency costs nothing.
     reply = await llm_chat(prompt, _SYSTEM, temperature=0.1,
