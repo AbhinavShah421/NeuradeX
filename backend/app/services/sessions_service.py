@@ -856,6 +856,16 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
                 "entry_conf": conf,
             }
             trade_executed = {"action": "BUY", "price": fill, "quantity": qty, "pnl": None, "time": candle["time"]}
+            # LLM shadow review of this entry's dossier — logged + persisted,
+            # never acted on (paper/live only: replay must stay deterministic,
+            # and back-filling verdicts on historical bars would be meaningless).
+            if s.get("mode") == "paper":
+                try:
+                    from app.services.llm_entry_review import shadow_review_entry
+                    shadow_review_entry(symbol, candle, agents or [], ind,
+                                        gate.get("label", "?"), s)
+                except Exception:
+                    logger.debug("shadow review hook failed", exc_info=True)
             s["trades"].append({
                 "time": candle["time"], "timestamp": candle.get("timestamp", 0),
                 "action": "BUY", "price": fill, "quantity": qty,
