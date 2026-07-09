@@ -624,17 +624,28 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         # require positive momentum: a pullback within the uptrend is a better long
         # than chasing strength, so a mildly-negative mom is fine.)
         rsi_now = ind.get("rsi", 50.0)
-        # RSI entry band [45, 70]. Ceiling: overbought chases reverse. Floor
-        # (added 2026-07-08): "pullback" entries with RSI<45 inside an uptrend
-        # are failing bounces — 0/8 winners, -0.65% avg on the CF-labeled
-        # strict entry population (n=112). Momentum data agrees: entries with
-        # mom>+0.3% won 84%, dip entries (mom<0) 51%.
-        good_timing = 45 <= rsi_now <= 70
+        # RSI entry band [58, 70] — "trade strength, not weakness". Win rate is
+        # MONOTONIC in entry RSI across the strict CF-labeled population (n=127):
+        #   RSI 45-55  54% win / -0.14%   ← coin flips, negative after costs
+        #   RSI 55-60  64%
+        #   RSI 60-65  68%
+        #   RSI 65-70 100% / +0.42%
+        # In a confirmed uptrend, RSI in the 45-55 zone is a stalling/failing
+        # bounce, not a pullback to buy. Floor raised 45 → 58 (2026-07-09): on
+        # the labeled population this lifts the entry set from 66% → ~83% win
+        # and roughly DOUBLES avg P&L, at ~half the trade count — a precision-
+        # over-volume choice toward the 90% target. The <45 case keeps its own
+        # message since it's the extreme of the same failure.
+        _RSI_FLOOR = 58
+        good_timing = _RSI_FLOOR <= rsi_now <= 70
         if rsi_now > 70:
             blocked.append(f"overbought (RSI {rsi_now:.0f}>70) — wait for a pullback")
         elif rsi_now < 45:
             blocked.append(f"failing bounce (RSI {rsi_now:.0f}<45) — dip entries in "
                            f"uptrends lost 8/8 on CF labels; wait for strength")
+        elif rsi_now < _RSI_FLOOR:
+            blocked.append(f"insufficient strength (RSI {rsi_now:.0f}<{_RSI_FLOOR}) — "
+                           f"the 45-58 zone wins ~55-60% (coin-flip); wait for RSI>={_RSI_FLOOR}")
         # The confidence band only describes a BUY decision. When the ensemble's
         # winning action is HOLD (gentle/loose entering on BUY support), its
         # confidence is the HOLD confidence — irrelevant to the BUY, so skip it.
