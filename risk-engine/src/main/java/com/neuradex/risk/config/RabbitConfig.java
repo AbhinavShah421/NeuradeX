@@ -1,11 +1,14 @@
 package com.neuradex.risk.config;
 
 import org.springframework.amqp.core.*;
+import org.springframework.amqp.rabbit.config.SimpleRabbitListenerContainerFactory;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.retry.MessageRecoverer;
 import org.springframework.amqp.rabbit.retry.RepublishMessageRecoverer;
 import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
+import org.springframework.amqp.support.converter.SimpleMessageConverter;
+import org.springframework.boot.autoconfigure.amqp.SimpleRabbitListenerContainerFactoryConfigurer;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -34,6 +37,28 @@ public class RabbitConfig {
         RabbitTemplate tpl = new RabbitTemplate(cf);
         tpl.setMessageConverter(jsonConverter());
         return tpl;
+    }
+
+    /**
+     * Listener container factory with an explicit SimpleMessageConverter (raw
+     * byte[] passthrough). WHY: Spring Boot auto-adopts the single
+     * Jackson2JsonMessageConverter bean (defined above for the outbound
+     * RabbitTemplate) into the listener side too. The @RabbitListener consumer
+     * takes byte[] and parses JSON by hand, so with the Jackson converter every
+     * application/json message failed with "Cannot deserialize [B from Object
+     * value" — 2,940 conversion failures in 4h, each retried and dead-lettered,
+     * so the risk engine validated nothing. This factory keeps inbound bytes
+     * raw while the template keeps JSON for outbound RiskValidated. The
+     * configurer still applies all spring.rabbitmq.listener.simple.* properties
+     * (ack mode, prefetch, the bounded retry interceptor).
+     */
+    @Bean
+    public SimpleRabbitListenerContainerFactory rabbitListenerContainerFactory(
+            SimpleRabbitListenerContainerFactoryConfigurer configurer, ConnectionFactory cf) {
+        SimpleRabbitListenerContainerFactory factory = new SimpleRabbitListenerContainerFactory();
+        configurer.configure(factory, cf);
+        factory.setMessageConverter(new SimpleMessageConverter());
+        return factory;
     }
 
     @Bean
