@@ -812,6 +812,9 @@ _SCAN_EVAL_MIGRATE = [
     "ALTER TABLE scan_evaluations ADD COLUMN IF NOT EXISTS trade_kind TEXT DEFAULT 'intraday'",
     "ALTER TABLE scan_evaluations DROP CONSTRAINT IF EXISTS scan_evaluations_eval_date_symbol_key",
     "CREATE UNIQUE INDEX IF NOT EXISTS scan_evaluations_uniq ON scan_evaluations (eval_date, symbol, trade_kind)",
+    # Per-factor snapshot at scan time — enables fitting the factor weights to
+    # outcomes (the blended score alone was flat 48-53% across its range).
+    "ALTER TABLE scan_evaluations ADD COLUMN IF NOT EXISTS factors JSONB",
 ]
 _scan_eval_ready = False
 
@@ -838,6 +841,7 @@ async def _ensure_scan_eval() -> None:
 async def scan_feedback(req: ScanFeedback):
     """Receive the scanner's post-market grade and persist each pick's outcome so
     it feeds the system's learning record (and the signal-score history)."""
+    import json as _json
     from datetime import date
     from sqlalchemy import text
     from app.database.postgres import engine
@@ -854,16 +858,19 @@ async def scan_feedback(req: ScanFeedback):
                 await conn.execute(text("""
                     INSERT INTO scan_evaluations
                       (eval_date, symbol, action, predicted_confidence,
-                       predicted_signal_score, day_return_pct, realized_return_pct, correct, trade_kind)
-                    VALUES (:d,:sym,:act,:pc,:ps,:dr,:rr,:ok,:kind)
+                       predicted_signal_score, day_return_pct, realized_return_pct,
+                       correct, trade_kind, factors)
+                    VALUES (:d,:sym,:act,:pc,:ps,:dr,:rr,:ok,:kind,:fac)
                     ON CONFLICT (eval_date, symbol, trade_kind) DO UPDATE SET
                       action=:act, predicted_confidence=:pc, predicted_signal_score=:ps,
-                      day_return_pct=:dr, realized_return_pct=:rr, correct=:ok
+                      day_return_pct=:dr, realized_return_pct=:rr, correct=:ok,
+                      factors=COALESCE(EXCLUDED.factors, scan_evaluations.factors)
                 """), {
                     "d": eval_date, "sym": g.get("symbol"), "act": g.get("action"),
                     "pc": g.get("predicted_confidence"), "ps": g.get("predicted_signal_score"),
                     "dr": g.get("day_return_pct"), "rr": g.get("realized_return_pct"),
                     "ok": bool(g.get("correct")), "kind": kind,
+                    "fac": _json.dumps(g.get("factors")) if g.get("factors") else None,
                 })
                 inserted += 1
     except Exception as exc:
