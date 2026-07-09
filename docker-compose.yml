@@ -662,7 +662,7 @@ services:
 
   # ── Ollama (local LLM) ───────────────────────────────────────────────────────
   # Runs the Ollama server inside Docker so the host doesn't need Ollama installed.
-  # ollama-init pulls llama3.2 on first boot (skipped if the model is already cached).
+  # ollama-init pulls the configured model (OLLAMA_MODEL) on first boot (skipped if cached).
 
   ollama:
     image: ollama/ollama:latest
@@ -699,7 +699,7 @@ services:
       OLLAMA_HOST: http://ollama:11434
     networks:
       - stock-prediction-network
-    entrypoint: ["/bin/sh", "-c", "ollama pull llama3.2 && echo 'llama3.2 ready'"]
+    entrypoint: ["/bin/sh", "-c", "ollama pull ${OLLAMA_MODEL:-llama3.1:8b} && echo 'model ready'"]
     restart: "no"
     deploy:
       resources:
@@ -946,7 +946,7 @@ volumes:
   finbert_cache:
   rl_models:
   candle_data:        # 1-second tick-store dataset (our own real-data warehouse)
-  ollama_data:        # Ollama model cache — persists llama3.2 across restarts
+  ollama_data:        # Ollama model cache — persists pulled models across restarts
 
 networks:
   stock-prediction-network:
