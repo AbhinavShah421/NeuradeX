@@ -191,6 +191,14 @@ const ACTION_COLOR: Record<string, string> = {
   BUY: '#22c55e', SELL: '#ef4444', HOLD: '#f59e0b',
 };
 
+// Small labelled stat used inside the agent-detail expansion.
+const Metric: React.FC<{ label: string; value: string; color?: string }> = ({ label, value, color }) => (
+  <div>
+    <div style={{ fontSize: 10, color: 'var(--nd-text-3)', marginBottom: 2 }}>{label}</div>
+    <div style={{ fontSize: 14, fontWeight: 700, color: color ?? 'var(--nd-text-1)' }}>{value}</div>
+  </div>
+);
+
 // ── Trade chart block: thin wrapper over the shared TradingChart ──────────────
 // Shows the trade's day; if the trade belongs to a session, all the session's
 // trades are passed so the whole session's entry/exit markers are drawn.
@@ -216,12 +224,28 @@ const FField: React.FC<{ label: string; children: React.ReactNode }> = ({ label,
   </div>
 );
 
+interface AgentDecision { agent: string; action: string; weight: number; confidence: number; reasoning: string; }
+interface AgentAcc { weight?: number; by_action?: Array<{ action: string; rate: number; total: number; avg_pnl: number }>; }
+
 function ExecutionModal({ trade, allTrades = [], onClose }: { trade: TradeRecord; allTrades?: TradeRecord[]; onClose: () => void }) {
   const steps = buildExecutionSteps(trade);
   const sessionId = trade.marketContext?.sessionId;
   const sessionCount = sessionId
     ? allTrades.filter(t => t.marketContext?.sessionId === sessionId).length
     : 1;
+
+  // Rich per-agent decision (weight/confidence/reasoning at decision time) +
+  // each agent's lifetime per-action accuracy — for the clickable agent cards.
+  const [richAgents, setRichAgents] = useState<AgentDecision[]>([]);
+  const [agentAcc, setAgentAcc]     = useState<Record<string, AgentAcc>>({});
+  const [openAgent, setOpenAgent]   = useState<string | null>(null);
+  useEffect(() => {
+    if (!sessionId) return;
+    apiService.getTradeAgentDetail(sessionId)
+      .then((r: any) => { const d = r?.data ?? r; setRichAgents(d.agents ?? []); setAgentAcc(d.accuracy ?? {}); })
+      .catch(() => {});
+  }, [sessionId]);
+  const weightOf = (agent: string) => richAgents.find(a => a.agent === agent);
 
   return (
     <div
@@ -280,16 +304,67 @@ function ExecutionModal({ trade, allTrades = [], onClose }: { trade: TradeRecord
                 </div>
 
                 {step.step === 2 ? (
-                  // Special rendering for agent decisions grid
+                  // Agent decisions grid — each card shows the agent's vote + its
+                  // weight at decision time; click to expand full detail.
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                    {Object.entries(step.data).map(([agent, action]) => (
-                      <div key={agent} style={{ background: 'var(--nd-surface)', border: `1px solid ${AGENT_COLORS[agent] ?? 'var(--nd-border)'}40`, borderRadius: 8, padding: '6px 12px', display: 'flex', flexDirection: 'column', alignItems: 'center', minWidth: 90 }}>
-                        <div style={{ fontSize: 10, color: 'var(--nd-text-3)', textTransform: 'capitalize', marginBottom: 2 }}>{agent}</div>
-                        <div style={{ fontSize: 13, fontWeight: 700, color: ACTION_COLOR[action as string] ?? 'var(--nd-text-3)' }}>
-                          {action as string}
+                    {Object.entries(step.data).map(([agent, action]) => {
+                      const rich = weightOf(agent);
+                      const isOpen = openAgent === agent;
+                      const acc = agentAcc[agent];
+                      return (
+                        <div key={agent} style={{ width: isOpen ? '100%' : 'auto' }}>
+                          <div
+                            onClick={() => setOpenAgent(isOpen ? null : agent)}
+                            style={{ background: 'var(--nd-surface)', border: `1px solid ${isOpen ? (AGENT_COLORS[agent] ?? 'var(--nd-accent)') : (AGENT_COLORS[agent] ?? 'var(--nd-border)') + '40'}`, borderRadius: 8, padding: '6px 12px', display: 'flex', flexDirection: 'column', alignItems: 'center', minWidth: 90, cursor: 'pointer', transition: 'border-color .15s' }}>
+                            <div style={{ fontSize: 10, color: 'var(--nd-text-3)', textTransform: 'capitalize', marginBottom: 2 }}>{agent}</div>
+                            <div style={{ fontSize: 13, fontWeight: 700, color: ACTION_COLOR[action as string] ?? 'var(--nd-text-3)' }}>
+                              {action as string}
+                            </div>
+                            {rich && (
+                              <div style={{ fontSize: 9.5, color: 'var(--nd-text-3)', marginTop: 2 }}>
+                                w {rich.weight.toFixed(2)} · {(rich.confidence * 100).toFixed(0)}%
+                              </div>
+                            )}
+                          </div>
+                          {isOpen && (
+                            <div style={{ marginTop: 6, background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 8, padding: '10px 14px' }}>
+                              {rich?.reasoning && (
+                                <div style={{ fontSize: 12, color: 'var(--nd-text-2)', marginBottom: 8, lineHeight: 1.5 }}>
+                                  <span style={{ color: 'var(--nd-text-3)' }}>Reasoning: </span>{rich.reasoning}
+                                </div>
+                              )}
+                              <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', marginBottom: acc?.by_action?.length ? 10 : 0 }}>
+                                <Metric label="This trade" value={`${action}`} color={ACTION_COLOR[action as string]} />
+                                {rich && <Metric label="Weight" value={rich.weight.toFixed(3)} />}
+                                {rich && <Metric label="Confidence" value={`${(rich.confidence * 100).toFixed(0)}%`} />}
+                                {acc?.weight != null && <Metric label="Current weight" value={`${(acc.weight * 100).toFixed(1)}%`} />}
+                              </div>
+                              {acc?.by_action && acc.by_action.length > 0 && (
+                                <div>
+                                  <div style={{ fontSize: 10, color: 'var(--nd-text-3)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>Lifetime accuracy by action</div>
+                                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                    {['BUY', 'SELL', 'HOLD'].map(act => {
+                                      const s = acc.by_action!.find(x => x.action === act);
+                                      if (!s) return null;
+                                      return (
+                                        <div key={act} style={{ flex: '1 1 90px', background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 6, padding: '6px 10px' }}>
+                                          <div style={{ fontSize: 10, fontWeight: 700, color: ACTION_COLOR[act] ?? 'var(--nd-text-3)' }}>{act}</div>
+                                          <div style={{ fontSize: 15, fontWeight: 700, color: s.rate >= 0.5 ? 'var(--nd-green)' : 'var(--nd-text-2)' }}>{(s.rate * 100).toFixed(0)}%</div>
+                                          <div style={{ fontSize: 9.5, color: 'var(--nd-text-3)' }}>{s.total} decisions</div>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              )}
+                              <a href={`/neuradex/agents/${agent}`} style={{ display: 'inline-block', marginTop: 10, fontSize: 12, color: 'var(--nd-accent)', textDecoration: 'none', fontWeight: 600 }}>
+                                See every {agent} decision →
+                              </a>
+                            </div>
+                          )}
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 ) : (
                   <div style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 10, padding: '10px 14px', display: 'flex', flexWrap: 'wrap', gap: '8px 24px' }}>

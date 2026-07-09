@@ -489,6 +489,21 @@ async def sentiment_read(symbol: str):
     return await service.sentiment_read(symbol)
 
 
+@router.get("/trade-agent-detail/{session_id}")
+async def trade_agent_detail(session_id: str):
+    """Rich per-agent decision (weight/confidence/reasoning at decision time) for
+    the trade a session produced, plus each agent's lifetime per-action accuracy.
+    Powers the clickable agent cards in the Orders execution-trace popup."""
+    return await service.trade_agent_detail(session_id)
+
+
+@router.get("/agent-trades/{agent}")
+async def agent_trades(agent: str, limit: int = 100):
+    """Per-agent drill-down: every executed trade this agent voted on, its vote +
+    confidence + weight, and whether it was right. Powers the per-agent page."""
+    return await service.agent_trades(agent, limit)
+
+
 @router.get("/exit-variants")
 async def exit_variants(days: int = 14):
     """Exit-policy A/B results: every EXIT_VARIANT simulated nightly on the same

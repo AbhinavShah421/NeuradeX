@@ -994,6 +994,16 @@ class ApiService {
     return response.data;
   }
 
+  async getTradeAgentDetail(sessionId: string): Promise<any> {
+    const response = await this.api.get(`/api/ai-engine/trade-agent-detail/${sessionId}`);
+    return response.data;
+  }
+
+  async getAgentTrades(agent: string, limit = 100): Promise<any> {
+    const response = await this.api.get(`/api/ai-engine/agent-trades/${agent}`, { params: { limit } });
+    return response.data;
+  }
+
   async sessionList(statusFilter?: string): Promise<ApiResponse<any>> {
     const params = statusFilter ? { status: statusFilter } : {};
     const response = await this.api.get('/api/sessions', { params });

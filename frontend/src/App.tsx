@@ -19,6 +19,7 @@ import PatternMemory from './pages/PatternMemory';
 import Recordings from './pages/Recordings';
 import ModelRegistry from './pages/ModelRegistry';
 import Orders from './pages/Orders';
+import AgentDetail from './pages/AgentDetail';
 import Settings from './pages/Settings';
 import './styles/globals.css';
 
@@ -39,6 +40,7 @@ const App: React.FC = () => {
                 <Routes>
                   <Route path="/" element={<Dashboard />} />
                   <Route path="/stocks/:symbol" element={<StockDetail />} />
+                  <Route path="/agents/:agent" element={<AgentDetail />} />
                   <Route path="/portfolio" element={<Portfolio />} />
                   <Route path="/mutual-funds" element={<MutualFunds />} />
                   <Route path="/predictions" element={<Predictions />} />

@@ -1753,6 +1753,107 @@ async def sentiment_read(symbol: str):
     return {"status": "success", "data": {"sentiment": None, "headlines_count": 0}}
 
 
+# ── Agent-decision drill-downs (Orders trace popup + per-agent page) ───────────
+
+async def trade_agent_detail(session_id: str):
+    """Rich per-agent decision for the trade a session produced: each agent's
+    action, weight, confidence and reasoning AT DECISION TIME (from the executed
+    entry in session_decisions), plus every agent's lifetime per-action accuracy
+    (from the learning system, real-outcomes-only). Powers the clickable agent
+    cards in the Orders execution-trace popup."""
+    from sqlalchemy import text
+    from app.database.postgres import engine
+    agents: list[dict] = []
+    try:
+        async with engine.begin() as conn:
+            row = (await conn.execute(text("""
+                SELECT agents, symbol, candle_time, price
+                FROM session_decisions
+                WHERE session_id = :sid AND executed = TRUE AND action = 'BUY'
+                ORDER BY created_at DESC LIMIT 1
+            """), {"sid": session_id})).fetchone()
+        if row and row[0]:
+            raw = row[0] if isinstance(row[0], list) else json.loads(row[0])
+            agents = [
+                {"agent": a.get("agent") or a.get("agent_name"),
+                 "action": a.get("action"),
+                 "weight": round(float(a.get("weight") or 0), 3),
+                 "confidence": round(float(a.get("confidence") or 0), 3),
+                 "reasoning": a.get("reasoning") or ""}
+                for a in raw
+            ]
+    except Exception as exc:
+        logger.debug("trade_agent_detail decision lookup failed: %s", exc)
+
+    # Lifetime per-action accuracy (real outcomes only — see learning.py filter).
+    accuracy: dict = {}
+    try:
+        from app.agents import get_learning
+        perf = await get_learning().get_performance()
+        for a in perf:
+            name = a.get("agent") or a.get("agent_name")
+            if name:
+                accuracy[name] = {
+                    "weight": a.get("weight"),
+                    "by_action": a.get("by_action") or [],
+                }
+    except Exception as exc:
+        logger.debug("trade_agent_detail accuracy lookup failed: %s", exc)
+
+    return {"status": "success", "data": {"agents": agents, "accuracy": accuracy}}
+
+
+async def agent_trades(agent: str, limit: int = 100):
+    """Per-agent drill-down: every EXECUTED trade this agent voted on — its vote,
+    confidence and weight at the time, the ensemble's action, and whether the
+    agent was RIGHT (BUY vote correct when the trade won; SELL/HOLD correct when
+    it lost/flat). Real paper/live + replay trades that produced a record."""
+    from sqlalchemy import text
+    from app.database.postgres import engine
+    out: list[dict] = []
+    summary = {"n": 0, "correct": 0, "by_action": {}}
+    try:
+        async with engine.begin() as conn:
+            rows = (await conn.execute(text("""
+                SELECT d.symbol, d.candle_time, d.created_at::date AS d,
+                       d.action AS ensemble_action, d.price,
+                       sig, tr.outcome,
+                       (tr.exit_price - tr.entry_price) / NULLIF(tr.entry_price,0) * 100 AS pnl_pct
+                FROM session_decisions d
+                JOIN trade_records tr ON tr.session_id = d.session_id
+                CROSS JOIN LATERAL jsonb_array_elements(d.agents) AS sig
+                WHERE d.executed = TRUE
+                  AND (sig->>'agent' = :ag OR sig->>'agent_name' = :ag)
+                  AND tr.outcome IN ('WIN','LOSS')
+                ORDER BY d.created_at DESC LIMIT :lim
+            """), {"ag": agent, "lim": limit})).fetchall()
+        for r in rows:
+            sig = r[5] if isinstance(r[5], dict) else json.loads(r[5])
+            vote = sig.get("action")
+            won = (r[6] == "WIN")
+            correct = won if vote == "BUY" else (not won)
+            rec = {
+                "symbol": r[0], "time": r[1], "date": str(r[2]),
+                "ensemble_action": r[3], "price": float(r[4] or 0),
+                "vote": vote,
+                "confidence": round(float(sig.get("confidence") or 0), 3),
+                "weight": round(float(sig.get("weight") or 0), 3),
+                "outcome": r[6], "pnl_pct": round(float(r[7] or 0), 2),
+                "correct": bool(correct),
+            }
+            out.append(rec)
+            summary["n"] += 1
+            summary["correct"] += int(correct)
+            ba = summary["by_action"].setdefault(vote, {"n": 0, "correct": 0})
+            ba["n"] += 1; ba["correct"] += int(correct)
+    except Exception as exc:
+        logger.debug("agent_trades lookup failed: %s", exc)
+    summary["accuracy"] = round(summary["correct"] / summary["n"], 3) if summary["n"] else None
+    for act, v in summary["by_action"].items():
+        v["accuracy"] = round(v["correct"] / v["n"], 3) if v["n"] else None
+    return {"status": "success", "data": {"agent": agent, "summary": summary, "trades": out}}
+
+
 # ── Helper ────────────────────────────────────────────────────────────────────
 
 def _candle_time(candles: list[dict]) -> str:
