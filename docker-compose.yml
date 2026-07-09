@@ -24,7 +24,12 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256M   # 101MB actual; halved — postgres rarely spikes here
+          # 256M ("rarely spikes") was wrong: timescaledb-tune sized
+          # shared_buffers for the HOST and the container got OOM-killed twice
+          # on 2026-07-07 under ordinary queries (signal 9). shared_buffers is
+          # now pinned to 96MB via ALTER SYSTEM; 768M gives working queries
+          # real headroom on the 11GB VM.
+          memory: 768M
           cpus: '0.5'
 
   mongodb:
@@ -678,7 +683,10 @@ services:
     deploy:
       resources:
         limits:
-          memory: 4G
+          # 7G for llama3.1:8b (q4 weights ~4.9G + KV cache). Requires the
+          # WSL VM at 11GB (~/.wslconfig) — on the old 8GB VM this limit
+          # would let ollama starve every neighbour.
+          memory: 7G
           cpus: '2.0'
 
   ollama-init:
