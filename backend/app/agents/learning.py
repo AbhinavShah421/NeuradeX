@@ -13,6 +13,23 @@ _MIN_ACTION_SAMPLES = 20   # minimum decisions before we trust action-specific r
 _SHRINK_K           = 20   # Bayesian shrinkage prior weight (in pseudo-samples)
 _CF_RATE_WEIGHT     = 0.5  # counterfactual samples count at half a real outcome
 
+# Exclude outcomes from operator-run replay/backtest sessions from the stats
+# that drive live weights AND the agent-accuracy UI (2026-07-09). Those
+# outcomes depend on which symbols/dates an operator happened to test and on
+# past exit-policy bugs (e.g. the hold-cap parity bug that lost -1.5% on a batch
+# of large caps), so pooling them dragged agents' displayed BUY accuracy from
+# ~100% on real paper trades to ~34%, and — worse — degraded the live per-action
+# weights. Keeps paper/live real outcomes and manual-analysis predictions (no
+# session); systematic counterfactual labels are merged in separately at
+# _CF_RATE_WEIGHT. Mirrors the pattern-memory source weighting.
+_EXCLUDE_SIM_OUTCOMES = """
+    AND NOT EXISTS (
+        SELECT 1 FROM session_metadata sm
+        WHERE sm.session_id = p.context::jsonb->>'session_id'
+          AND sm.mode IN ('replay', 'backtest')
+    )
+"""
+
 # Weight decay/normalization (see record_outcome). Additive weight updates with a
 # [0.3, 3.0] clamp and no decay saturated 9 of 12 agents at the ceiling — learned
 # weighting collapsed back to uniform. After every outcome we (a) decay each weight
@@ -395,9 +412,11 @@ class LearningSystem:
             async with engine.begin() as conn:
                 base_row = (await conn.execute(text("""
                     SELECT COUNT(*)::int,
-                           SUM(CASE WHEN outcome = 'correct' THEN 1 ELSE 0 END)::int
-                    FROM ai_engine_outcomes
-                """))).fetchone()
+                           SUM(CASE WHEN o.outcome = 'correct' THEN 1 ELSE 0 END)::int
+                    FROM ai_engine_outcomes o
+                    JOIN ai_engine_predictions p USING (prediction_id)
+                    WHERE TRUE
+                """ + _EXCLUDE_SIM_OUTCOMES))).fetchone()
                 rows = (await conn.execute(text("""
                     SELECT
                         sig->>'agent'  AS agent_name,
@@ -412,6 +431,7 @@ class LearningSystem:
                     JOIN ai_engine_outcomes o USING (prediction_id)
                     CROSS JOIN LATERAL jsonb_array_elements(p.agent_signals::jsonb) AS sig
                     WHERE sig->>'agent' IS NOT NULL
+                """ + _EXCLUDE_SIM_OUTCOMES + """
                     GROUP BY sig->>'agent', sig->>'action'
                 """))).fetchall()
 
@@ -522,6 +542,7 @@ class LearningSystem:
                     JOIN ai_engine_outcomes o USING (prediction_id)
                     CROSS JOIN LATERAL jsonb_array_elements(p.agent_signals::jsonb) AS sig
                     WHERE sig->>'agent' IS NOT NULL
+                """ + _EXCLUDE_SIM_OUTCOMES + """
                     GROUP BY sig->>'agent', sig->>'action'
                     ORDER BY sig->>'agent', sig->>'action'
                 """))).fetchall()
