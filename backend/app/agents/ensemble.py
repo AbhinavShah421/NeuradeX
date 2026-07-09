@@ -93,11 +93,14 @@ DEFAULT_WEIGHTS: dict[str, float] = {
 }
 
 # Agents that require real-time data with no historical equivalent.
-# Sentiment IS included in replay/backtest — it reads a date-keyed Redis key
-# (ai_engine:sentiment:{sym}:{date}) pre-fetched by the autopilot's historical
-# sentiment ranking, and falls back to a background Google News dated-query fetch
-# on the first candle so the next call has a real signal.
-_REPLAY_SKIP_AGENTS: frozenset[str] = frozenset()
+# Sentiment is EXCLUDED from replay/backtest (2026-07-09). It used to read a
+# date-keyed Google News fetch, but dated news search is unreliable: the Jul-8
+# replay consumed a "market rally" blob (score 0.8, confidence 1.0) on a day
+# the market slid all afternoon, and co-signed a 0.95-confidence BUY on a
+# -1.76% loser. It also made replays non-reproducible (fetched news varies by
+# run time). Historical evaluation must run on price-derived signals only;
+# sentiment stays fully active in live/paper where its news is current.
+_REPLAY_SKIP_AGENTS: frozenset[str] = frozenset({"sentiment"})
 
 # In replay/backtest, emphasise price-pattern agents whose signals are derived
 # purely from OHLCV data; keep sentiment at its normal weight since it now uses
