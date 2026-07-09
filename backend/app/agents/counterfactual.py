@@ -114,6 +114,10 @@ LIVE_POLICY: dict = {
     **BASELINE_POLICY,
     "stop_atr_mult": 1.5, "stop_floor": 1.5,
     "fast_cut": False, "grace_min": 10, "hold_cap": 60,
+    # lock_gain 1.2 → 0.8 adopted live 2026-07-09 (the wide_hold60_lock08
+    # variant won the win-rate A/B on both days since introduction). CF labels
+    # must keep tracking the live exit rules (_tech_signal in backtest_service).
+    "lock_gain": 0.8,
 }
 
 EXIT_VARIANTS: dict[str, dict] = {

@@ -88,8 +88,13 @@ class PatternEngine:
         mem_floor: float | None = None
         symbol_local = False
         try:
+            # Intraday windows also exclude daily-BACKTEST memory cases (see
+            # MemoryAgent.analyze — they answer a different game's question).
+            mem_excl = set(exclude_memory_sources or set())
+            if intraday:
+                mem_excl |= {"BACKTEST"}
             mem = await get_memory().query(fp, symbol=symbol, regime=classify_regime(candles),
-                                           exclude_sources=exclude_memory_sources)
+                                           exclude_sources=(mem_excl or None))
             buy = (mem.get("per_action") or {}).get("BUY") or {}
             mw = buy.get("win_rate")
             ms = int(buy.get("n", 0))
