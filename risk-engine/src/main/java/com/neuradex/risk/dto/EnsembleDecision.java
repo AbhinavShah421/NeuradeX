@@ -23,8 +23,12 @@ public class EnsembleDecision {
 
     private double uncertainty;
 
+    // Map<String, Object>: each value is a vote object
+    // {"signal": "...", "confidence": 0.x, "weight": 0.y}, NOT a bare string.
+    // Was Map<String,String> and every real message failed Jackson with
+    // "Cannot deserialize String from Object value" (510 dead-lettered).
     @JsonProperty("agent_votes")
-    private Map<String, String> agentVotes;
+    private Map<String, Object> agentVotes;
 
     // Last ATR value used for position sizing (populated by ensemble or market data)
     private double atr;

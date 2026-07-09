@@ -30,8 +30,9 @@ public class RiskValidated {
     @JsonProperty("risk_pct")
     private double riskPct;
 
+    // Passed through from EnsembleDecision — vote objects, not bare strings.
     @JsonProperty("agent_votes")
-    private Map<String, String> agentVotes;
+    private Map<String, Object> agentVotes;
 
     @JsonProperty("validated_at")
     private String validatedAt;
