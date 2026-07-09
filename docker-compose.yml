@@ -226,7 +226,7 @@ services:
       LLM_PROVIDER: ollama
       ANTHROPIC_API_KEY: ""
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-haiku-4-5-20251001}
-      LLM_MODEL: ${OLLAMA_MODEL:-llama3.2}
+      LLM_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
       ANGEL_API_KEY: ${ANGEL_API_KEY:-}
       ANGEL_CLIENT_CODE: ${ANGEL_CLIENT_CODE:-}
       ANGEL_PIN: ${ANGEL_PIN:-}
@@ -293,7 +293,7 @@ services:
       LLM_PROVIDER: ollama
       ANTHROPIC_API_KEY: ""
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-haiku-4-5-20251001}
-      LLM_MODEL: ${OLLAMA_MODEL:-llama3.2}
+      LLM_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
       NEWS_MIN_CONFIDENCE: "0.55"
       NEWS_MIN_SCORE: "0.3"
       BACKEND_ROLE: "runner"    # session runner + ML sweeps only, no HTTP load
@@ -746,7 +746,7 @@ services:
       LLM_PROVIDER: ollama
       ANTHROPIC_API_KEY: ""
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-haiku-4-5-20251001}
-      LLM_MODEL: ${OLLAMA_MODEL:-llama3.2}
+      LLM_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
       LLM_API_URL: ${LLM_API_URL:-http://ollama:11434}
       SENTIMENT_INTERVAL: "900"
       SENTIMENT_TTL: "5400"
