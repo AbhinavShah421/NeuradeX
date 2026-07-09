@@ -780,9 +780,21 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
                       f"or the ensemble turning bearish. Ensemble {ens_action} ({conf:.0%}).")
 
     # ── Per-trade hold cap: force-exit any position held longer than the span ──
-    # Applies to auto-traded watchlist stocks so no single trade overstays; the
-    # stock keeps being traded for the rest of the session.
+    # POLICY PARITY (2026-07-09): the validated exit policy is wide_hold60 —
+    # hold_cap 60 is part of its DEFINITION, and every CF label / A/B number
+    # assumes it. But sessions only enforced a cap when max_hold_minutes was
+    # explicitly set (auto-watchlist), so manual paper/replay/backtest ran
+    # UNLIMITED holds: 13 large-cap Jul-8 backtests lost -9.5% riding a slow
+    # afternoon slide for 3-5h, where the labeled 60-min policy scores +0.4%
+    # on identical entries. Default now comes from LIVE_POLICY.hold_cap;
+    # an explicit max_hold_minutes still overrides (0 = unlimited, opt-in).
     max_hold = s.get("max_hold_minutes") or 0
+    if max_hold <= 0:
+        try:
+            from app.agents.counterfactual import LIVE_POLICY
+            max_hold = int(LIVE_POLICY.get("hold_cap", 60))
+        except Exception:
+            max_hold = 60
     if not force_close and pos_status == "LONG" and max_hold > 0 and action != "SELL":
         entry_m  = _time_to_minutes(pos.get("entry_time", candle.get("time", "09:15")))
         candle_m = _time_to_minutes(candle.get("time", "09:15"))
