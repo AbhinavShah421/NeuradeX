@@ -234,7 +234,12 @@ def _feature_matrix(closes: list, highs: list, lows: list, volumes: list) -> np.
     pdi   = 100.0 * pdm14 / (tr14 + 1e-9)
     mdi   = 100.0 * mdm14 / (tr14 + 1e-9)
     denom = pdi + mdi
-    dx    = np.where(denom > 1e-9, 100.0 * np.abs(pdi - mdi) / denom, 0.0)
+    # Safe denominator: np.where still EVALUATES the division for every element
+    # before selecting, so a raw denom=0 (flat bars) produces a 0/0 NaN and a
+    # RuntimeWarning even though the result is masked to 0.0. Divide by a
+    # 1.0-substituted denom instead — same masked result, no NaN, no warning.
+    safe_denom = np.where(denom > 1e-9, denom, 1.0)
+    dx    = np.where(denom > 1e-9, 100.0 * np.abs(pdi - mdi) / safe_denom, 0.0)
     adx   = _wilder(dx, 14)                         # (n-1,)
 
     # |10-bar SMA slope| as % change per 10 bars
@@ -406,7 +411,8 @@ class RegimeFilterAgent(BaseAgent):
         pdi   = 100.0 * pdm14 / (tr14 + 1e-9)
         mdi   = 100.0 * mdm14 / (tr14 + 1e-9)
         denom = pdi + mdi
-        dx    = np.where(denom > 1e-9, 100.0 * np.abs(pdi - mdi) / denom, 0.0)
+        safe_denom = np.where(denom > 1e-9, denom, 1.0)   # avoid 0/0 NaN + warning
+        dx    = np.where(denom > 1e-9, 100.0 * np.abs(pdi - mdi) / safe_denom, 0.0)
         adx   = _wilder(dx, period)
         return float(adx[-1]) if adx[-1] > 0 else 0.0
 
