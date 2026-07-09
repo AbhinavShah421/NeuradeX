@@ -911,9 +911,15 @@ def _tech_signal(ind: dict, position: str, candle: dict, entry_price: float, agg
 
         if gain_pct <= stop:                   return -1   # volatility-scaled stop loss
         if gain_pct >= take:                   return -1   # take profit (runs further than before)
-        # Profit-lock: once up ≥1.2%, exit if price loses the 5-bar MA (trail) —
+        # Profit-lock: once up ≥0.8%, exit if price loses the 5-bar MA (trail) —
         # protects gains without bailing on every momentum wiggle.
-        if gain_pct >= 1.2 and price < sma5:   return -1
+        # 1.2 → 0.8 (2026-07-09): the wide_hold60_lock08 exit variant posted
+        # the best WIN RATE on both A/B days since it was added (47.4% vs
+        # 46.5% on 4,000 Jul-7 entries; 44.5% vs 42.7% on 1,290 Jul-8) at a
+        # ~0.01pp avg-pnl cost. Motivating case: AVANTEL 2026-07-07 hit
+        # +1.01% MFE and round-tripped to flat because the 1.2% lock never
+        # armed. The lock08 variant stays in the A/B for ongoing comparison.
+        if gain_pct >= 0.8 and price < sma5:   return -1
         # NOTE: the "cut bad entries fast" momentum exits are deliberately gone —
         # they fired on 1-min noise and were the single biggest loss driver
         # (sub-30-min exits: 15% win). Removing them alone was worth ~+7.6pts

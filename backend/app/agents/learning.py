@@ -358,7 +358,9 @@ class LearningSystem:
         try:
             weights = await self._weights_from_db()
             from app.utils.redis_client import cache_set
-            await cache_set(_WEIGHTS_KEY, json.dumps(weights), expire=3600)
+            # 24h TTL: with the old 1h expiry the weights vanished on any quiet
+            # day (sync used to be trade-close-triggered only).
+            await cache_set(_WEIGHTS_KEY, json.dumps(weights), expire=86400)
         except Exception as exc:
             logger.debug("Could not sync weights to Redis: %s", exc)
         await self._sync_action_rates_to_redis()
@@ -469,7 +471,7 @@ class LearningSystem:
 
             from app.utils.redis_client import cache_set
             payload = {"base": base, "rates": rates}
-            await cache_set(_ACTION_RATES_KEY, json.dumps(payload), expire=3600)
+            await cache_set(_ACTION_RATES_KEY, json.dumps(payload), expire=86400)
             logger.debug("Action rates synced: %d agents (base win %.3f)", len(rates), base_win)
         except Exception as exc:
             logger.debug("Could not sync action rates to Redis: %s", exc)

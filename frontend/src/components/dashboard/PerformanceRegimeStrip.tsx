@@ -9,6 +9,34 @@ const REGIME_STYLE: Record<string, { color: string; label: string; icon: string 
   neutral: { color: '#f59e0b', label: 'Neutral',            icon: 'trending_flat' },
 };
 
+// ── AI forecast bits ──────────────────────────────────────────────────────────
+
+// Accuracy sparkline — single series (rolling-20 out-of-sample accuracy) with a
+// dashed 50% reference line. Neutral accent (not a bullish/bearish status color)
+// so the line reads as "model quality", not market direction.
+const ACC_COLOR = '#3b82f6';
+
+const AccuracySparkline: React.FC<{ series: { d: string; a: number }[]; w?: number; h?: number }> = ({ series, w = 110, h = 30 }) => {
+  if (!series || series.length < 2) return null;
+  const PAD = 2;
+  const vals = series.map(p => p.a);
+  const lo = Math.min(0.45, ...vals) - 0.03;
+  const hi = Math.max(0.55, ...vals) + 0.03;
+  const range = hi - lo || 1;
+  const xs = vals.map((_, i) => PAD + (i / (vals.length - 1)) * (w - PAD * 2));
+  const ys = vals.map(v => h - PAD - ((v - lo) / range) * (h - PAD * 2));
+  const line = xs.map((x, i) => `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${ys[i].toFixed(1)}`).join(' ');
+  const halfY = h - PAD - ((0.5 - lo) / range) * (h - PAD * 2);
+  return (
+    <svg width={w} height={h} style={{ display: 'block' }}>
+      <line x1={PAD} y1={halfY.toFixed(1)} x2={w - PAD} y2={halfY.toFixed(1)}
+        stroke="var(--nd-border)" strokeWidth="1" strokeDasharray="3 3" />
+      <path d={line} fill="none" stroke={ACC_COLOR} strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" />
+      <circle cx={xs[xs.length - 1].toFixed(1)} cy={ys[ys.length - 1].toFixed(1)} r="2.5" fill={ACC_COLOR} />
+    </svg>
+  );
+};
+
 // ── Regime detail modal ───────────────────────────────────────────────────────
 
 const REGIME_IMPLICATIONS: Record<string, { headline: string; why: string; trading: string[]; watch: string[] }> = {
@@ -143,6 +171,64 @@ const RegimeModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
                 </div>
               )}
 
+              {/* AI next-session forecast + its out-of-sample track record */}
+              {detail?.ai?.prediction && (() => {
+                const ai = detail.ai;
+                const pred: string = ai.prediction.regime ?? 'neutral';
+                const pRg = REGIME_STYLE[pred] ?? REGIME_STYLE.neutral;
+                const probs: Record<string, number> = ai.prediction.probs ?? {};
+                const acc = ai.accuracy ?? {};
+                const beats = acc.overall != null && acc.persistence != null && acc.overall >= acc.persistence;
+                return (
+                  <div style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 10, padding: '12px 14px', marginBottom: 16 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
+                      <span className="material-icons" style={{ fontSize: 14, color: ACC_COLOR }}>psychology</span>
+                      <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--nd-text-3)', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                        AI Forecast · Next Session
+                      </span>
+                      <span style={{ marginLeft: 'auto', fontSize: 14, fontWeight: 700, color: pRg.color }}>
+                        {pred.charAt(0).toUpperCase() + pred.slice(1)} {probs[pred] != null ? `${Math.round(probs[pred] * 100)}%` : ''}
+                      </span>
+                    </div>
+                    {/* class probability bars — label + bar + value, color follows the class */}
+                    {['bullish', 'neutral', 'bearish'].map(cls => {
+                      const p = probs[cls] ?? 0;
+                      const c = (REGIME_STYLE[cls] ?? REGIME_STYLE.neutral).color;
+                      return (
+                        <div key={cls} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5 }}>
+                          <span style={{ fontSize: 10.5, color: 'var(--nd-text-2)', width: 48, textTransform: 'capitalize' }}>{cls}</span>
+                          <div style={{ flex: 1, height: 6, background: 'var(--nd-border)', borderRadius: 3, overflow: 'hidden' }}>
+                            <div style={{ width: `${Math.round(p * 100)}%`, height: '100%', background: c, borderRadius: 3 }} />
+                          </div>
+                          <span style={{ fontSize: 10.5, fontWeight: 600, color: 'var(--nd-text-2)', width: 30, textAlign: 'right' }}>{Math.round(p * 100)}%</span>
+                        </div>
+                      );
+                    })}
+                    {/* accuracy record — the honest bit */}
+                    {acc.n > 0 && (
+                      <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--nd-border)' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                          <div>
+                            <div style={{ fontSize: 10, color: 'var(--nd-text-3)' }}>Prediction accuracy (rolling 20 sessions)</div>
+                            <AccuracySparkline series={acc.series ?? []} w={200} h={44} />
+                          </div>
+                          <div style={{ fontSize: 11, color: 'var(--nd-text-2)', lineHeight: 1.7 }}>
+                            <div>Out-of-sample: <b style={{ color: 'var(--nd-text-1)' }}>{Math.round((acc.overall ?? 0) * 100)}%</b> over {acc.n} sessions</div>
+                            <div>Last 20: <b style={{ color: 'var(--nd-text-1)' }}>{Math.round((acc.recent20 ?? 0) * 100)}%</b></div>
+                            <div>Naive "same as today": {Math.round((acc.persistence ?? 0) * 100)}%</div>
+                          </div>
+                        </div>
+                        {!beats && (
+                          <div style={{ marginTop: 8, fontSize: 10.5, color: '#f59e0b' }}>
+                            ⚠ Model is not currently beating the persistence baseline — treat the forecast as low-signal.
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
               {/* Why section */}
               <div style={{ background: 'var(--nd-surface)', border: `1px solid ${rg.color}30`, borderRadius: 10, padding: '12px 14px', marginBottom: 16 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
@@ -223,10 +309,12 @@ const PerformanceRegimeStrip: React.FC = () => {
   const [regime, setRegime]       = useState<string>('neutral');
   const [equity, setEquity]       = useState<number[]>([]);
   const [showRegime, setShowRegime] = useState(false);
+  const [ai, setAi]               = useState<any>(null);
 
   useEffect(() => {
     apiService.getPortfolioMetrics().then((r: any) => { if (r && !r.error) setPm(r); }).catch(() => {});
     apiService.aiWatchlist().then((r: any) => { const d = r?.data; if (d?.marketRegime) setRegime(d.marketRegime); }).catch(() => {});
+    apiService.getRegimeDetail().then((r: any) => { const a = r?.data?.ai; if (a?.prediction) setAi(a); }).catch(() => {});
     // Fetch cumulative equity curve for the sparkline (all sources, coarse sample)
     apiService.getLearningCurve('PAPER,LIVE,REPLAY,BACKTEST', 50).then((r: any) => {
       const pts: any[] = r?.data?.points ?? [];
@@ -266,6 +354,44 @@ const PerformanceRegimeStrip: React.FC = () => {
         </div>
         <span className="material-icons" style={{ fontSize: 13, color: 'var(--nd-text-3)', marginLeft: 2 }}>open_in_new</span>
       </div>
+
+      {/* AI next-session forecast — click opens the same modal for the full record */}
+      {ai?.prediction && (() => {
+        const pred: string = ai.prediction.regime ?? 'neutral';
+        const pRg = REGIME_STYLE[pred] ?? REGIME_STYLE.neutral;
+        const prob = ai.prediction.probs?.[pred];
+        return (
+          <div
+            onClick={() => setShowRegime(true)}
+            title="AI forecast for the next session — click for accuracy record"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 10,
+              paddingRight: 16, borderRight: (pm && pm.totalTrades > 0) ? '1px solid var(--nd-border)' : 'none',
+              cursor: 'pointer', borderRadius: 8, padding: '4px 8px',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = `${ACC_COLOR}12`)}
+            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+          >
+            <div>
+              <div style={{ fontSize: 10, color: 'var(--nd-text-3)', textTransform: 'uppercase', letterSpacing: 0.6, display: 'flex', alignItems: 'center', gap: 4 }}>
+                <span className="material-icons" style={{ fontSize: 12, color: ACC_COLOR }}>psychology</span>
+                AI Forecast · Next
+              </div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: pRg.color }}>
+                {pred.charAt(0).toUpperCase() + pred.slice(1)}{prob != null ? ` · ${Math.round(prob * 100)}%` : ''}
+              </div>
+            </div>
+            {(ai.accuracy?.series?.length ?? 0) >= 2 && (
+              <div>
+                <div style={{ fontSize: 9.5, color: 'var(--nd-text-3)', textAlign: 'right' }}>
+                  acc {ai.accuracy?.recent20 != null ? `${Math.round(ai.accuracy.recent20 * 100)}%` : '—'}
+                </div>
+                <AccuracySparkline series={ai.accuracy.series} />
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {pm && pm.totalTrades > 0 ? (
         <>

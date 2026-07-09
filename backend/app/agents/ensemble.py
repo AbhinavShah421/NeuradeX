@@ -2,6 +2,7 @@
 from __future__ import annotations
 import asyncio
 import json
+import os
 import time
 import uuid
 from datetime import datetime
@@ -109,6 +110,24 @@ _REPLAY_WEIGHT_BOOST: dict[str, float] = {
     "day_structure": 1.3,  # pure OHLCV — fully valid in replay
 }
 
+# ── Directional-contest vote (entry-side) ────────────────────────────────────
+# Legacy max-vote lets abstain-HOLD agents decide: anomaly/memory/pattern/
+# volatility/momentum vote HOLD >94% of the time, so HOLD averages ~66% of the
+# vote mass and BUY never wins (0 of 2,554 decisions on 2026-07-06). For ENTRY
+# decisions (no open position) the contest is BUY vs SELL only — HOLD votes are
+# abstentions. The winner must beat the loser by a dominance margin AND have at
+# least 2 distinct voters (a lone flooding agent, e.g. gbm voting SELL 96% of
+# bars, cannot decide alone). Otherwise the ensemble abstains (HOLD).
+# Calibrated offline on CF-labeled bars of 2026-07-02/03/06: dominance 1.3 with
+# 2+ voters + the downstream gentle gate (reliable co-sign, uptrend, RSI,
+# day-structure veto) scored 77% CF win rate / +0.51% avg vs 29-34% base rate.
+# NOTE: small sample (13 entries) — monitor live and re-evaluate.
+# Exit-side (open position) keeps legacy max-vote: the exit policy was
+# separately A/B-validated live and is out of scope here.
+_VOTE_MODE       = os.getenv("ENSEMBLE_VOTE_MODE", "directional")   # "legacy" restores max-vote
+_DIR_DOMINANCE   = float(os.getenv("ENSEMBLE_DIR_DOMINANCE", "1.3"))
+_DIR_MIN_VOTERS  = int(os.getenv("ENSEMBLE_DIR_MIN_VOTERS", "2"))
+
 # Evidence gate: a non-HOLD decision is only allowed to fire if the Pattern
 # Memory bank has enough similar past cases AND they won often enough.
 _MEM_MIN_SAMPLES    = 8      # need at least this many per-action cases to gate
@@ -157,6 +176,16 @@ class EnsembleEngine:
         learned      = await _get_learned_weights()   # overall weights, updated after every trade
         action_rates = await _get_action_rates()       # per-action accuracy rates
         mode = context.get("mode", "paper")
+
+        # Shared intraday level map — computed ONCE from the full day's graph
+        # and given to every agent, so the experts deliberate over the same
+        # support/resistance structure instead of private last-few-bar views.
+        try:
+            from .levels import compute_levels
+            context["levels"] = compute_levels(candles)
+        except Exception:
+            logger.debug("level map computation failed", exc_info=True)
+            context["levels"] = {"ok": False, "supports": [], "resistances": []}
         active = [a for a in self.agents if is_enabled(reg, a.name)]
         if mode in ("replay", "backtest"):
             active = [a for a in active if a.name not in _REPLAY_SKIP_AGENTS]
@@ -212,11 +241,14 @@ class EnsembleEngine:
         vote: dict[str, float] = {"BUY": 0.0, "SELL": 0.0, "HOLD": 0.0}
         for s in signals:
             base_w = s.weight or 1.0
-            if s.action in ("BUY", "SELL"):
-                rate        = rate_table.get(s.agent_name, {}).get(s.action)
-                effective_w = base_w * _action_factor(rate, rate_base.get(s.action))
-            else:
-                effective_w = base_w   # HOLD: use base weight unchanged
+            # Every vote is scaled by the agent's accuracy FOR THAT ACTION —
+            # three independent weights per agent (BUY/SELL/HOLD), so a good
+            # bear with a bad bull record (e.g. sentiment: SELL 1.11x lift,
+            # BUY 0.83x) amplifies where it has skill and damps where it
+            # doesn't. HOLD included since 2026-07-08: a skill-less HOLD
+            # flood was previously passed through at full base weight.
+            rate        = rate_table.get(s.agent_name, {}).get(s.action)
+            effective_w = base_w * _action_factor(rate, rate_base.get(s.action))
             s.weight = round(effective_w, 3)   # persist effective weight for logging/UI
             vote[s.action] += s.confidence * effective_w
 
@@ -233,6 +265,34 @@ class EnsembleEngine:
         # analysis showed lopsided high-confidence entries (one dominant voice) are
         # the ones that reverse and lose; blending in agreement fixes that.
         confidence = 0.30 + 0.65 * (0.6 * vote_pct[action] + 0.4 * agreement)
+
+        # ── Directional contest (entry-side only — see constants above) ────────
+        vote_mode = "legacy"
+        if _VOTE_MODE == "directional" and context.get("position", "NONE") in (None, "", "NONE"):
+            vote_mode = "directional"
+            buy_n  = sum(1 for s in signals if s.action == "BUY")
+            sell_n = sum(1 for s in signals if s.action == "SELL")
+            bm, sm = vote["BUY"], vote["SELL"]
+            if bm > 0 and bm >= _DIR_DOMINANCE * sm and buy_n >= _DIR_MIN_VOTERS:
+                action = "BUY"
+            elif sm > 0 and sm >= _DIR_DOMINANCE * bm and sell_n >= _DIR_MIN_VOTERS:
+                action = "SELL"
+            else:
+                action = "HOLD"
+            if action in ("BUY", "SELL"):
+                # Confidence on the directional scale: share of the directional
+                # mass + share of the directional voters. HOLD abstentions carry
+                # no signal about the direction, so they stay out of both terms.
+                win_mass  = bm if action == "BUY" else sm
+                win_n     = buy_n if action == "BUY" else sell_n
+                dir_mass  = (bm + sm) or 1.0
+                dir_n     = (buy_n + sell_n) or 1
+                agreement = win_n / dir_n
+                confidence = 0.30 + 0.65 * (0.6 * win_mass / dir_mass + 0.4 * agreement)
+            else:
+                agreers    = sum(1 for s in signals if s.action == "HOLD")
+                agreement  = agreers / len(signals) if signals else 0.0
+                confidence = 0.30 + 0.65 * (0.6 * vote_pct["HOLD"] + 0.4 * agreement)
 
         # Risk score from volatility agent
         risk_score = 0.50
@@ -329,4 +389,5 @@ class EnsembleEngine:
             reasoning       = reasoning,
             prediction_id   = pred_id,
             timestamp       = datetime.now(),
+            vote_mode       = vote_mode,
         )

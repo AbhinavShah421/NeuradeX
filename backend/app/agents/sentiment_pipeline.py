@@ -365,7 +365,11 @@ async def analyze_with_llm(symbol: str, headlines: list[str]) -> Optional[dict]:
     prompt  = _USER_TMPL.format(symbol=symbol, headlines=hl_text)
     raw = await llm_chat(
         prompt, system=_SYSTEM,
-        temperature=0.0, max_tokens=300, timeout=18.0,
+        # 120s: the 18s budget was tuned for llama3.2-3B; host-side llama3.1:8b
+        # needs ~30s+ per scoring call. This runs in the background refresh and
+        # is cached 15 min per symbol, so latency is invisible to decisions —
+        # a short timeout here just silently degrades sentiment to neutral.
+        temperature=0.0, max_tokens=300, timeout=120.0,
     )
     if not raw:
         logger.debug("LLM returned nothing for %s", symbol)

@@ -199,7 +199,8 @@ class PatternMemory:
             from app.database.postgres import engine
             async with engine.begin() as conn:
                 rows = (await conn.execute(text("""
-                    SELECT symbol, fingerprint, action, pnl_pct, regime, source
+                    SELECT symbol, fingerprint, action, pnl_pct, regime, source,
+                           (created_at < DATE '2026-07-03') AS old_era
                     FROM pattern_memory ORDER BY id DESC LIMIT 50000
                 """))).fetchall()
             vecs, meta = [], []
@@ -213,7 +214,7 @@ class PatternMemory:
                     continue
                 vecs.append(fp)
                 meta.append({"symbol": r[0], "action": r[2], "pnl_pct": float(r[3] or 0.0),
-                             "regime": r[4], "source": r[5]})
+                             "regime": r[4], "source": r[5], "old_era": bool(r[6])})
             if vecs:
                 m = np.asarray(vecs, dtype=np.float32)
                 norms = np.linalg.norm(m, axis=1, keepdims=True)
@@ -303,27 +304,45 @@ class PatternMemory:
             return empty
 
         # ── Per-action statistics ─────────────────────────────────────────────
-        buckets: dict[str, list[tuple[float, float]]] = {"BUY": [], "SELL": [], "HOLD": []}
+        # Evidence-quality weighting (2026-07-09). Two systematic biases were
+        # poisoning the win-rate stats:
+        #  • Era: outcomes recorded before the 2026-07-03 exit overhaul came
+        #    from the broken tight-stop exits — the exit A/B measured 20.5%
+        #    (old policy) vs 46.5% (current) win on IDENTICAL entries.
+        #  • Source: CF phantoms and PAPER cases are real outcomes under the
+        #    live policy; REPLAY cases include piles of test-run artifacts
+        #    from intentionally-broken code generations (verified: 50
+        #    symbol-local REPLAY neighbors graded a real +0.8% winner "18%").
+        # Similarity is still real for all cases, so low-quality evidence is
+        # DISCOUNTED, not dropped; weights compound (old-era REPLAY = 0.12x).
+        _OLD_ERA_W = 0.3
+        _SOURCE_W  = {"CF": 1.0, "PAPER": 1.0, "LIVE": 1.0, "REPLAY": 0.4, "BACKTEST": 0.5}
+        buckets: dict[str, list[tuple[float, float, float]]] = {"BUY": [], "SELL": [], "HOLD": []}
         for i, sim in chosen:
             m   = self._meta[i]
             act = m["action"] if m["action"] in buckets else "HOLD"
-            buckets[act].append((sim, m["pnl_pct"]))
+            w   = _SOURCE_W.get(m.get("source"), 0.4)
+            if m.get("old_era"):
+                w *= _OLD_ERA_W
+            buckets[act].append((sim, m["pnl_pct"], w))
 
         per_action: dict[str, dict] = {}
         for act, items in buckets.items():
             if not items:
                 continue
-            n       = len(items)
-            wins    = sum(1 for _, p in items if p > 0)
-            win_rate = wins / n
-            avg_pnl  = sum(p for _, p in items) / n
-            avg_sim  = sum(s for s, _ in items) / n
+            n        = len(items)
+            n_eff    = sum(w for _, _, w in items)
+            wins     = sum(w for _, p, w in items if p > 0)
+            win_rate = wins / n_eff if n_eff > 0 else 0.0
+            avg_pnl  = sum(p * w for _, p, w in items) / n_eff if n_eff > 0 else 0.0
+            avg_sim  = sum(s for s, _, _ in items) / n
 
-            # Evidence: similarity² × sample mass — strongly penalises low-sim cases
-            mass     = min(1.0, n / DEFAULT_K)
+            # Evidence: similarity² × sample mass — strongly penalises low-sim
+            # cases; mass uses the era-weighted effective sample count.
+            mass     = min(1.0, n_eff / DEFAULT_K)
             evidence = (avg_sim ** 2) * mass
             per_action[act] = {
-                "n": n, "win_rate": round(win_rate, 3),
+                "n": n, "n_eff": round(n_eff, 1), "win_rate": round(win_rate, 3),
                 "avg_pnl": round(avg_pnl, 3), "avg_sim": round(avg_sim, 3),
                 "evidence": round(evidence, 3),
             }
@@ -404,9 +423,20 @@ class MemoryAgent(BaseAgent):
         mode   = context.get("mode", "paper")
         # In replay mode, exclude REPLAY-sourced cases — those are contaminated by the
         # same session that's running and would introduce look-ahead bias.
-        exclude = {"REPLAY"} if mode == "replay" else None
+        exclude = {"REPLAY"} if mode == "replay" else set()
+        # Timeframe guard (2026-07-09, same disease as the daily GBM): 78% of
+        # the bank is nightly daily-candle strategy backtests (37% win rate on
+        # a different game entirely). On intraday windows they dominated every
+        # neighborhood and graded real winners ~18%. Intraday queries use only
+        # intraday-era sources (CF phantoms, PAPER, new REPLAY); when those are
+        # still thin, the memory gate goes cold-start and abstains honestly.
+        from .gbm_agent import _bar_minutes
+        bar_min = _bar_minutes(candles)
+        if bar_min is not None and bar_min <= 5:
+            exclude = exclude | {"BACKTEST"}
 
-        res = await self._mem.query(fp, symbol=symbol, regime=regime, exclude_sources=exclude)
+        res = await self._mem.query(fp, symbol=symbol, regime=regime,
+                                    exclude_sources=(exclude or None))
         pa  = res["per_action"]
 
         # Expose every action's track record so the ensemble gate can also use it
@@ -421,7 +451,11 @@ class MemoryAgent(BaseAgent):
         for act in ("BUY", "SELL", "HOLD"):
             if act in pa:
                 indicators[f"wr_{act}"]  = pa[act]["win_rate"]
-                indicators[f"n_{act}"]   = pa[act]["n"]
+                # n_{act} feeds the ensemble's evidence gate (>= 8 cases arms
+                # the veto). EFFECTIVE count: 50 old-era replay cases at 0.12x
+                # quality weight are ~6 effective cases — junk-quality evidence
+                # must not arm a veto that real evidence would have to earn.
+                indicators[f"n_{act}"]   = pa[act].get("n_eff", pa[act]["n"])
                 indicators[f"pnl_{act}"] = pa[act]["avg_pnl"]
 
         # No similar cases found (progressive floor exhausted)

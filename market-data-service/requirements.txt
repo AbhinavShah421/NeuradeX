@@ -18,8 +18,9 @@ redis==5.0.1
 # HTTP client (Groww API)
 httpx==0.27.0
 
-# Yahoo Finance (fallback)
-yfinance==0.2.37
+# Yahoo Finance (fallback) — 1.x required: 0.2.x gets blocked by Yahoo (non-JSON
+# "Expecting value" responses); 1.x impersonates a browser via curl_cffi
+yfinance==1.5.1
 
 # News
 requests==2.32.3

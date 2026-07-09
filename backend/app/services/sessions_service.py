@@ -65,7 +65,12 @@ TRADE_GATE_KEY = "ai_engine:trade_gate"
 # sentiment BUY 44.1% / +0.27% — the only two positive-EV BUY voters. memory
 # (21.8%) and gbm (~base-rate) were previously in this set on older, smaller
 # analysis and are removed: their BUYs showed no edge at scale.
-_RELIABLE_BUY_AGENTS = frozenset({"sentiment", "pattern"})
+# rl + meanrev added 2026-07-07: forward-return audit of that day's 2,531 live
+# bars showed rl BUY 65% hit / +0.39% avg-30m (n=100) and meanrev 60% / +0.17%
+# (n=310), while pattern was near-mute on 1-min bars (since fixed) — the old
+# two-agent set left the co-sign gate resting on sentiment alone. Single-day
+# evidence at 1-min scale: re-audit after a week of live entries.
+_RELIABLE_BUY_AGENTS = frozenset({"sentiment", "pattern", "rl", "meanrev"})
 
 # Trade-gate tuning is data-driven (see analysis):
 #   • BUY-vote count predicts win-rate: 1→21%, 2→41%, 3→50% (real ensemble tops
@@ -157,7 +162,9 @@ _PAPER_CONFIG_KEY     = "paper_trading:config"
 # Entry cutoff 13:30 (was 14:00): entries in the 14:00 hour win 23.6% and the
 # 15:00 hour 21.5%, vs ~30-31% before noon (12.6k-trade forensics). The last
 # pre-cutoff hour (13:00) still wins 30.4% — the cliff is at 14:00.
-_PAPER_CONFIG_DEFAULT = {"no_entry_after": "13:30", "squareoff_after": "14:30"}
+# no_entry_after 13:30 → 13:00 (2026-07-08): 13:00-13:30 entries went 0/8 on
+# CF labels (-0.45% avg); the broad population confirms post-13:00 decay (36%).
+_PAPER_CONFIG_DEFAULT = {"no_entry_after": "13:00", "squareoff_after": "14:30"}
 _paper_cfg_cache: dict = {}
 _paper_cfg_ts: float = 0.0
 
@@ -333,7 +340,7 @@ async def _ensemble_decision(symbol: str, candles: list[dict], capital: float, p
     agents = [
         {"agent_name": a.agent_name, "action": a.action,
          "confidence": a.confidence, "weight": round(a.weight, 3),
-         "reasoning": a.reasoning}
+         "reasoning": a.reasoning, "indicators": a.indicators}
         for a in decision.agents
     ]
     return decision, agents
@@ -463,7 +470,7 @@ _PAPER_DROP_CANDLES = 6     # N consecutive lower closes = drop pattern (3 was t
 _LOSS_COOLDOWN_MIN  = 10    # after a losing exit, block new entries for this many minutes
                             # (stops the system re-scalping the same chop range — the
                             #  TITAN-style 6-losing-round-trips-in-an-afternoon pattern)
-_LATE_ENTRY_CUTOFF_MIN = 13 * 60 + 30   # 13:30 IST — no new entries after this in
+_LATE_ENTRY_CUTOFF_MIN = 13 * 60   # 13:00 IST — no new entries after this in
                                         # replay/backtest (paper uses its own
                                         # configurable cutoff). 14:00-hour entries win
                                         # 23.6% and 15:00-hour 21.5% vs ~30-31% before
@@ -570,6 +577,26 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
             support_ok = False
             blocked.append("no proven BUY voter (pattern/sentiment) co-signed — "
                            "generic consensus alone historically loses")
+        # ── Panel dissent rules (CF-validated 2026-07-07, n=17 entry bars) ────
+        # The gate counted BUY voters but was blind to SELL dissent: CMPDI
+        # 09:39 entered 2-BUY-vs-2-SELL with meanrev screaming SELL at 0.84
+        # and lost -1.66%. On CF-labeled entries, NET consensus (buys - sells)
+        # >= 2 won 89% (+0.82%) vs 25% (-0.28%) below it; and a reliable agent
+        # dissenting at >=0.75 never occurs on winning entries. Small sample —
+        # re-audit after a week of live entries.
+        sell_voters_n = sum(1 for a in agents if a.get("action") == "SELL")
+        net_consensus = buy_votes - sell_voters_n
+        if support_ok and net_consensus < 2:
+            support_ok = False
+            blocked.append(f"panel dissent: net consensus {buy_votes} BUY - {sell_voters_n} SELL "
+                           f"= {net_consensus} (need >= 2) — divided experts historically lose")
+        rel_dissent = max((float(a.get("confidence") or 0) for a in agents
+                           if a.get("action") == "SELL"
+                           and a.get("agent_name") in _RELIABLE_BUY_AGENTS), default=0.0)
+        if support_ok and rel_dissent >= 0.75:
+            support_ok = False
+            blocked.append(f"trusted-expert dissent: a proven agent votes SELL at "
+                           f"{rel_dissent:.0%} — not entering against it")
         if tsig == -1:
             blocked.append("intraday signal bearish (downtrend) — skipping entry")
         # ── Cold-streak symbol throttle ───────────────────────────────────────
@@ -597,19 +624,34 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         # require positive momentum: a pullback within the uptrend is a better long
         # than chasing strength, so a mildly-negative mom is fine.)
         rsi_now = ind.get("rsi", 50.0)
-        good_timing = rsi_now <= 70
-        if not good_timing:
+        # RSI entry band [45, 70]. Ceiling: overbought chases reverse. Floor
+        # (added 2026-07-08): "pullback" entries with RSI<45 inside an uptrend
+        # are failing bounces — 0/8 winners, -0.65% avg on the CF-labeled
+        # strict entry population (n=112). Momentum data agrees: entries with
+        # mom>+0.3% won 84%, dip entries (mom<0) 51%.
+        good_timing = 45 <= rsi_now <= 70
+        if rsi_now > 70:
             blocked.append(f"overbought (RSI {rsi_now:.0f}>70) — wait for a pullback")
+        elif rsi_now < 45:
+            blocked.append(f"failing bounce (RSI {rsi_now:.0f}<45) — dip entries in "
+                           f"uptrends lost 8/8 on CF labels; wait for strength")
         # The confidence band only describes a BUY decision. When the ensemble's
         # winning action is HOLD (gentle/loose entering on BUY support), its
         # confidence is the HOLD confidence — irrelevant to the BUY, so skip it.
         max_conf = gate.get("max_conf", 1.01)
         conf_ok = True
         if ens_action == "BUY":
+            # The over-confidence ceiling was calibrated on the LEGACY confidence
+            # scale, where a high value meant one lopsided voice. On the
+            # directional scale high confidence means unanimity — no dissenting
+            # SELL voter anywhere — and CF-labeled data shows those are the best
+            # entries (conf>0.90: 8/8 wins +0.94% avg vs 40% in the 0.50-0.80
+            # band). Floor still applies in both modes; ceiling is legacy-only.
+            directional = getattr(decision, "vote_mode", "legacy") == "directional"
             if conf < gate["min_conf"]:
                 blocked.append(f"BUY confidence {conf:.0%} below the {gate['min_conf']:.0%} floor")
                 conf_ok = False
-            elif conf > max_conf:
+            elif conf > max_conf and not directional:
                 blocked.append(f"BUY confidence {conf:.0%} above the {max_conf:.0%} ceiling (over-confident setups historically reverse)")
                 conf_ok = False
         # ── Confident-override veto (Mistake #1: confidence is anti-predictive) ──
@@ -657,6 +699,29 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
                     f"day-structure veto: {(rng_pct or 0)*100:.0f}% of day range, "
                     f"R/R {(rr or 0):.1f}× — unfavorable risk/reward for a long entry"
                 )
+        # ── Tested-ceiling veto ───────────────────────────────────────────────
+        # Never open a long INTO a multi-tested resistance from the shared
+        # full-day level map: buying <0.15% under a 2+-touch ceiling is the
+        # 2026-07-07 AEGISVOPAK 10:11 pattern (entered 0.04% under the level,
+        # stopped out in 7 min). A tested level must first break to be a trade.
+        if enter:
+            lv_res = ind_ds.get("levels_res") or []
+            lv_sup = ind_ds.get("levels_sup") or []
+            ceiling = next((l for l in lv_res
+                            if l.get("touches", 1) >= 2 and l.get("dist_pct", 99) <= 0.15), None)
+            # Coil exception: price simultaneously ON a tested support (2+
+            # touches within 0.10%) is a compression setup, not a ceiling
+            # chase — AVANTEL 11:17 (5x support under a 4x ceiling) broke UP
+            # +0.8%. Veto only the naked approach into the ceiling.
+            coil = any(l.get("touches", 1) >= 2 and l.get("dist_pct", 99) <= 0.10
+                       for l in lv_sup)
+            if ceiling and not coil:
+                enter = False
+                blocked.append(
+                    f"tested-ceiling veto: {ceiling['touches']}x-tested resistance "
+                    f"₹{ceiling['price']:.2f} only {ceiling['dist_pct']:.2f}% overhead — "
+                    f"wait for the break or a pullback"
+                )
         # Pattern-quality gate (shared pattern AI engine): only trade good patterns.
         # Backtest/replay require an A-grade pattern; paper/live require ≥ B.
         if enter:
@@ -690,10 +755,21 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         # Flat/losing positions still exit on an ensemble SELL (cut losers fast).
         gain_pct = ((candle["close"] - entry_price) / entry_price * 100) if entry_price else 0.0
         ens_sell_strong = (ens_action == "SELL" and conf >= 0.78)
+        # Grace debounce for ensemble-SELL exits (2026-07-07 AEGISVOPAK replay:
+        # day_structure flipped BUY 0.75 → SELL 0.88 on the bar its support
+        # broke, dumping the position 8 min in, within pennies of the dip low —
+        # the stock recovered all afternoon). Inside the entry's grace window a
+        # ONE-BAR ensemble flip is capitulation noise: require two consecutive
+        # SELL bars before an ensemble exit. Stops/trend-break (tsig) are
+        # untouched and still protect immediately.
+        streak = (s["position"].get("ens_sell_streak", 0) + 1) if ens_action == "SELL" else 0
+        s["position"]["ens_sell_streak"] = streak
+        in_grace = held_minutes is not None and held_minutes < 10
+        ens_sell_exit = ens_action == "SELL" and not (in_grace and streak < 2)
         if gain_pct >= 0.4 and not ens_sell_strong:
             action = "SELL" if tsig == -1 else "HOLD"      # winner — let it run
         else:
-            action = "SELL" if (tsig == -1 or ens_action == "SELL") else "HOLD"
+            action = "SELL" if (tsig == -1 or ens_sell_exit) else "HOLD"
         if action == "SELL":
             reason = f"Exit: intraday signal/ensemble {ens_action}. {reason}".strip()
         elif gain_pct >= 0.4:
@@ -780,6 +856,16 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
                 "entry_conf": conf,
             }
             trade_executed = {"action": "BUY", "price": fill, "quantity": qty, "pnl": None, "time": candle["time"]}
+            # LLM shadow review of this entry's dossier — logged + persisted,
+            # never acted on (paper/live only: replay must stay deterministic,
+            # and back-filling verdicts on historical bars would be meaningless).
+            if s.get("mode") == "paper":
+                try:
+                    from app.services.llm_entry_review import shadow_review_entry
+                    shadow_review_entry(symbol, candle, agents or [], ind,
+                                        gate.get("label", "?"), s)
+                except Exception:
+                    logger.debug("shadow review hook failed", exc_info=True)
             s["trades"].append({
                 "time": candle["time"], "timestamp": candle.get("timestamp", 0),
                 "action": "BUY", "price": fill, "quantity": qty,
@@ -878,7 +964,15 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
             (candle["close"] - s["position"]["entry_price"]) * s["position"]["quantity"], 2)
 
     s["current_time"]   = candle["time"]
-    s["metrics"]        = _compute_metrics(s["cash"], s["capital"], s["trades"])
+    # Equity = cash + open-position market value. _compute_metrics does
+    # cash - capital, which reads an open LONG as a ~95% "loss" (the buy
+    # debited cash but the holding was never counted). Invisible for weeks
+    # because sessions never held positions; surfaced by the 2026-07-07
+    # entry-policy fixes.
+    equity = s["cash"]
+    if s["position"]["status"] == "LONG":
+        equity += s["position"]["quantity"] * candle["close"]
+    s["metrics"]        = _compute_metrics(equity, s["capital"], s["trades"])
     s["agent_decision"] = {"action": action, "confidence": round(conf, 3), "reason": reason,
                            "trade_executed": trade_executed}
     s["agents"]         = agents

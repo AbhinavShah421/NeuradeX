@@ -36,27 +36,50 @@ class PatternAgent(BaseAgent):
         score    = 0.0
         patterns: list[str] = []
 
+        # ── Volatility-scaled trend thresholds ────────────────────────────────
+        # The old fixed thresholds (1.5% / 0.5%) implicitly assumed DAILY candles
+        # (daily ATR ≈ 1.8%). Paper sessions feed 1-minute bars whose ATR is
+        # ~0.05-0.15%, so a "1.5% move in 10 bars" basically never happens and
+        # the agent sat at HOLD 99.9% of the time (3 BUY votes in 2,531 bars on
+        # 2026-07-07) — while being a REQUIRED entry co-signer. Scaling by the
+        # data's own ATR keeps the daily thresholds ~unchanged (0.8 × 1.8% ≈
+        # 1.5%) and makes "uptrend" mean "strong relative to this timeframe's
+        # noise" on any granularity.
+        atr_win = candles[-11:] if len(candles) >= 11 else candles
+        trs = []
+        for i in range(1, len(atr_win)):
+            pc = atr_win[i - 1]["close"]
+            trs.append(max(atr_win[i]["high"] - atr_win[i]["low"],
+                           abs(atr_win[i]["high"] - pc),
+                           abs(atr_win[i]["low"] - pc)))
+        last_close = cur["close"] or 1.0
+        atr_pct = (sum(trs) / len(trs) / last_close) if trs else 0.015
+        thr10 = min(0.02,  max(0.0008, 0.8  * atr_pct))
+        thr5  = min(0.0067, max(0.0003, 0.28 * atr_pct))
+
         # ── Trend context (last 10 bars) ──────────────────────────────────────
         trend_10 = 0.0
         if len(candles) >= 10:
             w        = [x["close"] for x in candles[-10:]]
             trend_10 = (w[-1] - w[0]) / w[0] if w[0] > 0 else 0.0
-            if trend_10 > 0.015:
+            if trend_10 > thr10:
                 score += 0.20; patterns.append("uptrend")
-            elif trend_10 < -0.015:
+            elif trend_10 < -thr10:
                 score -= 0.20; patterns.append("downtrend")
 
         # 5-bar trend for reversal pattern context
         trend_5 = _trend_5(candles)
-        in_downtrend = trend_5 < -0.005 or trend_10 < -0.005
-        in_uptrend   = trend_5 >  0.005 or trend_10 >  0.005
+        in_downtrend = trend_5 < -thr5 or trend_10 < -thr5
+        in_uptrend   = trend_5 >  thr5 or trend_10 >  thr5
 
         # ── Engulfing (continuation/reversal with directional body) ───────────
+        # `<=` not `<`: on continuous intraday data each bar opens at the prior
+        # close, so a strict `<` demanded a gap that 1-minute bars never have.
         if (prv["close"] < prv["open"] and cur["close"] > cur["open"]
-                and cur["open"] < prv["close"] and cur["close"] > prv["open"]):
+                and cur["open"] <= prv["close"] and cur["close"] > prv["open"]):
             score += 0.40; patterns.append("bullish_engulfing")
         elif (prv["close"] > prv["open"] and cur["close"] < cur["open"]
-              and cur["open"] > prv["close"] and cur["close"] < prv["open"]):
+              and cur["open"] >= prv["close"] and cur["close"] < prv["open"]):
             score -= 0.40; patterns.append("bearish_engulfing")
 
         # ── Hammer (bullish reversal) — only valid after a downtrend ─────────
@@ -117,9 +140,11 @@ class PatternAgent(BaseAgent):
 
         score = max(-1.0, min(1.0, score))
 
-        if score > 0.15:
+        # >= not >: higher_highs alone scores exactly 0.15 and was silently
+        # falling through to HOLD on the strict inequality.
+        if score >= 0.15:
             action = "BUY";  confidence = min(0.85, 0.50 + score * 0.45)
-        elif score < -0.15:
+        elif score <= -0.15:
             action = "SELL"; confidence = min(0.85, 0.50 + abs(score) * 0.45)
         else:
             action = "HOLD"; confidence = 0.50

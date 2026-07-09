@@ -4,7 +4,8 @@ pydantic==2.5.0
 pydantic-settings==2.1.0
 aio-pika==9.4.1
 redis==5.0.1
-yfinance==0.2.37
+# 1.x required: 0.2.x gets blocked by Yahoo (non-JSON "Expecting value" responses)
+yfinance==1.5.1
 requests==2.32.3
 python-dotenv==1.0.0
 python-json-logger==2.0.7

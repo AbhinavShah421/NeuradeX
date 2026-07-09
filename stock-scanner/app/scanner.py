@@ -239,16 +239,21 @@ def _is_committed(res: dict, p: dict) -> bool:
             and int(res.get("confirmed_factors", 0)) >= p["min_factors"]
             and float(res.get("win_probability") or 0.0) >= p["wp_floor"]):
         return False
-    # Independent signal 1 — long-term trend must agree (when computable).
-    if res.get("long_trend") is False:
+    # Independent signal 1 — long-term trend must POSITIVELY agree. Was
+    # `is False` (only vetoed on confirmed downtrend), which silently passed
+    # picks where the trend was uncomputable — an unconfirmed signal is not an
+    # independent confirmation. (Loophole closed 2026-07-08: committed tier ran
+    # 77.8% vs its 90% target on 45 graded picks.)
+    if res.get("long_trend") is not True:
         return False
     # Independent signal 2 — block on a negative news catalyst.
     if float(res.get("catalyst_boost") or 0.0) < -0.05:
         return False
     # Independent signal 3 — the learned pattern model must AGREE (not merely be
-    # non-bearish): committed picks need the pattern model leaning up.
+    # non-bearish). Was skipped entirely when the model had no prediction —
+    # same loophole: absence of evidence counted as agreement.
     pp = res.get("pattern_p_up")
-    if pp is not None and pp < PATTERN_MIN_P:
+    if pp is None or pp < PATTERN_MIN_P:
         return False
     return True
 
@@ -313,9 +318,16 @@ async def _watchlist_max() -> int:
 
 
 def _top_watchlist(cands: list[dict], grade_rank: dict, wl_max: int = WATCHLIST_MAX) -> list[dict]:
-    """Most-convicted intraday picks: grade-A/B BUYs, ranked, capped at `wl_max`
-    (falls back to the best available if too few high-grade BUYs exist)."""
+    """Most-convicted intraday picks, capped at `wl_max`.
+
+    Ranking (2026-07-08): committed-tier picks first, then by INDEPENDENT
+    confirmation count, then grade, then rank_score. Evidence from 565 graded
+    scans: rank_score barely discriminates (48-53% accuracy across its whole
+    40-100 range) while the committed recipe graded 77.8% — so conviction
+    ordering must come from the independent signals, not the technical score."""
     ranked = sorted(cands, key=lambda r: (r.get("action") != "BUY",
+                    not r.get("committed", False),
+                    -int(r.get("independent_signals") or 0),
                     grade_rank.get(r.get("grade", "D"), 3),
                     -r.get("rank_score", r.get("signal_score", 0.0))))
     hi = [c for c in ranked if c.get("action") == "BUY" and c.get("grade") in ("A", "B")]
@@ -623,9 +635,9 @@ def _analyze(candles: list[dict], regime: int = 0, calib: dict | None = None) ->
 
 # ── Data fetch ────────────────────────────────────────────────────────────────
 
-async def _fetch_chart(client: httpx.AsyncClient, ysym: str) -> list[dict]:
+async def _fetch_chart(client: httpx.AsyncClient, ysym: str, days: int = 140) -> list[dict]:
     p2 = int(time.time())
-    p1 = p2 - 140 * 86400
+    p1 = p2 - days * 86400
     # Retry with backoff on rate-limiting (429) — essential when sweeping the
     # full ~1800-symbol NSE universe so Yahoo doesn't shut us out mid-scan.
     for attempt in range(3):
@@ -762,7 +774,9 @@ async def _load_universe() -> dict[str, str]:
 async def _market_regime(client: httpx.AsyncClient) -> tuple[int, dict]:
     """+1 bullish / -1 bearish / 0 neutral, from NIFTY 50 trend (SMA20 vs SMA50 + momentum).
     Returns (score, detail_dict) — detail carries all raw indicators for the UI modal."""
-    candles = await _fetch_chart(client, "%5ENSEI")  # ^NSEI
+    # 500 calendar days ≈ 340 sessions — the AI forecaster trains on this
+    # history; the rule-based label below only needs the last 50.
+    candles = await _fetch_chart(client, "%5ENSEI", days=500)  # ^NSEI
     if len(candles) < 50:
         return 0, {}
     closes = [c["c"] for c in candles]
@@ -804,6 +818,13 @@ async def _market_regime(client: httpx.AsyncClient) -> tuple[int, dict]:
         "candles_used": len(closes),
         "updated_at":   _ist_now().isoformat(),
     }
+    # AI next-session forecast + its out-of-sample accuracy record. Guarded:
+    # a forecaster bug must never take down the regime classifier itself.
+    try:
+        from .regime_ai import regime_forecast
+        detail["ai"] = regime_forecast(candles)
+    except Exception as exc:
+        logger.debug("regime AI forecast failed: %s", exc)
     return score, detail
 
 
@@ -948,8 +969,6 @@ async def scan_once(phase: str = "intraday") -> dict:
     # Rank: BUY calls first, then by grade (A→D), then by composite rank score.
     _grade_rank = {"A": 0, "B": 1, "C": 2, "D": 3}
     candidates.sort(key=lambda r: (r["action"] != "BUY", _grade_rank.get(r.get("grade", "D"), 3), -r["rank_score"]))
-    watchlist = _top_watchlist(candidates, _grade_rank, wl_max)   # most-convicted few, graded post-close
-
     # High-conviction tier: tag every candidate the system would *commit* to, given
     # the current adaptive bar. These are the only picks measured against the 90%
     # target — everything else is "watch, don't trade".
@@ -970,6 +989,11 @@ async def scan_once(phase: str = "intraday") -> dict:
         c["committed"] = True
     committed_list = [c for c in candidates if c["committed"]]
     logger.info("committed tier: %d qualified, top %d committed", len(qualified), len(committed_list))
+
+    # Watchlist AFTER conviction tagging (was before — an ordering bug that left
+    # the "most-convicted" board blind to the committed flag and signal counts
+    # it now sorts by).
+    watchlist = _top_watchlist(candidates, _grade_rank, wl_max)   # most-convicted few, graded post-close
 
     # Full ranked board (top RANKED_MAX) for the Predictions page — each entry
     # numbered with its rank and carrying the full evidence used to score it.
@@ -1086,6 +1110,19 @@ async def evaluate_day(date_str: str | None = None) -> dict:
                 "realized_return_pct": round(realized, 2),
                 "correct": bool(correct),
                 "committed": bool(w.get("committed")),
+                # Full factor snapshot — evals previously stored only the blended
+                # score, which made refitting the (hand-set, never-validated)
+                # factor weights impossible. With per-factor states persisted,
+                # the weights can be fit to outcomes once enough days accumulate.
+                "factors": {
+                    "confirmations": w.get("confirmations"),
+                    "grade": w.get("grade"),
+                    "win_probability": w.get("win_probability"),
+                    "independent_signals": w.get("independent_signals"),
+                    "pattern_p_up": w.get("pattern_p_up"),
+                    "long_trend": w.get("long_trend"),
+                    "catalyst_boost": w.get("catalyst_boost"),
+                },
             })
 
     if not graded:

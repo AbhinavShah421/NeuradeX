@@ -114,6 +114,10 @@ LIVE_POLICY: dict = {
     **BASELINE_POLICY,
     "stop_atr_mult": 1.5, "stop_floor": 1.5,
     "fast_cut": False, "grace_min": 10, "hold_cap": 60,
+    # lock_gain 1.2 → 0.8 adopted live 2026-07-09 (the wide_hold60_lock08
+    # variant won the win-rate A/B on both days since introduction). CF labels
+    # must keep tracking the live exit rules (_tech_signal in backtest_service).
+    "lock_gain": 0.8,
 }
 
 EXIT_VARIANTS: dict[str, dict] = {
@@ -131,6 +135,12 @@ EXIT_VARIANTS: dict[str, dict] = {
                     "rsi_exit": False, "grace_min": 10, "hold_cap": 60},
     # Isolate the fast-cut/rsi effect: baseline stops, no cuts, same 30-min cap.
     "no_cut30":    {**BASELINE_POLICY, "fast_cut": False, "rsi_exit": False},
+    # Live policy with an earlier profit lock (0.8% vs 1.2%). Motivated by the
+    # 2026-07-07 AVANTEL replay: +1.01% MFE decayed to flat because the lock
+    # never armed at 1.2%. Candidate — adopt only if the A/B proves it.
+    "wide_hold60_lock08": {**BASELINE_POLICY, "stop_atr_mult": 1.5, "stop_floor": 1.5,
+                           "fast_cut": False, "grace_min": 10, "hold_cap": 60,
+                           "lock_gain": 0.8},
 }
 
 
@@ -686,16 +696,32 @@ def _last_completed_trading_day(now: datetime) -> str:
     return d.isoformat()
 
 
+async def _sync_learning_rates(trigger: str) -> None:
+    """Publish per-agent per-action weights (learning.py) to Redis. Previously
+    this only happened when a REAL trade closed — with zero live trades since
+    2026-06-30 the key sat empty (1h TTL) and the ensemble's per-action vote
+    weighting silently ran at 1.0x for every agent."""
+    try:
+        from app.agents import get_learning
+        await get_learning()._sync_weights_to_redis()   # also syncs action rates
+        logger.info("agent action-rate weights synced",
+                    extra={"log_type": "ai_engine", "event": "action_rates_synced",
+                           "trigger": trigger})
+    except Exception as exc:
+        logger.warning("action-rate sync failed (%s): %s", trigger, exc)
+
+
 async def counterfactual_loop() -> None:
     """Off-hours: label pending decisions against the tick store, then run the
     RL and memory consumers for the last completed trading day (each is
-    idempotent per day, so re-running is free). The action-rate merge needs no
-    step here — learning.py reads the labeled rows on its normal sync."""
+    idempotent per day, so re-running is free)."""
     global _last_sweep
     await asyncio.sleep(40)
     await init_schema()
     logger.info("counterfactual loop started",
                 extra={"log_type": "app_lifecycle", "event": "cf_loop_started"})
+    # Startup sync so a restart never leaves the ensemble without action rates.
+    await _sync_learning_rates("startup")
     while True:
         try:
             if not _market_hours() and (time.time() - _last_sweep) >= _SWEEP_EVERY:
@@ -706,6 +732,9 @@ async def counterfactual_loop() -> None:
                 await promote_memory_phantoms(day)
                 await run_exit_ab(day)
                 await run_exit_ab_store(day)   # whole-tick-store population too
+                # Fresh CF labels change the per-action correctness rates —
+                # republish so the next session runs on current weights.
+                await _sync_learning_rates("cf_sweep")
         except Exception as exc:
             logger.warning("counterfactual sweep failed: %s", exc)
         await asyncio.sleep(60)

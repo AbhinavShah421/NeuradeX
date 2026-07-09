@@ -69,9 +69,18 @@ class PatternEngine:
                 out["forecast"] = {"ok": False}
             return out
         from app.agents import get_pattern_model, get_memory
+        # Timeframe guard (2026-07-07): the linear pattern model and the slot-1
+        # GBM are trained on DAILY fingerprints. Scoring 1-min session windows
+        # with them graded real winners "D" (e.g. AVANTEL 11:17, model P(up)
+        # 0.243 on a +0.8%/30m bar) because intraday fingerprints look flat at
+        # daily scale. On intraday windows the daily models abstain: the score
+        # comes from the intraday GBM (once trained) + pattern memory.
+        from .gbm_agent import _bar_minutes
+        bar_min = _bar_minutes(candles)
+        intraday = bar_min is not None and bar_min <= 5
         model = get_pattern_model()
         await model.init_db()
-        pred = model.predict_fp(fp)
+        pred = None if intraday else model.predict_fp(fp)
         p_up = float(pred["p_up"]) if pred else 0.5
 
         mw = None
@@ -79,8 +88,13 @@ class PatternEngine:
         mem_floor: float | None = None
         symbol_local = False
         try:
+            # Intraday windows also exclude daily-BACKTEST memory cases (see
+            # MemoryAgent.analyze — they answer a different game's question).
+            mem_excl = set(exclude_memory_sources or set())
+            if intraday:
+                mem_excl |= {"BACKTEST"}
             mem = await get_memory().query(fp, symbol=symbol, regime=classify_regime(candles),
-                                           exclude_sources=exclude_memory_sources)
+                                           exclude_sources=(mem_excl or None))
             buy = (mem.get("per_action") or {}).get("BUY") or {}
             mw = buy.get("win_rate")
             ms = int(buy.get("n", 0))
@@ -99,19 +113,25 @@ class PatternEngine:
         #   - Low floor (0.45): relaxed bar, noisy neighbours → weight 0.4
         # Within each floor tier, further scale by sample mass (8→30+ samples)
         # and give a 20% bonus for symbol-local cases (more directly comparable).
-        parts: list[tuple[float, float]] = [(p_up, 1.0)]   # (value, weight)
+        # Daily windows: linear model is the base voice. Intraday: it abstained
+        # above, so it contributes nothing.
+        parts: list[tuple[float, float]] = [] if intraday else [(p_up, 1.0)]
         gbm_p = None
         try:
             from .registry import get_registry, is_enabled
             reg = await get_registry()
             if is_enabled(reg, "gbm"):
-                from app.agents import get_gbm_model
-                gm = get_gbm_model()
+                from app.agents.gbm_model import get_gbm_model, get_gbm_intraday_model
+                gm = get_gbm_intraday_model() if intraday else get_gbm_model()
                 await gm.init_db()
                 if gm.is_trained:
                     gp = gm.predict_fp(fp)
                     if gp:
-                        gbm_p = float(gp["p_up"])
+                        # Re-centre on the model's training base rate so the
+                        # grade bands (0.5-neutral) read lift, not raw P
+                        # (see gbm_agent for the full rationale).
+                        base = float(gm.meta.get("pos_rate") or 0.5)
+                        gbm_p = min(1.0, max(0.0, 0.5 + float(gp["p_up"]) - base))
                         parts.append((gbm_p, 1.5))   # GBM outperforms linear model
         except Exception as exc:
             logger.debug("gbm blend skipped: %s", exc)
@@ -124,8 +144,13 @@ class PatternEngine:
                 mem_w *= 1.2                         # symbol-local cases are more comparable
             parts.append((float(mw), mem_w))
 
-        wsum = sum(w for _, w in parts) or 1.0
-        score = sum(v * w for v, w in parts) / wsum
+        if parts:
+            wsum = sum(w for _, w in parts)
+            score = sum(v * w for v, w in parts) / wsum
+        else:
+            # No usable voice for this timeframe (e.g. intraday before the
+            # intraday GBM's first training, no memory) — neutral, not D.
+            score = 0.5
         out = {"grade": _grade(score), "p_up": round(p_up, 3),
                "gbm_p_up": (round(gbm_p, 3) if gbm_p is not None else None),
                "memory_winrate": (round(float(mw), 3) if mw is not None else None),
