@@ -9,7 +9,7 @@ import { getErrorMessage } from '../../utils/errors';
 const ACTION_BG: Record<string, string> = { BUY: '#22c55e', SELL: '#ef4444', HOLD: '#f59e0b' };
 const GRADE_COLOR: Record<string, string> = { A: '#22c55e', B: '#3b82f6', C: '#f59e0b', D: '#94a3b8' };
 // Hold-cap presets (minutes) for inline auto-trading of a watchlist stock
-const HOLD_CAPS = [15, 30, 60, 0] as const;   // 0 = no cap
+const HOLD_CAPS = [0, 15, 30, 60] as const;   // 0 = auto (system decides exits)
 
 const SignalScorePanel: React.FC<{ ev: ScanEvaluation | null }> = ({ ev }) => {
   const [open, setOpen] = useState(false);
@@ -208,8 +208,9 @@ const AiWatchlistTab: React.FC = () => {
   const [diff, setDiff]         = useState<ScanDiff | null>(null);
   const [sel, setSel]           = useState<WatchlistStock | null>(null);
   const [tab, setTab]           = useState<'intraday' | 'delivery' | 'fno'>('intraday');
-  const [holdCap, setHoldCap]   = useState<number>(60);     // per-trade hold cap (min) —
-  // 60 is the A/B-winning default: 30-min exits won 21.6% vs 33.5% at 60 with the wide-stop policy
+  const [holdCap, setHoldCap]   = useState<number>(0);      // per-trade hold cap (min) —
+  // 0 = Auto (default): the system decides — trend-intact winners ride past the
+  // policy review point, everything else exits there. A number = manual hard cap.
   const [tradingSym, setTradingSym] = useState<string | null>(null);
   const [autoMsg, setAutoMsg]   = useState<string | null>(null);
 
@@ -218,7 +219,7 @@ const AiWatchlistTab: React.FC = () => {
     try {
       await apiService.sessionStart({ mode: 'paper', symbol: sym, capital: 50000, max_hold_minutes: holdCap });
       setTradingSym(sym);
-      setAutoMsg(`Auto paper-trading ${sym} — exits any position after ${holdCap ? `${holdCap}m` : 'EOD'}.`);
+      setAutoMsg(`Auto paper-trading ${sym} — exits ${holdCap ? `hard-capped at ${holdCap}m (manual)` : 'decided by the system (auto)'}.`);
       setTimeout(() => setAutoMsg(null), 6000);
     } catch (e: unknown) {
       setAutoMsg(`Could not start auto-trade for ${sym}: ${getErrorMessage(e, 'error')}`);
@@ -342,7 +343,7 @@ const AiWatchlistTab: React.FC = () => {
                   <button key={h} onClick={() => setHoldCap(h)}
                     style={{ padding: '3px 9px', borderRadius: 6, border: 'none', cursor: 'pointer', fontSize: 11, fontWeight: 600,
                       background: holdCap === h ? 'var(--nd-green)' : 'transparent', color: holdCap === h ? '#fff' : 'var(--nd-text-2)' }}>
-                    {h === 0 ? 'EOD' : `${h}m`}
+                    {h === 0 ? 'Auto' : `${h}m`}
                   </button>
                 ))}
               </div>

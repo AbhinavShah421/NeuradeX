@@ -310,6 +310,7 @@ class EnsembleEngine:
         # strong, boost confidence; when memory is empty (cold start), stay neutral.
         mem = next((s for s in signals if s.agent_name == "memory"), None)
         memory_note = ""
+        veto = ""   # non-empty ⇒ a directional action was refused this bar (see EnsembleDecision.veto)
         if mem is not None:
             mi = mem.indicators or {}
             if action in ("BUY", "SELL"):
@@ -326,10 +327,12 @@ class EnsembleEngine:
                         action = "HOLD"
                         confidence = 0.55
                         memory_note = f"memory veto: no similar {intended_action} precedent"
+                        veto = memory_note
                     elif wr < _MEM_GATE_WINRATE:
                         action = "HOLD"
                         confidence = 0.55
                         memory_note = f"memory veto: similar {intended_action} setups won only {wr:.0%}"
+                        veto = memory_note
                     else:
                         # Scale confidence by how well this action did historically
                         boost = 0.85 + 0.45 * max(0.0, wr - 0.5)
@@ -353,12 +356,14 @@ class EnsembleEngine:
             action = "HOLD"
             confidence = 0.58
             anomaly_note = f"anomaly veto: abnormal price/volume (score {score:.2f})"
+            veto = anomaly_note
 
         # Override to HOLD in extreme volatility (risk beats everything)
         if risk_score > 0.80 and action != "HOLD":
             action     = "HOLD"
             confidence = 0.60
             reasoning  = f"High volatility risk ({risk_score:.2f}) → forced HOLD"
+            veto       = reasoning
         else:
             top = sorted(signals, key=lambda s: s.confidence * s.weight, reverse=True)[:2]
             reasoning = " | ".join(
@@ -393,4 +398,5 @@ class EnsembleEngine:
             prediction_id   = pred_id,
             timestamp       = datetime.now(),
             vote_mode       = vote_mode,
+            veto            = veto,
         )

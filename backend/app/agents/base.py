@@ -32,6 +32,12 @@ class EnsembleDecision:
     # "directional" contest. Confidence scales differ between the two — gates
     # calibrated on one must not blindly apply their bands to the other.
     vote_mode:       str                = "legacy"
+    # Non-empty when the ensemble REFUSED a directional action this bar (memory
+    # evidence gate, anomaly/trap veto, extreme-volatility override). The refusal
+    # is encoded as HOLD with LOW confidence, which slides under the session
+    # gate's confident-override ceiling — so entry gates must honor this flag
+    # rather than inferring intent from action+confidence.
+    veto:            str                = ""
 
 
 class BaseAgent(ABC):

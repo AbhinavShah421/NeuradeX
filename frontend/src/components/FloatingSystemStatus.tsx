@@ -49,9 +49,10 @@ const FloatingSystemStatus: React.FC = () => {
   const [restartingAll, setRestartingAll] = useState(false);
   const [dragging, setDragging] = useState(false);
 
-  // Paper trading time config
-  const [noEntryAfter,  setNoEntryAfter]  = useState('14:00');
-  const [squareoffAfter, setSquareoffAfter] = useState('14:30');
+  // Paper trading time config — 'auto' = the system picks the time from its
+  // own forensics; an HH:MM value is a manual override.
+  const [noEntryAfter,  setNoEntryAfter]  = useState('auto');
+  const [squareoffAfter, setSquareoffAfter] = useState('auto');
   const [configSaving, setConfigSaving]   = useState(false);
   const [configMsg,    setConfigMsg]      = useState('');
 
@@ -457,30 +458,38 @@ const FloatingSystemStatus: React.FC = () => {
               <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--nd-text-2)' }}>Paper Trading Windows</span>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span style={{ fontSize: 10.5, color: 'var(--nd-text-3)', width: 90, flexShrink: 0 }}>No entry after</span>
-                <input
-                  type="time" value={noEntryAfter}
-                  onChange={e => setNoEntryAfter(e.target.value)}
-                  style={{
-                    flex: 1, fontSize: 11, padding: '3px 6px', borderRadius: 5,
-                    border: '1px solid var(--nd-border)', background: 'var(--nd-bg)',
-                    color: 'var(--nd-text-1)', outline: 'none',
-                  }}
-                />
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span style={{ fontSize: 10.5, color: 'var(--nd-text-3)', width: 90, flexShrink: 0 }}>Square off after</span>
-                <input
-                  type="time" value={squareoffAfter}
-                  onChange={e => setSquareoffAfter(e.target.value)}
-                  style={{
-                    flex: 1, fontSize: 11, padding: '3px 6px', borderRadius: 5,
-                    border: '1px solid var(--nd-border)', background: 'var(--nd-bg)',
-                    color: 'var(--nd-text-1)', outline: 'none',
-                  }}
-                />
-              </div>
+              {([
+                ['No entry after', noEntryAfter, setNoEntryAfter, '13:00'],
+                ['Square off after', squareoffAfter, setSquareoffAfter, '14:45'],
+              ] as [string, string, (v: string) => void, string][]).map(([label, value, setValue, manualSeed]) => {
+                const isAuto = value === 'auto';
+                return (
+                  <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ fontSize: 10.5, color: 'var(--nd-text-3)', width: 90, flexShrink: 0 }}>{label}</span>
+                    <button
+                      onClick={e => { e.stopPropagation(); setValue(isAuto ? manualSeed : 'auto'); }}
+                      title={isAuto ? 'System decides the time — click for a manual override' : 'Manual override active — click to let the system decide'}
+                      style={{
+                        padding: '2px 8px', borderRadius: 5, fontSize: 10, fontWeight: 600,
+                        border: '1px solid var(--nd-border)', cursor: 'pointer', flexShrink: 0,
+                        background: isAuto ? 'var(--nd-green)' : 'transparent',
+                        color: isAuto ? '#fff' : 'var(--nd-text-2)',
+                      }}
+                    >
+                      {isAuto ? 'Auto' : 'Manual'}
+                    </button>
+                    <input
+                      type="time" value={isAuto ? '' : value} disabled={isAuto}
+                      onChange={e => setValue(e.target.value || 'auto')}
+                      style={{
+                        flex: 1, fontSize: 11, padding: '3px 6px', borderRadius: 5,
+                        border: '1px solid var(--nd-border)', background: 'var(--nd-bg)',
+                        color: 'var(--nd-text-1)', outline: 'none', opacity: isAuto ? 0.5 : 1,
+                      }}
+                    />
+                  </div>
+                );
+              })}
               <button
                 onClick={e => { e.stopPropagation(); saveConfig(); }}
                 disabled={configSaving}

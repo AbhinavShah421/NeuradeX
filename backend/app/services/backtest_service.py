@@ -919,7 +919,11 @@ def _tech_signal(ind: dict, position: str, candle: dict, entry_price: float, agg
         # ~0.01pp avg-pnl cost. Motivating case: AVANTEL 2026-07-07 hit
         # +1.01% MFE and round-tripped to flat because the 1.2% lock never
         # armed. The lock08 variant stays in the A/B for ongoing comparison.
-        if gain_pct >= 0.8 and price < sma5:   return -1
+        # mom5<0 confirmation added 2026-07-10: a single 1-min close under SMA5
+        # with momentum still positive is a pause, not a turn — the lock was
+        # cashing out rising stocks at ~+0.9% (IIFL exited +0.99% with another
+        # +0.98% run-up left). Exit needs the trail break AND momentum down.
+        if gain_pct >= 0.8 and price < sma5 and mom5 < 0:   return -1
         # NOTE: the "cut bad entries fast" momentum exits are deliberately gone —
         # they fired on 1-min noise and were the single biggest loss driver
         # (sub-30-min exits: 15% win). Removing them alone was worth ~+7.6pts

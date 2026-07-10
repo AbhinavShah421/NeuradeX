@@ -118,6 +118,16 @@ LIVE_POLICY: dict = {
     # variant won the win-rate A/B on both days since introduction). CF labels
     # must keep tracking the live exit rules (_tech_signal in backtest_service).
     "lock_gain": 0.8,
+    # "Let winners run" pair adopted live 2026-07-10 after the post-exit audit
+    # (Jul 8-10, 211 exits): flat 60-min cap exits alone left +0.51% avg /
+    # 56.9% total on the table with the trend still intact, and the SMA5 lock
+    # was cashing rising stocks out at ~+0.9%. hold_cap is now a REVIEW point:
+    # trend-intact winners ride until the trend breaks or square-off, and the
+    # lock needs mom5 < 0 confirmation. A user-set session cap stays a hard
+    # flat cap (manual mode). Pre-change policy stays in the A/B as
+    # wide_hold60_lock08.
+    "cap_trend_extend": True,
+    "lock_confirm_mom": True,
 }
 
 EXIT_VARIANTS: dict[str, dict] = {
@@ -141,6 +151,14 @@ EXIT_VARIANTS: dict[str, dict] = {
     "wide_hold60_lock08": {**BASELINE_POLICY, "stop_atr_mult": 1.5, "stop_floor": 1.5,
                            "fast_cut": False, "grace_min": 10, "hold_cap": 60,
                            "lock_gain": 0.8},
+    # Live since 2026-07-10: lock08 + auto hold review (winners in an intact
+    # uptrend ride past the 60m review point until the trend breaks or
+    # square-off) + the SMA5 lock requiring mom5 < 0. Motivated by the
+    # Jul 8-10 post-exit audit — see LIVE_POLICY.
+    "wide_hold60_lock08_run": {**BASELINE_POLICY, "stop_atr_mult": 1.5, "stop_floor": 1.5,
+                               "fast_cut": False, "grace_min": 10, "hold_cap": 60,
+                               "lock_gain": 0.8, "cap_trend_extend": True,
+                               "lock_confirm_mom": True},
 }
 
 
@@ -183,9 +201,6 @@ def _simulate_policy(bars: list[dict], inds: list[dict], entry_idx: int,
             h, m = int(c["time"].split(":")[0]), int(c["time"].split(":")[1])
         except (KeyError, ValueError, IndexError):
             h, m = 0, 0
-        if held >= hold_cap or (h * 60 + m) >= _SQUAREOFF_MIN:
-            exit_price = sell_fill(price)
-            break
 
         ind      = inds[i]
         gain     = (price - entry) / entry * 100
@@ -193,6 +208,19 @@ def _simulate_policy(bars: list[dict], inds: list[dict], entry_idx: int,
         stop     = -max(policy["stop_floor"], policy["stop_atr_mult"] * atr_pct)
         take     = max(policy["take_floor"], policy["take_atr_mult"] * atr_pct)
         sma5, sma20, mom5 = ind.get("sma5", 0.0), ind.get("sma20", 0.0), ind.get("mom5", 0.0)
+
+        # Hold cap. With cap_trend_extend (AUTO mode), hold_cap is a REVIEW
+        # point, not a wall: a profitable position in an intact uptrend
+        # (price ≥ SMA5 ≥ SMA20) keeps riding until the trend breaks or the
+        # square-off — mirrors the session runner's auto hold review
+        # (2026-07-10). Without the knob (manual caps), it's a hard flat cap.
+        capped = held >= hold_cap
+        if (capped and policy.get("cap_trend_extend")
+                and gain > 0 and price >= sma5 >= sma20):
+            capped = False
+        if capped or (h * 60 + m) >= _SQUAREOFF_MIN:
+            exit_price = sell_fill(price)
+            break
 
         if held < grace_min:
             # Grace period: only a disaster stop (2×) can fire — everything else
@@ -206,7 +234,11 @@ def _simulate_policy(bars: list[dict], inds: list[dict], entry_idx: int,
             exit_price = sell_fill(price)
             break
         if trail == "sma5":
-            if gain >= policy["lock_gain"] and price < sma5:
+            # lock_confirm_mom: the trail break must come with momentum already
+            # down (mom5 < 0) — a one-bar pause under SMA5 in a rising stock no
+            # longer cashes out the position (2026-07-10).
+            if (gain >= policy["lock_gain"] and price < sma5
+                    and (mom5 < 0 or not policy.get("lock_confirm_mom"))):
                 exit_price = sell_fill(price)
                 break
         elif trail == "hwm_atr":
@@ -230,11 +262,14 @@ def _simulate_policy(bars: list[dict], inds: list[dict], entry_idx: int,
 
 def _simulate_long(bars: list[dict], entry_idx: int,
                    max_hold_minutes: Optional[int] = None) -> Optional[float]:
-    """Live-policy simulation (the CF label): LIVE_POLICY at the given hold cap
-    (default: the live cap) — what the running sessions would actually do."""
-    cap = LIVE_POLICY["hold_cap"] if max_hold_minutes is None else max_hold_minutes
-    policy = LIVE_POLICY if cap == LIVE_POLICY["hold_cap"] \
-        else {**LIVE_POLICY, "hold_cap": cap}
+    """Live-policy simulation (the CF label): what the running sessions would
+    actually do. None = the live AUTO policy (trend-extended hold review). An
+    explicit max_hold_minutes is a MANUAL hard cap — sessions with a user-set
+    cap force-exit flat at N minutes, so the label must too."""
+    if max_hold_minutes is None:
+        policy = LIVE_POLICY
+    else:
+        policy = {**LIVE_POLICY, "hold_cap": max_hold_minutes, "cap_trend_extend": False}
     return _simulate_policy(bars, _day_indicators(bars), entry_idx, policy)
 
 

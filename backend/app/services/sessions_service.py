@@ -159,14 +159,27 @@ def _min_pattern_grade(mode: str) -> str:
 
 # ── Paper trading time config ─────────────────────────────────────────────────
 _PAPER_CONFIG_KEY     = "paper_trading:config"
-# Entry cutoff 13:30 (was 14:00): entries in the 14:00 hour win 23.6% and the
-# 15:00 hour 21.5%, vs ~30-31% before noon (12.6k-trade forensics). The last
-# pre-cutoff hour (13:00) still wins 30.4% — the cliff is at 14:00.
-# no_entry_after 13:30 → 13:00 (2026-07-08): 13:00-13:30 entries went 0/8 on
-# CF labels (-0.45% avg); the broad population confirms post-13:00 decay (36%).
-_PAPER_CONFIG_DEFAULT = {"no_entry_after": "13:00", "squareoff_after": "14:30"}
+# Both times default to "auto" (2026-07-10): the SYSTEM picks the values from
+# its own forensics, and a manually saved HH:MM overrides.
+#   auto no_entry_after  → _LATE_ENTRY_CUTOFF_MIN (13:00): entries in the 14:00
+#     hour win 23.6% / 15:00 hour 21.5% vs ~30-31% before noon (12.6k trades);
+#     13:00-13:30 entries went 0/8 on CF labels (-0.45% avg).
+#   auto squareoff_after → the exit policy's square-off (14:45, same bar
+#     _tech_signal and the CF simulator force the exit) — one source of truth.
+_PAPER_CONFIG_DEFAULT = {"no_entry_after": "auto", "squareoff_after": "auto"}
 _paper_cfg_cache: dict = {}
 _paper_cfg_ts: float = 0.0
+
+
+def _resolve_paper_minutes(value: str, auto_minutes: int) -> int:
+    """Resolve a paper-config time ("auto" or "HH:MM") to minutes-of-day.
+    Anything that isn't a valid HH:MM falls back to auto — _time_to_minutes
+    has its own silent 09:15 fallback, so validate the shape here."""
+    v = str(value or "auto").strip().lower()
+    parts = v.split(":")
+    if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+        return _time_to_minutes(v)
+    return auto_minutes
 
 
 async def get_paper_config() -> dict:
@@ -253,8 +266,9 @@ class StartSessionRequest(BaseModel):
     capital:    float = Field(default=50_000.0, ge=5_000, le=10_000_000)
     speed:      int   = 1
     model:      Optional[str] = None
-    # Per-trade hold cap (minutes): force-exit any single position held longer
-    # than this. 0 = disabled. Used by auto-traded watchlist stocks.
+    # Per-trade hold cap (minutes). 0 = AUTO (default): the system decides —
+    # trend-intact winners ride past the policy review point, everything else
+    # exits there. > 0 = MANUAL: hard flat cap at exactly N minutes.
     max_hold_minutes: int = Field(default=0, ge=0, le=375)
     # Entry-timing aggressiveness: "normal" | "aggressive" (looser triggers → more trades)
     timing_mode: str = "normal"
@@ -624,6 +638,14 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         # require positive momentum: a pullback within the uptrend is a better long
         # than chasing strength, so a mildly-negative mom is fine.)
         rsi_now = ind.get("rsi", 50.0)
+        # Level alone isn't enough: the band can be hit from ABOVE, when an
+        # opening spike rolls over (2026-07-10: CGCL entered at RSI 76.7→69.4
+        # and ATHERENERG at 64.4→58.9, the two biggest losses of the day, while
+        # every winner entered with RSI rising). Require the band to be reached
+        # from below — falling RSI in the band is a rollover, not strength.
+        # 1.0-pt tolerance so a flat RSI doesn't flap the gate.
+        rsi_prev = _intraday_indicators(window, idx - 2).get("rsi", rsi_now) if idx >= 2 else rsi_now
+        rsi_falling = rsi_now < rsi_prev - 1.0
         # RSI entry band [58, 70] — "trade strength, not weakness". Win rate is
         # MONOTONIC in entry RSI across the strict CF-labeled population (n=127):
         #   RSI 45-55  54% win / -0.14%   ← coin flips, negative after costs
@@ -646,6 +668,10 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         elif rsi_now < _RSI_FLOOR:
             blocked.append(f"insufficient strength (RSI {rsi_now:.0f}<{_RSI_FLOOR}) — "
                            f"the 45-58 zone wins ~55-60% (coin-flip); wait for RSI>={_RSI_FLOOR}")
+        if good_timing and rsi_falling:
+            good_timing = False
+            blocked.append(f"RSI falling into the band ({rsi_prev:.0f}→{rsi_now:.0f}) — "
+                           f"spike rollover, not strength; wait for rising RSI")
         # The confidence band only describes a BUY decision. When the ensemble's
         # winning action is HOLD (gentle/loose entering on BUY support), its
         # confidence is the HOLD confidence — irrelevant to the BUY, so skip it.
@@ -676,7 +702,21 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
                 f"ensemble confidently {ens_action} ({conf:.0%} ≥ {override_ceiling:.0%}) — "
                 f"not overriding into a long (high entry-confidence is anti-predictive)"
             )
-        enter = (tsig != -1 and support_ok and conf_ok and uptrend and good_timing and not confident_override)
+        # ── Ensemble veto (anomaly trap / memory evidence / extreme volatility) ──
+        # The ensemble encodes a refusal as HOLD + LOW confidence (0.55-0.60),
+        # which slides UNDER the override ceiling above — so raw BUY votes kept
+        # re-opening exactly the bars the ensemble refused (2026-07-10: AEQUS and
+        # LODHA entered on anomaly-flagged pump bars, both straight into the red).
+        # A vetoed bar takes no new entry, period.
+        ens_veto = getattr(decision, "veto", "")
+        if ens_veto:
+            blocked.append(f"ensemble veto honored — {ens_veto}")
+        # `throttle is None` term: the cold-streak throttle used to be appended to
+        # `blocked` only and never gated `enter` — CGCL entered at a 14% rolling
+        # win-rate on 2026-07-10 (the very symbol the throttle was written for)
+        # and took the day's biggest loss.
+        enter = (tsig != -1 and support_ok and conf_ok and uptrend and good_timing
+                 and not confident_override and not ens_veto and throttle is None)
         # ── Post-loss cooldown ────────────────────────────────────────────────
         # After a losing exit, stay out for _LOSS_COOLDOWN_MIN minutes instead of
         # immediately re-entering the same chop range. This is the single biggest
@@ -776,7 +816,11 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         streak = (s["position"].get("ens_sell_streak", 0) + 1) if ens_action == "SELL" else 0
         s["position"]["ens_sell_streak"] = streak
         in_grace = held_minutes is not None and held_minutes < 10
-        ens_sell_exit = ens_action == "SELL" and not (in_grace and streak < 2)
+        # Debounce extended to ANY profitable position (2026-07-10): DLF exited
+        # +0.2% on a single meanrev-SELL-90% bar — meanrev votes SELL against
+        # exactly the strength we're long — and the stock ran +2.1% after.
+        # Losing positions keep the single-bar exit (cut losers fast).
+        ens_sell_exit = ens_action == "SELL" and not ((in_grace or gain_pct > 0) and streak < 2)
         if gain_pct >= 0.4 and not ens_sell_strong:
             action = "SELL" if tsig == -1 else "HOLD"      # winner — let it run
         else:
@@ -790,17 +834,21 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
             reason = (f"Holding position — exit needs a sell-trigger (stop/target/trend-break) "
                       f"or the ensemble turning bearish. Ensemble {ens_action} ({conf:.0%}).")
 
-    # ── Per-trade hold cap: force-exit any position held longer than the span ──
-    # POLICY PARITY (2026-07-09): the validated exit policy is wide_hold60 —
-    # hold_cap 60 is part of its DEFINITION, and every CF label / A/B number
-    # assumes it. But sessions only enforced a cap when max_hold_minutes was
-    # explicitly set (auto-watchlist), so manual paper/replay/backtest ran
-    # UNLIMITED holds: 13 large-cap Jul-8 backtests lost -9.5% riding a slow
-    # afternoon slide for 3-5h, where the labeled 60-min policy scores +0.4%
-    # on identical entries. Default now comes from LIVE_POLICY.hold_cap;
-    # an explicit max_hold_minutes still overrides (0 = unlimited, opt-in).
-    max_hold = s.get("max_hold_minutes") or 0
-    if max_hold <= 0:
+    # ── Per-trade hold cap: AUTO by default, hard cap only when user-set ──────
+    # AUTO (max_hold_minutes 0, the default): no flat time wall — LIVE_POLICY's
+    # hold_cap is a REVIEW point, not an exit. From the review point the system
+    # decides each bar: a profitable position with the trend intact
+    # (price ≥ SMA5 ≥ SMA20) keeps riding until the trend breaks or square-off;
+    # anything else (loser / stagnant / trend broken) exits. Motivation
+    # (2026-07-10 audit): 111 flat-cap exits since Jul-8 left +0.51% avg on the
+    # table (TCS +2.95%, ADANIENT +2.51%, TITAN +2.25% post-exit), all force-
+    # sold with the trend intact. The review point still kills the Jul-8
+    # failure mode (unlimited holds riding slow slides for hours).
+    # MANUAL (user-set max_hold_minutes > 0): exactly what the user asked for —
+    # a hard flat cap at N minutes, no trend extension.
+    max_hold   = s.get("max_hold_minutes") or 0
+    manual_cap = max_hold > 0
+    if not manual_cap:
         try:
             from app.agents.counterfactual import LIVE_POLICY
             max_hold = int(LIVE_POLICY.get("hold_cap", 60))
@@ -811,8 +859,22 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         candle_m = _time_to_minutes(candle.get("time", "09:15"))
         held = candle_m - entry_m
         if held >= max_hold:
-            action = "SELL"
-            reason = f"Hold cap: position held {held}m ≥ {max_hold}m — force exit."
+            if manual_cap:
+                action = "SELL"
+                reason = f"Hold cap (manual): position held {held}m ≥ {max_hold}m — force exit."
+            else:
+                gain_now  = ((candle["close"] - entry_price) / entry_price * 100) if entry_price else 0.0
+                price_now = candle.get("close", 0.0)
+                trend_run = (gain_now > 0 and price_now >= ind.get("sma5", price_now)
+                             and ind.get("sma5", 0.0) >= ind.get("sma20", 0.0))
+                if trend_run:
+                    reason = (f"Auto hold review ({held}m ≥ {max_hold}m): winner still trending "
+                              f"(+{gain_now:.1f}%, price ≥ SMA5 ≥ SMA20) — riding until the "
+                              f"trend breaks.")
+                else:
+                    action = "SELL"
+                    reason = (f"Auto hold review: {held}m held without a trending gain — "
+                              f"exiting (stagnant/broken positions don't improve with time).")
 
     # ── Late-session entry cutoff for replay/backtest ─────────────────────────
     # Afternoon entries are materially worse (14-15h win-rate 22-24% vs ~31% in
@@ -828,18 +890,30 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
     if not force_close and s.get("mode") == "paper":
         cfg          = await get_paper_config()
         candle_m     = _time_to_minutes(candle.get("time", "09:15"))
-        no_entry_m   = _time_to_minutes(cfg.get("no_entry_after",  "14:00"))
-        squareoff_m  = _time_to_minutes(cfg.get("squareoff_after", "14:30"))
+        # "auto" resolves to the system's own data-driven times; a manually
+        # saved HH:MM applies as-is (see _PAPER_CONFIG_DEFAULT).
+        try:
+            from app.agents.counterfactual import _SQUAREOFF_MIN as _auto_squareoff
+        except Exception:
+            _auto_squareoff = 14 * 60 + 45
+        no_entry_m   = _resolve_paper_minutes(cfg.get("no_entry_after"),  _LATE_ENTRY_CUTOFF_MIN)
+        squareoff_m  = _resolve_paper_minutes(cfg.get("squareoff_after"), _auto_squareoff)
+        no_entry_lbl  = f"{no_entry_m // 60:02d}:{no_entry_m % 60:02d}"
+        squareoff_lbl = f"{squareoff_m // 60:02d}:{squareoff_m % 60:02d}"
+        if str(cfg.get("no_entry_after", "auto")).lower() == "auto":
+            no_entry_lbl += " (auto)"
+        if str(cfg.get("squareoff_after", "auto")).lower() == "auto":
+            squareoff_lbl += " (auto)"
 
-        # Configurable square-off: force sell at or after squareoff time
+        # Square-off: force sell at or after squareoff time
         if pos_status == "LONG" and candle_m >= squareoff_m and action != "SELL":
             action = "SELL"
-            reason = f"Square off at {cfg.get('squareoff_after', '14:30')} — active trading window closed."
+            reason = f"Square off at {squareoff_lbl} — active trading window closed."
 
-        # Configurable entry cutoff: no new buys at or after no_entry time
+        # Entry cutoff: no new buys at or after no_entry time
         if action == "BUY" and candle_m >= no_entry_m:
             action = "HOLD"
-            reason = f"No new entries after {cfg.get('no_entry_after', '14:00')}."
+            reason = f"No new entries after {no_entry_lbl}."
 
         # Drop pattern (only while still in a HOLD — don't override ATR stop/take above).
         # Requires _PAPER_DROP_CANDLES consecutive lower closes — filters real trend breaks
@@ -1519,10 +1593,17 @@ async def get_paper_trading_config():
 async def set_paper_trading_config(req: PaperConfigRequest):
     import re
     hhmm = re.compile(r"^\d{2}:\d{2}$")
-    if not hhmm.match(req.no_entry_after) or not hhmm.match(req.squareoff_after):
-        raise HTTPException(400, "Times must be HH:MM format")
+
+    def _norm(v: str) -> str:
+        v = (v or "").strip()
+        if v.lower() == "auto":
+            return "auto"
+        if not hhmm.match(v):
+            raise HTTPException(400, "Times must be HH:MM or 'auto'")
+        return v
+
     prev = await get_paper_config()
-    cfg = {"no_entry_after": req.no_entry_after, "squareoff_after": req.squareoff_after}
+    cfg = {"no_entry_after": _norm(req.no_entry_after), "squareoff_after": _norm(req.squareoff_after)}
     await save_paper_config(cfg)
     if cfg != prev:
         try:
