@@ -95,6 +95,40 @@ async def set_auto_scan(enabled: bool) -> None:
         pass
 
 
+async def get_auto_scan_interval() -> int:
+    """Gap between scheduled auto sweeps (seconds); Redis override wins over env."""
+    try:
+        r = await _get_redis()
+        val = await r.get(_AUTO_INTERVAL_KEY)
+        if val:
+            return max(300, min(6 * 3600, int(val)))
+    except Exception:
+        pass
+    return SCAN_INTERVAL
+
+
+async def set_auto_scan_interval(seconds: int) -> int:
+    """Persist the auto-scan gap (clamped 5min–6h). Returns the applied value."""
+    seconds = max(300, min(6 * 3600, int(seconds)))
+    try:
+        r = await _get_redis()
+        await r.set(_AUTO_INTERVAL_KEY, str(seconds))
+    except Exception:
+        pass
+    _state["auto_scan_interval"] = seconds   # next_scan_at reflects the change immediately
+    return seconds
+
+
+def next_scan_at() -> str | None:
+    """When the next scheduled auto sweep is due (ISO, IST) — None if unknown."""
+    last = _state.get("last_scan_end") or 0.0
+    interval = _state.get("auto_scan_interval") or SCAN_INTERVAL
+    if not last:
+        return None
+    from datetime import datetime as _dt
+    return _dt.fromtimestamp(last + interval, IST).isoformat()
+
+
 async def _load_hc_params() -> dict:
     try:
         r = await _get_redis()
@@ -343,7 +377,9 @@ DELIVERY_MIN_MOM     = float(os.getenv("SCAN_DELIVERY_MIN_MOM", "0.0"))       # 
 DELIVERY_TOP_N       = int(os.getenv("SCAN_DELIVERY_TOP_N", "10"))
 RANKED_MAX           = int(os.getenv("SCAN_RANKED_MAX", "250"))   # full ranked board size
 CANDIDATE_POOL_N = int(os.getenv("SCAN_CANDIDATE_POOL", "30"))   # names the sentiment-service covers
-SCAN_INTERVAL  = int(os.getenv("SCAN_INTERVAL", str(20 * 60)))   # intraday sweep cadence
+SCAN_INTERVAL  = int(os.getenv("SCAN_INTERVAL", str(60 * 60)))   # default gap between auto sweeps (runtime-overridable)
+_AUTO_INTERVAL_KEY  = "scanner:auto_scan_interval"    # runtime override for the auto-scan gap (seconds)
+_LAST_SCAN_END_KEY  = "scanner:last_scan_end_ts"      # epoch of the last completed sweep — schedule survives restarts
 FETCH_DELAY    = float(os.getenv("SCAN_FETCH_DELAY", "0.30"))    # base per-symbol delay (+jitter) — gentle on Yahoo
 # Full-universe (NSE ~1800) background scan controls
 SCAN_CHECKPOINT_EVERY = int(os.getenv("SCAN_CHECKPOINT_EVERY", "120"))  # write partial watchlist every N stocks
@@ -365,6 +401,7 @@ _state = {
     "last_premarket_date": None, "last_eval_date": None,
     "last_eval": None, "calibration": None, "market_regime": "neutral",
     "regime_detail": None,
+    "last_scan_end": 0.0, "auto_scan_interval": None,   # auto-sweep schedule
 }
 _scan_lock = asyncio.Lock()
 
@@ -1056,7 +1093,13 @@ async def scan_once(phase: str = "intraday") -> dict:
 
     _state.update({"last_scan": payload["updated_at"], "scanned": scanned, "universe": total,
                    "candidates": len(candidates), "running": False, "scanning": False,
-                   "calibration": payload["calibration"]})
+                   "calibration": payload["calibration"], "last_scan_end": time.time()})
+    # Persist the completion time so the auto-scan schedule survives restarts
+    # (otherwise every deploy would immediately kick off a fresh full sweep).
+    try:
+        await r.set(_LAST_SCAN_END_KEY, str(_state["last_scan_end"]))
+    except Exception:
+        pass
     logger.info("scan(%s) complete: %d scanned, %d intraday-fit, %d on watchlist, %d delivery, market %s",
                 phase, scanned, len(candidates), len(watchlist), len(delivery_list), _state["market_regime"])
     return payload
@@ -1591,20 +1634,26 @@ async def backfill_intraday(days: int = 14, limit: int = 400) -> dict:
 # ── Schedulers ────────────────────────────────────────────────────────────────
 
 async def scanner_loop() -> None:
-    """Continuous intraday sweep — keeps the watchlist fresh during the day.
-    Skips each cycle when auto-scan is disabled via the dashboard toggle."""
+    """Scheduled auto sweep — in auto mode the next sweep runs a configurable
+    gap (default 1h) after the previous one COMPLETED, rather than back to
+    back. Manual scans and the pre-open scan reset the schedule too (they all
+    stamp last_scan_end), so an auto sweep never piles onto a fresh manual one.
+    Checks once a minute; paused entirely when auto-scan is off."""
     await asyncio.sleep(5)
     while True:
         try:
+            interval = await get_auto_scan_interval()
+            _state["auto_scan_interval"] = interval
             if await get_auto_scan():
-                await scan_once(phase="intraday")
-            else:
-                logger.info("auto-scan paused — skipping intraday sweep")
+                due = (_state.get("last_scan_end") or 0.0) + interval
+                if time.time() >= due and not _state.get("running"):
+                    logger.info("auto-scan due (gap %ds) — starting sweep", interval)
+                    await scan_once(phase="intraday")
         except asyncio.CancelledError:
             break
         except Exception as exc:
             logger.error("scan loop error: %s", exc)
-        await asyncio.sleep(SCAN_INTERVAL)
+        await asyncio.sleep(60)
 
 
 async def schedule_loop() -> None:
@@ -1648,6 +1697,17 @@ async def warm_state() -> None:
         if cal:
             c = json.loads(cal)
             _state["calibration"] = {"accuracy": c.get("accuracy"), "samples": c.get("samples", 0)}
+        # Restore the auto-scan schedule so a restart doesn't trigger an
+        # immediate sweep; fall back to the watchlist's updated_at timestamp.
+        ts = await r.get(_LAST_SCAN_END_KEY)
+        if ts:
+            _state["last_scan_end"] = float(ts)
+        else:
+            wl = await r.get(_WATCHLIST_KEY)
+            if wl:
+                upd = json.loads(wl).get("updated_at")
+                if upd:
+                    _state["last_scan_end"] = datetime.fromisoformat(upd).timestamp()
     except Exception as exc:
         logger.debug("warm_state skipped: %s", exc)
 
@@ -1951,8 +2011,23 @@ async def _agrade_watch_cycle() -> None:
         logger.debug("agrade snapshot write failed: %s", exc)
 
 
+async def _agrade_clear_after_close() -> None:
+    """Watching is a market-hours activity: once the trading day ends, drop the
+    in-memory watch state and the snapshot so the dashboard stops showing
+    WATCHING names overnight. Promotions (dated key) are kept as the record."""
+    st = _agrade_state
+    if st["symbols"]:
+        st.update({"symbols": {}, "hist": {}})
+    try:
+        r = await _get_redis()
+        if await r.delete(_AGRADE_WATCH_KEY):
+            logger.info("agrade watch: market closed — watch state cleared")
+    except Exception as exc:
+        logger.debug("agrade close-clear skipped: %s", exc)
+
+
 async def agrade_watch_loop() -> None:
-    """Scan #2 scheduler — watch cycles during market hours, cheap idle outside."""
+    """Scan #2 scheduler — watch cycles during market hours, cleared + idle outside."""
     await asyncio.sleep(30)
     while True:
         delay = AGRADE_WATCH_INTERVAL
@@ -1963,6 +2038,7 @@ async def agrade_watch_loop() -> None:
             if AGRADE_WATCH_ENABLED and in_hours:
                 await _agrade_watch_cycle()
             else:
+                await _agrade_clear_after_close()
                 delay = 300
         except asyncio.CancelledError:
             break

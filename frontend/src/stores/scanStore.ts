@@ -16,9 +16,12 @@ interface ScanState {
   runningSessions: number;
   autoScanEnabled: boolean;
   togglingAutoScan: boolean;
+  autoScanInterval: number | null;   // gap between scheduled auto sweeps (secs)
+  nextScanAt: string | null;         // when the next auto sweep is due (ISO)
   fetchStatus: () => Promise<void>;
   rescan: () => Promise<void>;
   toggleAutoScan: () => Promise<void>;
+  setScanInterval: (secs: number) => Promise<void>;
 }
 
 export const useScanStore = create<ScanState>((set, get) => ({
@@ -32,6 +35,8 @@ export const useScanStore = create<ScanState>((set, get) => ({
   runningSessions: 0,
   autoScanEnabled: true,
   togglingAutoScan: false,
+  autoScanInterval: null,
+  nextScanAt: null,
 
   fetchStatus: async () => {
     try {
@@ -49,6 +54,8 @@ export const useScanStore = create<ScanState>((set, get) => ({
           lastScan: d.lastScan ?? null,
           marketRegime: d.marketRegime ?? null,
           autoScanEnabled: d.autoScanEnabled !== false,   // default true if absent
+          autoScanInterval: d.autoScanInterval ?? null,
+          nextScanAt: d.nextScanAt ?? null,
         });
       }
       if (sessRes.status === 'fulfilled') {
@@ -79,6 +86,18 @@ export const useScanStore = create<ScanState>((set, get) => ({
       set({ autoScanEnabled: !next });   // revert on failure
     } finally {
       set({ togglingAutoScan: false });
+    }
+  },
+
+  setScanInterval: async (secs: number) => {
+    const prev = get().autoScanInterval;
+    set({ autoScanInterval: secs });   // optimistic update
+    try {
+      const r = await apiService.setAutoScan(undefined, secs);
+      const d: any = r.data || {};
+      set({ autoScanInterval: d.interval ?? secs, nextScanAt: d.nextScanAt ?? get().nextScanAt });
+    } catch {
+      set({ autoScanInterval: prev });
     }
   },
 }));

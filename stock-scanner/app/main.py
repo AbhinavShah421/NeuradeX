@@ -14,6 +14,7 @@ from .scanner import (
     scanner_loop, schedule_loop, scan_once, evaluate_day,
     evaluate_delivery, grade_due_delivery, backfill_delivery, backfill_committed, backfill_intraday,
     get_state, get_latest_eval, warm_state, get_auto_scan, set_auto_scan,
+    get_auto_scan_interval, set_auto_scan_interval, next_scan_at,
     agrade_watch_loop, agrade_status, agrade_force_promote,
 )
 from .universe import UNIVERSE
@@ -60,15 +61,25 @@ async def health():
 
 @app.get("/auto-scan")
 async def auto_scan_status():
-    """Return whether the continuous background scan loop is enabled."""
-    return {"status": "success", "data": {"enabled": await get_auto_scan()}}
+    """Auto-scan schedule: enabled flag, gap between sweeps, when the next is due."""
+    return {"status": "success", "data": {
+        "enabled": await get_auto_scan(),
+        "interval": await get_auto_scan_interval(),
+        "next_scan_at": next_scan_at(),
+    }}
 
 
 @app.post("/auto-scan")
-async def toggle_auto_scan(enabled: bool, _: None = Depends(_require_internal)):
-    """Enable or disable the continuous background scan loop."""
-    await set_auto_scan(enabled)
-    return {"status": "success", "data": {"enabled": enabled}}
+async def toggle_auto_scan(enabled: bool | None = None, interval: int | None = None,
+                           _: None = Depends(_require_internal)):
+    """Enable/disable scheduled auto sweeps and/or change the gap between them
+    (seconds, clamped 5min–6h). Either parameter may be sent alone."""
+    if enabled is not None:
+        await set_auto_scan(enabled)
+    applied = await set_auto_scan_interval(interval) if interval else await get_auto_scan_interval()
+    return {"status": "success", "data": {
+        "enabled": await get_auto_scan(), "interval": applied, "next_scan_at": next_scan_at(),
+    }}
 
 
 @app.get("/status")

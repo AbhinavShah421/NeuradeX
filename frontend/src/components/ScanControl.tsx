@@ -1,11 +1,18 @@
 import React from 'react';
 import { useScanStore } from '../stores/scanStore';
 
+const INTERVALS = [
+  { secs: 1800,  label: '30m' },
+  { secs: 3600,  label: '1h' },
+  { secs: 7200,  label: '2h' },
+  { secs: 10800, label: '3h' },
+];
+
 const ScanControl: React.FC<{ align?: 'left' | 'right' }> = ({ align = 'right' }) => {
   const {
     scanning, scanned, universe, lastScan, runningSessions,
-    autoScanEnabled, togglingAutoScan,
-    rescan, toggleAutoScan,
+    autoScanEnabled, togglingAutoScan, autoScanInterval, nextScanAt,
+    rescan, toggleAutoScan, setScanInterval,
   } = useScanStore();
   const pct = universe ? Math.round((scanned / universe) * 100) : 0;
   const blocked = scanning || runningSessions > 0;
@@ -14,6 +21,9 @@ const ScanControl: React.FC<{ align?: 'left' | 'right' }> = ({ align = 'right' }
     ? new Date(lastScan).toLocaleString('en-IN', {
         day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: true,
       })
+    : null;
+  const nextScanLabel = nextScanAt
+    ? new Date(nextScanAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true })
     : null;
 
   const rescanTooltip = scanning
@@ -33,7 +43,25 @@ const ScanControl: React.FC<{ align?: 'left' | 'right' }> = ({ align = 'right' }
         {lastScanLabel && (
           <span title={`Last full-market scan completed ${lastScanLabel}`}> · last scan {lastScanLabel}</span>
         )}
+        {autoScanEnabled && !scanning && nextScanLabel && (
+          <span title="When the next scheduled auto scan is due"> · next ~{nextScanLabel}</span>
+        )}
       </span>
+
+      {/* Auto-scan gap selector — visible only while auto mode is on */}
+      {autoScanEnabled && (
+        <select
+          value={autoScanInterval ?? 3600}
+          onChange={e => setScanInterval(Number(e.target.value))}
+          title="Gap between scheduled auto scans (manual Rescan always available)"
+          className="nd-input"
+          style={{ width: 62, padding: '4px 6px', fontSize: 11 }}>
+          {INTERVALS.map(iv => <option key={iv.secs} value={iv.secs}>{iv.label}</option>)}
+          {autoScanInterval != null && !INTERVALS.some(iv => iv.secs === autoScanInterval) && (
+            <option value={autoScanInterval}>{Math.round(autoScanInterval / 60)}m</option>
+          )}
+        </select>
+      )}
 
       {/* Auto-scan toggle */}
       <button

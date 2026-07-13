@@ -162,9 +162,10 @@ async def get_auto_scan():
 
 
 @router.post("/auto-scan")
-async def set_auto_scan(enabled: bool):
-    """Enable or disable the continuous background scan loop."""
-    return await service.set_auto_scan(enabled)
+async def set_auto_scan(enabled: bool | None = None, interval: int | None = None):
+    """Enable/disable scheduled auto sweeps and/or change the gap between them
+    (seconds, scanner clamps to 5min–6h)."""
+    return await service.set_auto_scan(enabled, interval)
 
 
 @router.get("/regime-detail")

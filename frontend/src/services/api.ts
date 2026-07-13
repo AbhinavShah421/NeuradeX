@@ -992,8 +992,11 @@ class ApiService {
     return response.data;
   }
 
-  async setAutoScan(enabled: boolean): Promise<ApiResponse<any>> {
-    const response = await this.api.post('/api/ai-engine/auto-scan', null, { params: { enabled } });
+  async setAutoScan(enabled?: boolean, interval?: number): Promise<ApiResponse<any>> {
+    const params: Record<string, unknown> = {};
+    if (enabled !== undefined) params.enabled = enabled;
+    if (interval !== undefined) params.interval = interval;
+    const response = await this.api.post('/api/ai-engine/auto-scan', null, { params });
     return response.data;
   }
 

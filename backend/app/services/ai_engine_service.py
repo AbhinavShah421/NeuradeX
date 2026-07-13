@@ -521,16 +521,19 @@ async def get_auto_scan():
     return {"status": "success", "data": {"enabled": True}}
 
 
-async def set_auto_scan(enabled: bool):
-    """Enable or disable the continuous background scan loop."""
+async def set_auto_scan(enabled: bool | None = None, interval: int | None = None):
+    """Enable/disable scheduled auto sweeps and/or change the gap between them
+    (seconds). Either parameter may be sent alone."""
     import httpx
     from app.config import settings
+    params = {}
+    if enabled is not None:
+        params["enabled"] = str(enabled).lower()
+    if interval is not None:
+        params["interval"] = int(interval)
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            r = await client.post(
-                f"{settings.SCANNER_SERVICE_URL}/auto-scan",
-                params={"enabled": str(enabled).lower()},
-            )
+            r = await client.post(f"{settings.SCANNER_SERVICE_URL}/auto-scan", params=params)
             if r.status_code == 200:
                 return r.json()
     except Exception as exc:
@@ -567,9 +570,9 @@ async def scan_status():
             )
             if not isinstance(status_r, Exception) and status_r.status_code == 200:
                 d = (status_r.json() or {}).get("data", {})
-                auto_enabled = True
+                auto = {"enabled": True, "interval": None, "next_scan_at": None}
                 if not isinstance(auto_r, Exception) and auto_r.status_code == 200:
-                    auto_enabled = bool((auto_r.json() or {}).get("data", {}).get("enabled", True))
+                    auto = {**auto, **((auto_r.json() or {}).get("data") or {})}
                 return {"status": "success", "data": {
                     "scanning": bool(d.get("scanning")),
                     "running": bool(d.get("running")),
@@ -578,7 +581,9 @@ async def scan_status():
                     "candidates": d.get("candidates", 0),
                     "last_scan": d.get("last_scan"),
                     "market_regime": d.get("market_regime"),
-                    "auto_scan_enabled": auto_enabled,
+                    "auto_scan_enabled": bool(auto.get("enabled", True)),
+                    "auto_scan_interval": auto.get("interval"),
+                    "next_scan_at": auto.get("next_scan_at"),
                 }}
     except Exception as exc:
         logger.debug("scan-status proxy failed: %s", exc)
