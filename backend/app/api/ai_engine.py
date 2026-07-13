@@ -113,6 +113,13 @@ async def get_ranked(limit: int = 100):
     return await service.get_ranked(limit)
 
 
+@router.get("/agrade-watch")
+async def get_agrade_watch():
+    """The A-grade live-watcher snapshot (per-symbol live state + triggers) and
+    today's intraday promotions into paper trading."""
+    return await service.get_agrade_watch()
+
+
 @router.get("/scan-diff")
 async def scan_diff(limit: int = 60):
     """How this scan's ranking differs from the previous completed scan: per-stock

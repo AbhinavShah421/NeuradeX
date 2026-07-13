@@ -14,6 +14,7 @@ from .scanner import (
     scanner_loop, schedule_loop, scan_once, evaluate_day,
     evaluate_delivery, grade_due_delivery, backfill_delivery, backfill_committed, backfill_intraday,
     get_state, get_latest_eval, warm_state, get_auto_scan, set_auto_scan,
+    agrade_watch_loop, agrade_status, agrade_force_promote,
 )
 from .universe import UNIVERSE
 
@@ -40,6 +41,7 @@ async def lifespan(app: FastAPI):
     await warm_state()
     _tasks.append(asyncio.create_task(scanner_loop()))
     _tasks.append(asyncio.create_task(schedule_loop()))
+    _tasks.append(asyncio.create_task(agrade_watch_loop()))
     yield
     for t in _tasks:
         t.cancel()
@@ -136,3 +138,16 @@ async def backfill_intraday_ep(days: int = 14, limit: int = 400, _: None = Depen
     latest completed day. Runs in background."""
     asyncio.create_task(backfill_intraday(days=days, limit=limit))
     return {"status": "started", "days": days, "limit": limit}
+
+
+@app.get("/agrade-watch")
+async def agrade_watch():
+    """Live A-grade watcher snapshot + today's promotions."""
+    return {"status": "success", "data": await agrade_status()}
+
+
+@app.post("/agrade-watch/promote")
+async def agrade_promote(symbol: str, force: bool = False, _: None = Depends(_require_internal)):
+    """Test hook: promote one symbol through the live-watcher path without
+    waiting for its price triggers. force=true also skips the re-score gate."""
+    return {"status": "success", "data": await agrade_force_promote(symbol, force=force)}

@@ -206,6 +206,7 @@ const AiWatchlistTab: React.FC = () => {
   const [data, setData]         = useState<WatchlistData | null>(null);
   const [evalData, setEvalData] = useState<ScanEvaluation | null>(null);
   const [diff, setDiff]         = useState<ScanDiff | null>(null);
+  const [agrade, setAgrade]     = useState<any | null>(null);   // A-grade live watcher snapshot + promotions
   const [sel, setSel]           = useState<WatchlistStock | null>(null);
   const [tab, setTab]           = useState<'intraday' | 'delivery' | 'fno'>('intraday');
   const [holdCap, setHoldCap]   = useState<number>(0);      // per-trade hold cap (min) —
@@ -234,6 +235,7 @@ const AiWatchlistTab: React.FC = () => {
     try { const r = await apiService.aiWatchlist(); setData(r.data as WatchlistData); } catch {}
     try { const e = await apiService.scanEvaluation(); setEvalData(e.data as ScanEvaluation); } catch {}
     try { const d = await apiService.scanDiff(); setDiff(d.data as ScanDiff); } catch {}
+    try { const a = await apiService.getAgradeWatch(); setAgrade(a.data); } catch {}
   }, []);
   useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, [load]);
 
@@ -255,6 +257,12 @@ const AiWatchlistTab: React.FC = () => {
     await loadRanked(n);
     setTimeout(() => setWlSaving(false), 1500);
   };
+
+  // A-grade live watcher: per-symbol status + today's promotions (camelCased by
+  // the axios interceptor — watch symbols carry status/promotedAt etc.).
+  const watchStatus = new Map<string, string>();
+  (agrade?.watch?.symbols ?? []).forEach((s: any) => { if (s?.symbol) watchStatus.set(s.symbol, s.status); });
+  const promotedSet = new Set<string>((agrade?.promotions ?? []).map((p: any) => p?.symbol).filter(Boolean));
 
   // Intraday view: the top-N ranked scan (falls back to the high-conviction list).
   const intraday: WatchlistStock[] = (ranked.length ? ranked : (data?.intraday ?? data?.items ?? [])).slice(0, viewN);
@@ -335,6 +343,13 @@ const AiWatchlistTab: React.FC = () => {
                   {data.gradeCounts.A ?? 0}×A · {data.gradeCounts.B ?? 0}×B · {data.gradeCounts.C ?? 0}×C
                 </span>
               )}
+              {agrade?.watch && (
+                <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>
+                  · Live watch: {(agrade.watch.symbols ?? []).filter((s: any) => s?.status !== 'promoted').length} watching
+                  · {agrade.watch.promotionsToday ?? 0}/{agrade.watch.cap ?? 5} promoted
+                  {agrade.watch.feedOk === false && <span style={{ color: 'var(--nd-red, #ef4444)' }}> · live feed offline</span>}
+                </span>
+              )}
               <span style={{ flex: 1 }} />
               {/* Hold-cap selector */}
               <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>Hold cap</span>
@@ -408,9 +423,23 @@ const AiWatchlistTab: React.FC = () => {
               </span>
             ) : null;
 
+            // ── A-grade live-watch badge (intraday only) ────────────────────
+            const liveStatus = tab === 'intraday'
+              ? (promotedSet.has(w.symbol) ? 'promoted' : watchStatus.get(w.symbol))
+              : undefined;
+            const liveBadge = liveStatus === 'promoted' ? (
+              <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 8, background: 'rgba(34,197,94,0.15)', color: 'var(--nd-green)', flexShrink: 0 }}>
+                PROMOTED
+              </span>
+            ) : liveStatus ? (
+              <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 8, background: 'rgba(245,158,11,0.15)', color: '#f59e0b', flexShrink: 0 }}>
+                WATCHING
+              </span>
+            ) : null;
+
             return (
               <div key={w.symbol}>
-                <WatchlistRow w={w} i={i} onClick={() => setSel(w)} badge={deliveryBadge ?? fnoBadge}
+                <WatchlistRow w={w} i={i} onClick={() => setSel(w)} badge={liveBadge ?? deliveryBadge ?? fnoBadge}
                   onAutoTrade={tab === 'intraday' ? startAuto : undefined} tradingSym={tradingSym} />
                 {/* FNO rationale row */}
                 {tab === 'fno' && rec && (

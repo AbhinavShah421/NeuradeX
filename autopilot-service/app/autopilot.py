@@ -32,6 +32,7 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 BACKEND_URL   = os.getenv("BACKEND_URL", "http://backend:8000")
 WATCHLIST_KEY = "ai_engine:watchlist"
+LIVE_PROMOTIONS_KEY = "ai_engine:live_promotions:{}"   # dated list from the scanner's A-grade live watcher
 
 # Redis flags / state (shared with the backend so the UI toggle takes effect)
 PAPER_FLAG     = "ai_engine:autopilot_enabled"
@@ -276,6 +277,20 @@ async def _committed_symbols() -> list[str]:
     return []
 
 
+async def _live_promoted_symbols() -> list[str]:
+    """Intraday A-grade names the scanner's live watcher promoted today, in
+    promotion order. Independent of watchlist freshness — every entry was
+    re-scored against the quality gate at promotion time."""
+    try:
+        r = await _get_redis()
+        raw = await r.get(LIVE_PROMOTIONS_KEY.format(_today()))
+        if raw:
+            return [p["symbol"] for p in json.loads(raw) if p.get("symbol")]
+    except Exception:
+        pass
+    return []
+
+
 async def _top_conviction_symbols(n: int = 1) -> list[str]:
     """The n most-convicted watchlist stocks (BUY-rated preferred, by score).
     Fallback tier: guarantees paper trading starts with the most convicted
@@ -462,14 +477,17 @@ async def _do_paper_tick() -> None:
         return
 
     # Paper trading acts on committed high-conviction picks (precision tier),
-    # most-convicted first. If the scanner committed nothing today, never sit
-    # the day out: fall back to the single most-convicted watchlist stock so
-    # every trading day starts with at least one live session for the agents.
-    syms = await _committed_symbols()
+    # most-convicted first, plus any A-grade names the scanner's live watcher
+    # promoted intraday. If neither tier has anything, never sit the day out:
+    # fall back to the single most-convicted watchlist stock so every trading
+    # day starts with at least one live session for the agents.
+    committed = await _committed_symbols()
+    promoted = await _live_promoted_symbols()
+    syms = committed + [s for s in promoted if s not in committed]
     if not syms:
         syms = await _top_conviction_symbols(1)
         if syms:
-            logger.info("no committed picks — falling back to top-conviction stock %s", syms[0])
+            logger.info("no committed or live-promoted picks — falling back to top-conviction stock %s", syms[0])
     if not syms:
         return                              # no watchlist at all — nothing to trade
     # Use Redis directly for paper session checks — avoids deserialising all

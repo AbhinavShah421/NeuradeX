@@ -291,6 +291,29 @@ async def get_watchlist(min_grade: str | None = None):
     return {"status": "success", "data": {"updated_at": None, "scanned": 0, "universe": 0, "items": []}}
 
 
+async def get_agrade_watch():
+    """The A-grade live-watcher snapshot (per-symbol live state + trigger flags)
+    and today's promotions — produced by the stock-scanner service, read from
+    Redis. Both payloads are lists of objects, never symbol-keyed dicts (the
+    frontend interceptor camelCases all keys)."""
+    import json
+    from datetime import datetime, timezone, timedelta
+    from app.utils.redis_client import cache_get
+    watch, promotions = None, []
+    try:
+        raw = await cache_get("ai_engine:agrade_watch")
+        if raw:
+            watch = json.loads(raw)
+        ist = timezone(timedelta(hours=5, minutes=30))
+        today = datetime.now(ist).strftime("%Y-%m-%d")
+        raw_p = await cache_get(f"ai_engine:live_promotions:{today}")
+        if raw_p:
+            promotions = json.loads(raw_p)
+    except Exception as exc:
+        logger.debug("agrade watch read failed: %s", exc)
+    return {"status": "success", "data": {"watch": watch, "promotions": promotions}}
+
+
 async def get_ranked(limit: int = 100):
     """The full ranked board of AI-scanned stocks (for the Predictions page),
     each enriched with its latest LLM news-sentiment. `limit` caps how many of the

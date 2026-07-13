@@ -883,6 +883,10 @@ class ApiService {
     const response = await this.api.get('/api/ai-engine/scan-diff', { params: { limit }, timeout: 20000 });
     return response.data;
   }
+  async getAgradeWatch(): Promise<ApiResponse<any>> {
+    const response = await this.api.get('/api/ai-engine/agrade-watch');
+    return response.data;
+  }
   async patternModelStatus(): Promise<any> {
     const response = await this.api.get('/api/ai-engine/pattern-model/status');
     return response.data;

@@ -25,6 +25,7 @@ import math
 import os
 import random
 import time
+from collections import deque
 from datetime import datetime, timezone, timedelta
 
 import httpx
@@ -1662,3 +1663,312 @@ async def get_latest_eval() -> dict | None:
 
 def get_state() -> dict:
     return dict(_state)
+
+
+# ── A-grade live watcher (scan #2) ────────────────────────────────────────────
+# The full-universe sweep (scan #1) finds the day's A-grade BUYs; this loop
+# watches them LIVE through the Groww tick feed and promotes a name into paper
+# trading the moment it shows intraday confidence. Promotion needs BOTH the
+# cheap live-price triggers AND a fresh _analyze re-score clearing the same
+# quality bar the committed tier uses — precision stays protected. Promotions
+# live in their own dated Redis key so the 20-minute sweep (which rewrites the
+# watchlist, committed tier included) can never clobber them; the autopilot
+# merges them after the committed tier.
+
+AGRADE_WATCH_ENABLED      = os.getenv("AGRADE_WATCH_ENABLED", "1") != "0"
+AGRADE_WATCH_INTERVAL     = int(os.getenv("AGRADE_WATCH_INTERVAL", "60"))          # secs between cycles
+AGRADE_WATCH_MAX_SYMBOLS  = int(os.getenv("AGRADE_WATCH_MAX_SYMBOLS", "15"))       # A-grade names watched
+AGRADE_TRIG_CHG_PCT       = float(os.getenv("AGRADE_TRIG_CHG_PCT", "0.4"))         # % up from session-open ref
+AGRADE_TRIG_HIGH_PROX_PCT = float(os.getenv("AGRADE_TRIG_HIGH_PROX_PCT", "0.1"))   # within % of day high
+AGRADE_TRIG_MOM_WINDOW    = int(os.getenv("AGRADE_TRIG_MOM_WINDOW", "300"))        # momentum lookback secs
+AGRADE_TRIG_MOM_MIN_PCT   = float(os.getenv("AGRADE_TRIG_MOM_MIN_PCT", "0.15"))    # min % gain over the window
+AGRADE_WATCH_WARMUP_SECS  = int(os.getenv("AGRADE_WATCH_WARMUP_SECS", "600"))      # observe before a symbol may trigger
+AGRADE_RESCORE_COOLDOWN   = int(os.getenv("AGRADE_RESCORE_COOLDOWN", "900"))       # retry backoff after a failed re-score
+AGRADE_MAX_PROMOTIONS     = int(os.getenv("AGRADE_MAX_PROMOTIONS", "5"))           # daily promotion cap
+
+_AGRADE_WATCH_KEY    = "ai_engine:agrade_watch"        # live snapshot (UI + restart rehydration)
+_LIVE_PROMOTIONS_KEY = "ai_engine:live_promotions:{}"  # dated list the autopilot trades
+_GROWW_SYMBOLS_SET   = "groww:feed:symbols"            # symbols the groww-feed service streams
+_GROWW_LTP_KEY       = "groww:ltp:{}"                  # "<price>:<epoch_ts>", TTL 60s
+_LTP_MAX_AGE_SECS    = 20.0                            # older ticks count as feed-down
+
+_agrade_state: dict = {"date": None, "symbols": {}, "hist": {}}
+_NO_TRIGGERS = {"chg": False, "high": False, "mom": False}
+
+
+def _payload_fresh(data: dict, max_age_secs: float = 4 * 3600) -> bool:
+    """Same freshness convention as the autopilot: reject scan payloads whose
+    updated_at is missing or older than 4h (weekend leftovers, dead scanner)."""
+    ts = data.get("updated_at")
+    if not ts:
+        return False
+    try:
+        dt = datetime.fromisoformat(ts)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=IST)
+        return (_ist_now() - dt).total_seconds() < max_age_secs
+    except Exception:
+        return False
+
+
+async def _agrade_candidates() -> list[dict]:
+    """Grade-A BUY names from the last completed sweep. Sourced from the ranked
+    board — the watchlist is capped at wl_max and hides most A-grades. Empty
+    while a sweep is mid-flight (partial boards churn) or the data is stale."""
+    try:
+        r = await _get_redis()
+        raw = await r.get(_WATCHLIST_KEY)
+        if not raw:
+            return []
+        wl = json.loads(raw)
+        if wl.get("scanning") or not _payload_fresh(wl):
+            return []
+        raw_rk = await r.get(_RANKED_KEY)
+        items = (json.loads(raw_rk).get("items") or []) if raw_rk else []
+        if not items:
+            items = wl.get("items") or []
+        cands = [it for it in items
+                 if it.get("symbol") and it.get("grade") == "A" and it.get("action") == "BUY"]
+        cands.sort(key=lambda it: float(it.get("win_probability") or 0), reverse=True)
+        return cands[:AGRADE_WATCH_MAX_SYMBOLS]
+    except Exception as exc:
+        logger.debug("agrade candidates read failed: %s", exc)
+        return []
+
+
+async def _agrade_promotions(r) -> list[dict]:
+    try:
+        raw = await r.get(_LIVE_PROMOTIONS_KEY.format(_ist_now().strftime("%Y-%m-%d")))
+        return json.loads(raw) if raw else []
+    except Exception:
+        return []
+
+
+async def _agrade_rehydrate(r, today: str) -> None:
+    """Restore per-symbol day state (open_ref/day_high/status) from the last
+    snapshot after a mid-day restart. The tick history is NOT restored — the
+    warmup gate keeps momentum from triggering on thin post-restart data."""
+    try:
+        raw = await r.get(_AGRADE_WATCH_KEY)
+        if not raw:
+            return
+        snap = json.loads(raw)
+        if snap.get("date") != today:
+            return
+        now = time.time()
+        for row in snap.get("symbols", []):
+            sym = row.get("symbol")
+            if not sym:
+                continue
+            status = row.get("status") or "watching"
+            if status in ("triggered", "cooldown"):
+                status = "watching"
+            _agrade_state["symbols"][sym] = {
+                "open_ref": row.get("open_ref"), "day_high": row.get("day_high") or 0.0,
+                "first_seen": now, "ltp": row.get("ltp"), "ts": None,
+                "chg_pct": row.get("chg_pct"), "mom_pct": None,
+                "status": status, "cooldown_until": None,
+                "promoted_at": row.get("promoted_at"), "triggers": dict(_NO_TRIGGERS),
+            }
+            _agrade_state["hist"][sym] = deque(maxlen=64)
+        if _agrade_state["symbols"]:
+            logger.info("agrade watch: rehydrated %d symbols for %s", len(_agrade_state["symbols"]), today)
+    except Exception as exc:
+        logger.debug("agrade rehydrate skipped: %s", exc)
+
+
+async def _agrade_rescore(symbol: str) -> tuple[bool, str, dict | None]:
+    """The quality gate: fresh daily candles through the same _analyze scoring
+    the sweep uses. Promotion needs a grade-A BUY above the adaptive HC floor."""
+    regime = {"bullish": 1, "bearish": -1}.get(_state.get("market_regime"), 0)
+    calib = await _load_calibration()
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        candles = await _fetch_daily(client, symbol)
+    res = _analyze(candles, regime=regime, calib=calib)
+    if not res:
+        return False, "no data / too few candles", None
+    if res["action"] != "BUY":
+        return False, f"re-score action is {res['action']}", res
+    if res["grade"] != "A":
+        return False, f"re-score grade is {res['grade']}", res
+    hc = await _load_hc_params()
+    if res["win_probability"] < hc["wp_floor"]:
+        return False, f"win_probability {res['win_probability']:.2f} below floor {hc['wp_floor']:.2f}", res
+    return True, "ok", res
+
+
+async def _agrade_append_promotion(r, symbol: str, res: dict | None, forced: bool = False) -> dict:
+    """Append one promotion to today's list, enforcing the daily cap and
+    per-symbol dedupe. res is the passing re-score (None when forced)."""
+    promos = await _agrade_promotions(r)
+    if any(p.get("symbol") == symbol for p in promos):
+        return {"promoted": False, "reason": "already promoted today"}
+    if len(promos) >= AGRADE_MAX_PROMOTIONS:
+        return {"promoted": False, "reason": f"daily cap ({AGRADE_MAX_PROMOTIONS}) reached"}
+    s = _agrade_state["symbols"].get(symbol) or {}
+    entry = {"symbol": symbol, "promoted_at": _ist_now().isoformat(),
+             "ltp": s.get("ltp"), "chg_pct": s.get("chg_pct"),
+             "win_probability": (res or {}).get("win_probability"),
+             "grade": (res or {}).get("grade"), "score": (res or {}).get("signal_score")}
+    if forced:
+        entry["forced"] = True
+    promos.append(entry)
+    await r.set(_LIVE_PROMOTIONS_KEY.format(_ist_now().strftime("%Y-%m-%d")),
+                json.dumps(promos), ex=86400 * 2)
+    if symbol in _agrade_state["symbols"]:
+        _agrade_state["symbols"][symbol].update({"status": "promoted", "promoted_at": entry["promoted_at"]})
+    logger.info("agrade watch: PROMOTED %s to paper trading (wp=%s chg=%s%%)%s",
+                symbol, entry["win_probability"], entry["chg_pct"], " [forced]" if forced else "")
+    return {"promoted": True, **entry}
+
+
+async def _agrade_rescore_and_promote(symbol: str) -> dict:
+    ok, reason, res = await _agrade_rescore(symbol)
+    s = _agrade_state["symbols"].get(symbol)
+    if not ok:
+        if s:
+            s["status"] = "cooldown"
+            s["cooldown_until"] = time.time() + AGRADE_RESCORE_COOLDOWN
+        logger.info("agrade watch: %s triggered but re-score blocked it (%s)", symbol, reason)
+        return {"promoted": False, "reason": reason}
+    r = await _get_redis()
+    out = await _agrade_append_promotion(r, symbol, res)
+    if not out.get("promoted") and s:
+        s["status"] = "watching"
+    return out
+
+
+async def _agrade_watch_cycle() -> None:
+    """One watch cycle: refresh the watched set, read live ticks, evaluate
+    triggers, and re-score at most ONE triggered symbol (gentle on Yahoo)."""
+    r = await _get_redis()
+    now = time.time()
+    today = _ist_now().strftime("%Y-%m-%d")
+    st = _agrade_state
+    if st["date"] != today:
+        st.update({"date": today, "symbols": {}, "hist": {}})
+        await _agrade_rehydrate(r, today)
+
+    # Add new A-grade candidates — sticky: once watched, a symbol keeps its day
+    # state even if a later sweep drops it off the board (the re-score gate
+    # still blocks promotion of anything no longer A-grade).
+    for item in await _agrade_candidates():
+        sym = item["symbol"]
+        if sym not in st["symbols"] and len(st["symbols"]) < AGRADE_WATCH_MAX_SYMBOLS:
+            st["symbols"][sym] = {"open_ref": None, "day_high": 0.0, "first_seen": now,
+                                  "ltp": None, "ts": None, "chg_pct": None, "mom_pct": None,
+                                  "status": "watching", "cooldown_until": None,
+                                  "promoted_at": None, "triggers": dict(_NO_TRIGGERS)}
+            st["hist"][sym] = deque(maxlen=64)
+    if not st["symbols"]:
+        return
+
+    try:
+        await r.sadd(_GROWW_SYMBOLS_SET, *st["symbols"].keys())
+    except Exception as exc:
+        logger.debug("agrade feed-symbols sadd failed: %s", exc)
+
+    promos = await _agrade_promotions(r)
+    promoted_syms = {p.get("symbol") for p in promos}
+    feed_ok = False
+    trigger_sym = None
+    for sym, s in st["symbols"].items():
+        if sym in promoted_syms and s["status"] != "promoted":
+            s["status"] = "promoted"        # e.g. force-promoted via the API hook
+        if s["status"] == "cooldown" and s.get("cooldown_until") and now >= s["cooldown_until"]:
+            s["status"], s["cooldown_until"] = "watching", None
+        raw = await r.get(_GROWW_LTP_KEY.format(sym))
+        if not raw:
+            continue
+        try:
+            price_s, ts_s = raw.split(":", 1)
+            price, ts = float(price_s), float(ts_s)
+        except (ValueError, TypeError):
+            continue
+        if price <= 0 or now - ts > _LTP_MAX_AGE_SECS:
+            continue
+        feed_ok = True
+        if s["open_ref"] is None:
+            s["open_ref"] = price           # session-open reference = first live tick of the day
+        s["day_high"] = max(s["day_high"], price)
+        s["ltp"], s["ts"] = price, ts
+        st["hist"].setdefault(sym, deque(maxlen=64)).append((now, price))
+        s["chg_pct"] = round((price / s["open_ref"] - 1) * 100, 3) if s["open_ref"] else None
+
+        # Momentum: gain vs the oldest tick inside the lookback window; requires
+        # at least half a window of real history so a lone tick can't trigger.
+        window = [(t, p) for t, p in st["hist"][sym] if t >= now - AGRADE_TRIG_MOM_WINDOW]
+        s["mom_pct"] = None
+        if window and now - window[0][0] >= AGRADE_TRIG_MOM_WINDOW * 0.5 and window[0][1] > 0:
+            s["mom_pct"] = round((price / window[0][1] - 1) * 100, 3)
+
+        trig = {
+            "chg":  s["chg_pct"] is not None and s["chg_pct"] >= AGRADE_TRIG_CHG_PCT,
+            "high": s["day_high"] > 0 and (s["day_high"] - price) / s["day_high"] * 100 <= AGRADE_TRIG_HIGH_PROX_PCT,
+            "mom":  s["mom_pct"] is not None and s["mom_pct"] >= AGRADE_TRIG_MOM_MIN_PCT,
+        }
+        s["triggers"] = trig
+        if (trigger_sym is None and s["status"] == "watching"
+                and now - s["first_seen"] >= AGRADE_WATCH_WARMUP_SECS
+                and len(promos) < AGRADE_MAX_PROMOTIONS
+                and all(trig.values())):
+            s["status"] = "triggered"
+            trigger_sym = sym
+
+    if trigger_sym:
+        await _agrade_rescore_and_promote(trigger_sym)
+        promos = await _agrade_promotions(r)
+
+    snapshot = {"date": st["date"], "updated_at": _ist_now().isoformat(), "feed_ok": feed_ok,
+                "promotions_today": len(promos), "cap": AGRADE_MAX_PROMOTIONS,
+                "symbols": [{"symbol": sym,
+                             **{k: s.get(k) for k in ("ltp", "open_ref", "day_high", "chg_pct",
+                                                      "mom_pct", "status", "promoted_at")},
+                             "triggers": s.get("triggers") or dict(_NO_TRIGGERS)}
+                            for sym, s in st["symbols"].items()]}
+    try:
+        await r.set(_AGRADE_WATCH_KEY, json.dumps(snapshot), ex=28800)
+    except Exception as exc:
+        logger.debug("agrade snapshot write failed: %s", exc)
+
+
+async def agrade_watch_loop() -> None:
+    """Scan #2 scheduler — watch cycles during market hours, cheap idle outside."""
+    await asyncio.sleep(30)
+    while True:
+        delay = AGRADE_WATCH_INTERVAL
+        try:
+            now = _ist_now()
+            minutes = now.hour * 60 + now.minute
+            in_hours = now.weekday() < 5 and MARKET_OPEN_MIN <= minutes <= MARKET_CLOSE_MIN
+            if AGRADE_WATCH_ENABLED and in_hours:
+                await _agrade_watch_cycle()
+            else:
+                delay = 300
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.error("agrade watch loop error: %s", exc)
+        await asyncio.sleep(delay)
+
+
+async def agrade_status() -> dict:
+    """Snapshot + today's promotions, for /agrade-watch and the backend API."""
+    r = await _get_redis()
+    raw = await r.get(_AGRADE_WATCH_KEY)
+    return {"enabled": AGRADE_WATCH_ENABLED, "cap": AGRADE_MAX_PROMOTIONS,
+            "watch": json.loads(raw) if raw else None,
+            "promotions": await _agrade_promotions(r)}
+
+
+async def agrade_force_promote(symbol: str, force: bool = False) -> dict:
+    """Test hook: run the promotion path for one symbol without waiting for the
+    live triggers. force=True also skips the re-score gate (cap still applies)."""
+    symbol = symbol.upper().strip()
+    r = await _get_redis()
+    if force:
+        return await _agrade_append_promotion(r, symbol, None, forced=True)
+    ok, reason, res = await _agrade_rescore(symbol)
+    if not ok:
+        return {"promoted": False, "reason": reason}
+    return await _agrade_append_promotion(r, symbol, res)
