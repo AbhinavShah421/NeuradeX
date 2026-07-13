@@ -88,13 +88,15 @@ const GradeBadge: React.FC<{ grade?: string; winProb?: number }> = ({ grade, win
 };
 
 // ── Shared stock row used across all watchlist tabs ───────────────────────────
-const WatchlistRow: React.FC<{ w: WatchlistStock; i: number; onClick: () => void; badge?: React.ReactNode; onAutoTrade?: (sym: string) => void; tradingSym?: string | null }> = ({ w, i, onClick, badge, onAutoTrade, tradingSym }) => {
+const WatchlistRow: React.FC<{ w: WatchlistStock; i: number; onClick: () => void; badge?: React.ReactNode; onAutoTrade?: (sym: string) => void; tradingSym?: string | null; onWatch?: (sym: string) => void; watchState?: string }> = ({ w, i, onClick, badge, onAutoTrade, tradingSym, onWatch, watchState }) => {
   const started = tradingSym === w.symbol;
   return (
   <div onClick={onClick}
-    style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 4px', borderTop: i ? '1px solid var(--nd-border)' : 'none', cursor: 'pointer' }}>
-    <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--nd-text-3)', width: 20 }}>#{i + 1}</span>
-    <div style={{ flex: 1, minWidth: 0 }}>
+    // flexWrap lets the controls group drop to its own line on narrow screens
+    // instead of crushing the symbol/price blocks into each other.
+    style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 12, rowGap: 8, padding: '12px 4px', borderTop: i ? '1px solid var(--nd-border)' : 'none', cursor: 'pointer' }}>
+    <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--nd-text-3)', width: 20, flexShrink: 0 }}>#{i + 1}</span>
+    <div style={{ flex: 1, minWidth: 150 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
         <span style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>{w.symbol}</span>
         <GradeBadge grade={w.grade} winProb={w.winProbability} />
@@ -110,24 +112,34 @@ const WatchlistRow: React.FC<{ w: WatchlistStock; i: number; onClick: () => void
         </div>
       )}
     </div>
-    <div style={{ textAlign: 'right', flexShrink: 0 }}>
-      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--nd-text-1)' }}>₹{w.price?.toLocaleString('en-IN')}</div>
-      <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>
-        {w.winProbability != null ? `win ${(w.winProbability * 100).toFixed(0)}%` : `conf ${(w.confidence * 100).toFixed(0)}%`}
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0, marginLeft: 'auto' }}>
+      <div style={{ textAlign: 'right' }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--nd-text-1)', whiteSpace: 'nowrap' }}>₹{w.price?.toLocaleString('en-IN')}</div>
+        <div style={{ fontSize: 11, color: 'var(--nd-text-3)', whiteSpace: 'nowrap' }}>
+          {w.winProbability != null ? `win ${(w.winProbability * 100).toFixed(0)}%` : `conf ${(w.confidence * 100).toFixed(0)}%`}
+        </div>
       </div>
+      <span style={{ fontSize: 11, fontWeight: 700, padding: '3px 9px', borderRadius: 5, background: `${ACTION_BG[w.action]}1a`, color: ACTION_BG[w.action] }}>{w.action}</span>
+      {onWatch && (
+        <button onClick={e => { e.stopPropagation(); if (!watchState) onWatch(w.symbol); }} disabled={!!watchState}
+          title="Add to the live watcher (2nd-level scan) — promoted to paper trading only if it shows live confidence AND re-scores grade A"
+          style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 3, padding: '6px 10px', minHeight: 34, borderRadius: 6, border: `1px solid ${watchState ? '#f59e0b' : 'var(--nd-border)'}`, background: watchState ? 'rgba(245,158,11,0.1)' : 'var(--nd-surface)', color: watchState ? '#f59e0b' : 'var(--nd-text-2)', cursor: watchState ? 'default' : 'pointer', fontSize: 11.5, fontWeight: 600, flexShrink: 0 }}>
+          <span className="material-icons" style={{ fontSize: 13 }}>{watchState === 'promoted' ? 'trending_up' : watchState ? 'check' : 'visibility'}</span>
+          {watchState === 'promoted' ? 'Promoted' : watchState ? 'Watching' : 'Watch'}
+        </button>
+      )}
+      {onAutoTrade && (
+        <button onClick={e => { e.stopPropagation(); onAutoTrade(w.symbol); }} disabled={started}
+          title="Auto paper-trade this stock with the selected hold cap"
+          // minHeight guarantees a real ~34px tap target — this starts a trade,
+          // so it shouldn't be easier to mis-tap than to hit.
+          style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 3, padding: '6px 10px', minHeight: 34, borderRadius: 6, border: `1px solid ${started ? 'var(--nd-green)' : 'var(--nd-border)'}`, background: started ? 'var(--nd-green-50)' : 'var(--nd-surface)', color: started ? 'var(--nd-green)' : 'var(--nd-text-2)', cursor: started ? 'default' : 'pointer', fontSize: 11.5, fontWeight: 600, flexShrink: 0 }}>
+          <span className="material-icons" style={{ fontSize: 13 }}>{started ? 'check' : 'play_arrow'}</span>
+          {started ? 'Started' : 'Auto'}
+        </button>
+      )}
+      <span className="material-icons" style={{ fontSize: 16, color: 'var(--nd-text-3)' }}>chevron_right</span>
     </div>
-    <span style={{ fontSize: 11, fontWeight: 700, padding: '3px 9px', borderRadius: 5, background: `${ACTION_BG[w.action]}1a`, color: ACTION_BG[w.action] }}>{w.action}</span>
-    {onAutoTrade && (
-      <button onClick={e => { e.stopPropagation(); onAutoTrade(w.symbol); }} disabled={started}
-        title="Auto paper-trade this stock with the selected hold cap"
-        // minHeight guarantees a real ~34px tap target — this starts a trade,
-        // so it shouldn't be easier to mis-tap than to hit.
-        style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 3, padding: '6px 10px', minHeight: 34, borderRadius: 6, border: `1px solid ${started ? 'var(--nd-green)' : 'var(--nd-border)'}`, background: started ? 'var(--nd-green-50)' : 'var(--nd-surface)', color: started ? 'var(--nd-green)' : 'var(--nd-text-2)', cursor: started ? 'default' : 'pointer', fontSize: 11.5, fontWeight: 600, flexShrink: 0 }}>
-        <span className="material-icons" style={{ fontSize: 13 }}>{started ? 'check' : 'play_arrow'}</span>
-        {started ? 'Started' : 'Auto'}
-      </button>
-    )}
-    <span className="material-icons" style={{ fontSize: 16, color: 'var(--nd-text-3)' }}>chevron_right</span>
   </div>
   );
 };
@@ -227,6 +239,16 @@ const AiWatchlistTab: React.FC = () => {
       setTimeout(() => setAutoMsg(null), 6000);
     }
   }, [holdCap]);
+
+  // Manually watched symbols (Watch button) — optimistic local set so the
+  // button flips immediately; the scanner's snapshot confirms within a cycle.
+  const [manualWatch, setManualWatch] = useState<Set<string>>(new Set());
+  const addWatch = useCallback(async (sym: string) => {
+    setManualWatch(prev => new Set(prev).add(sym));
+    try { await apiService.addAgradeWatch(sym); } catch {
+      setManualWatch(prev => { const n = new Set(prev); n.delete(sym); return n; });
+    }
+  }, []);
 
   const [viewN, setViewN]   = useState<number>(15);   // how many intraday stocks to display
   const [ranked, setRanked] = useState<WatchlistStock[]>([]);     // full ranked board (top viewN)
@@ -423,24 +445,18 @@ const AiWatchlistTab: React.FC = () => {
               </span>
             ) : null;
 
-            // ── A-grade live-watch badge (intraday only) ────────────────────
+            // ── A-grade live-watch state (intraday only) — shown on the Watch
+            // button itself; no extra badge, it crowds narrow screens.
             const liveStatus = tab === 'intraday'
-              ? (promotedSet.has(w.symbol) ? 'promoted' : watchStatus.get(w.symbol))
+              ? (promotedSet.has(w.symbol) ? 'promoted'
+                 : watchStatus.get(w.symbol) ?? (manualWatch.has(w.symbol) ? 'watching' : undefined))
               : undefined;
-            const liveBadge = liveStatus === 'promoted' ? (
-              <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 8, background: 'rgba(34,197,94,0.15)', color: 'var(--nd-green)', flexShrink: 0 }}>
-                PROMOTED
-              </span>
-            ) : liveStatus ? (
-              <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 8, background: 'rgba(245,158,11,0.15)', color: '#f59e0b', flexShrink: 0 }}>
-                WATCHING
-              </span>
-            ) : null;
 
             return (
               <div key={w.symbol}>
-                <WatchlistRow w={w} i={i} onClick={() => setSel(w)} badge={liveBadge ?? deliveryBadge ?? fnoBadge}
-                  onAutoTrade={tab === 'intraday' ? startAuto : undefined} tradingSym={tradingSym} />
+                <WatchlistRow w={w} i={i} onClick={() => setSel(w)} badge={deliveryBadge ?? fnoBadge}
+                  onAutoTrade={tab === 'intraday' ? startAuto : undefined} tradingSym={tradingSym}
+                  onWatch={tab === 'intraday' ? addWatch : undefined} watchState={liveStatus} />
                 {/* FNO rationale row */}
                 {tab === 'fno' && rec && (
                   <div style={{ fontSize: 10.5, color: 'var(--nd-text-3)', padding: '0 4px 8px 52px', lineHeight: 1.5 }}>

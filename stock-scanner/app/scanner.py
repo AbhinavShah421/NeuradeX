@@ -1688,12 +1688,20 @@ AGRADE_MAX_PROMOTIONS     = int(os.getenv("AGRADE_MAX_PROMOTIONS", "5"))        
 
 _AGRADE_WATCH_KEY    = "ai_engine:agrade_watch"        # live snapshot (UI + restart rehydration)
 _LIVE_PROMOTIONS_KEY = "ai_engine:live_promotions:{}"  # dated list the autopilot trades
+_AGRADE_MANUAL_KEY   = "ai_engine:agrade_watch:manual:{}"  # dated set — Watch button on the dashboard
 _GROWW_SYMBOLS_SET   = "groww:feed:symbols"            # symbols the groww-feed service streams
 _GROWW_LTP_KEY       = "groww:ltp:{}"                  # "<price>:<epoch_ts>", TTL 60s
 _LTP_MAX_AGE_SECS    = 20.0                            # older ticks count as feed-down
 
 _agrade_state: dict = {"date": None, "symbols": {}, "hist": {}}
 _NO_TRIGGERS = {"chg": False, "high": False, "mom": False}
+
+
+def _agrade_new_symbol(now: float, manual: bool = False) -> dict:
+    return {"open_ref": None, "day_high": 0.0, "first_seen": now,
+            "ltp": None, "ts": None, "chg_pct": None, "mom_pct": None,
+            "status": "watching", "cooldown_until": None,
+            "promoted_at": None, "manual": manual, "triggers": dict(_NO_TRIGGERS)}
 
 
 def _payload_fresh(data: dict, max_age_secs: float = 4 * 3600) -> bool:
@@ -1768,7 +1776,8 @@ async def _agrade_rehydrate(r, today: str) -> None:
                 "first_seen": now, "ltp": row.get("ltp"), "ts": None,
                 "chg_pct": row.get("chg_pct"), "mom_pct": None,
                 "status": status, "cooldown_until": None,
-                "promoted_at": row.get("promoted_at"), "triggers": dict(_NO_TRIGGERS),
+                "promoted_at": row.get("promoted_at"), "manual": bool(row.get("manual")),
+                "triggers": dict(_NO_TRIGGERS),
             }
             _agrade_state["hist"][sym] = deque(maxlen=64)
         if _agrade_state["symbols"]:
@@ -1855,10 +1864,20 @@ async def _agrade_watch_cycle() -> None:
     for item in await _agrade_candidates():
         sym = item["symbol"]
         if sym not in st["symbols"] and len(st["symbols"]) < AGRADE_WATCH_MAX_SYMBOLS:
-            st["symbols"][sym] = {"open_ref": None, "day_high": 0.0, "first_seen": now,
-                                  "ltp": None, "ts": None, "chg_pct": None, "mom_pct": None,
-                                  "status": "watching", "cooldown_until": None,
-                                  "promoted_at": None, "triggers": dict(_NO_TRIGGERS)}
+            st["symbols"][sym] = _agrade_new_symbol(now)
+            st["hist"][sym] = deque(maxlen=64)
+
+    # Manually watched names (Watch button on the dashboard) — merged from a
+    # dated Redis set so they survive restarts. Bounded separately from the
+    # auto cap so a full A-grade board can't lock the button out. Promotion
+    # still runs through the exact same triggers + re-score gate.
+    try:
+        manual = await r.smembers(_AGRADE_MANUAL_KEY.format(today))
+    except Exception:
+        manual = set()
+    for sym in sorted(manual):
+        if sym not in st["symbols"] and len(st["symbols"]) < AGRADE_WATCH_MAX_SYMBOLS * 2:
+            st["symbols"][sym] = _agrade_new_symbol(now, manual=True)
             st["hist"][sym] = deque(maxlen=64)
     if not st["symbols"]:
         return
@@ -1923,7 +1942,7 @@ async def _agrade_watch_cycle() -> None:
                 "promotions_today": len(promos), "cap": AGRADE_MAX_PROMOTIONS,
                 "symbols": [{"symbol": sym,
                              **{k: s.get(k) for k in ("ltp", "open_ref", "day_high", "chg_pct",
-                                                      "mom_pct", "status", "promoted_at")},
+                                                      "mom_pct", "status", "promoted_at", "manual")},
                              "triggers": s.get("triggers") or dict(_NO_TRIGGERS)}
                             for sym, s in st["symbols"].items()]}
     try:

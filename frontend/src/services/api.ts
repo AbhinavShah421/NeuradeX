@@ -887,6 +887,10 @@ class ApiService {
     const response = await this.api.get('/api/ai-engine/agrade-watch');
     return response.data;
   }
+  async addAgradeWatch(symbol: string): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/ai-engine/agrade-watch/add', null, { params: { symbol } });
+    return response.data;
+  }
   async patternModelStatus(): Promise<any> {
     const response = await this.api.get('/api/ai-engine/pattern-model/status');
     return response.data;

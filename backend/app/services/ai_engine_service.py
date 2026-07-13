@@ -314,6 +314,31 @@ async def get_agrade_watch():
     return {"status": "success", "data": {"watch": watch, "promotions": promotions}}
 
 
+async def add_agrade_watch(symbol: str):
+    """Manually add a scanned stock to the A-grade live watcher (the Watch
+    button). Writes the dated manual-watch set the scanner merges each cycle,
+    and subscribes the Groww feed right away so ticks start flowing before the
+    scanner's next cycle. Promotion still requires the same triggers +
+    re-score gate as auto-watched names."""
+    from datetime import datetime, timezone, timedelta
+    from app.utils.redis_client import get_redis
+    sym = (symbol or "").upper().strip()
+    if not sym or not all(ch.isalnum() or ch in "-&" for ch in sym):
+        return {"status": "error", "message": "Invalid symbol"}
+    try:
+        ist = timezone(timedelta(hours=5, minutes=30))
+        today = datetime.now(ist).strftime("%Y-%m-%d")
+        r = get_redis()
+        key = f"ai_engine:agrade_watch:manual:{today}"
+        await r.sadd(key, sym)
+        await r.expire(key, 86400 * 2)
+        await r.sadd("groww:feed:symbols", sym)
+        return {"status": "success", "data": {"symbol": sym, "watching": True}}
+    except Exception as exc:
+        logger.warning("agrade manual watch add failed for %s: %s", sym, exc)
+        return {"status": "error", "message": "Could not add to the live watcher"}
+
+
 async def get_ranked(limit: int = 100):
     """The full ranked board of AI-scanned stocks (for the Predictions page),
     each enriched with its latest LLM news-sentiment. `limit` caps how many of the

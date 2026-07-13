@@ -120,6 +120,14 @@ async def get_agrade_watch():
     return await service.get_agrade_watch()
 
 
+@router.post("/agrade-watch/add")
+async def add_agrade_watch(symbol: str):
+    """Manually add a scanned stock to the live watcher (Watch button). The
+    stock joins the 2nd-level scan within one watcher cycle; promotion still
+    requires the same live triggers + grade-A re-score gate."""
+    return await service.add_agrade_watch(symbol)
+
+
 @router.get("/scan-diff")
 async def scan_diff(limit: int = 60):
     """How this scan's ranking differs from the previous completed scan: per-stock
