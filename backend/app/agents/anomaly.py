@@ -49,6 +49,19 @@ class AnomalyDetectorAgent(BaseAgent):
     name = "anomaly"
 
     async def analyze(self, symbol: str, candles: list[dict], context: dict) -> AgentSignal:
+        # Live feeds leave the newest (still-forming) candle's volume at 0 until
+        # the minute seals — and the just-sealed bar's volume is enriched
+        # asynchronously, so at decision time the last 1-2 bars often read 0 even
+        # on liquid symbols. A zero in the volume feature made those bars
+        # guaranteed outliers (scores 9-13 vs ~0.1) and vetoed ~half of all
+        # decisions on 2026-07-13/14. Trim trailing zero-volume bars (bounded, so
+        # a genuinely dead tape still gets scored) and rate the last filled bar.
+        if any((c.get("volume") or 0) for c in candles[-20:]):
+            trimmed = 0
+            while (len(candles) >= 2 and trimmed < 5
+                   and not (candles[-1].get("volume") or 0)):
+                candles = candles[:-1]
+                trimmed += 1
         feats = _features(candles)
         if feats is None:
             return AgentSignal(agent_name=self.name, action="HOLD", confidence=0.3,
