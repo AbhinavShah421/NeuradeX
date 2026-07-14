@@ -90,14 +90,17 @@ TRADE_GATES = {
     # *confident* (>= this), don't override it into a long. Post-trade data shows
     # entry-confidence is strongly anti-predictive — win-rate falls 38% (conf 0.6)
     # → 24% (0.8) → 13% (1.0). The worst losers are confident-HOLD overrides.
+    # score_min: entry-quality threshold on the 0-100 scored gate (2026-07-14).
+    # Full marks ≈ 95-100; one 8-13-pt shortfall (RSI 56, thin net consensus,
+    # price a hair under VWAP) still clears gentle's 78; two shortfalls don't.
     "strict": {"label": "Strict", "require_buy": True,  "min_conf": 0.50, "max_conf": 0.68, "override_ceiling": 0.74,
-               "min_buy": 3, "need_reliable": True, "min_grade": "B",
+               "min_buy": 3, "need_reliable": True, "min_grade": "B", "score_min": 86,
                "desc": "Needs 3+ agents (incl. pattern/sentiment) voting BUY, in the 50-68% confidence sweet-spot, with a B+ pattern. Fewest, highest win-rate trades."},
     "gentle": {"label": "Gentle", "require_buy": False, "min_conf": 0.50, "max_conf": 0.68, "override_ceiling": 0.78,
-               "min_buy": 2, "need_reliable": True, "min_grade": "C",
+               "min_buy": 2, "need_reliable": True, "min_grade": "C", "score_min": 78,
                "desc": "Needs 2+ agents voting BUY including pattern or sentiment (the proven BUY voters), a non-bearish ensemble, and a C+ pattern. Balanced."},
     "loose":  {"label": "Loose",  "require_buy": False, "min_conf": 0.0,  "max_conf": 1.01, "override_ceiling": 1.01,
-               "min_buy": 2, "need_reliable": False, "min_grade": "D", "reliable_single": True,
+               "min_buy": 2, "need_reliable": False, "min_grade": "D", "reliable_single": True, "score_min": 65,
                "desc": "Needs 2 BUY votes OR one high-precision agent; pattern grade not enforced. Most trades — for training volume (lower win-rate)."},
 }
 _gate_cache = {"mode": "", "ts": 0.0}
@@ -574,23 +577,27 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         # So a long needs >=min_buy BUY votes. Only the "loose" (training-volume)
         # gate also allows a single high-precision agent's BUY.
         reliable_single = gate.get("reliable_single", False)
-        if gate["require_buy"]:
-            support_ok = (ens_action == "BUY" and buy_votes >= min_buy)
-            if not support_ok:
-                blocked.append(f"strict: need ensemble BUY with {min_buy}+ votes (got {ens_action}, {buy_votes} BUY)")
-        else:
-            support_ok = (buy_votes >= min_buy or (reliable_single and has_reliable_buy and buy_votes >= 1)) and ens_action != "SELL"
-            if ens_action == "SELL":
-                blocked.append("ensemble is bearish (SELL)")
-            elif not support_ok:
-                blocked.append(f"insufficient BUY consensus: {buy_votes} agents voted BUY (need {min_buy}+)")
-        # Reliable-voter requirement (was declared on the gate but never enforced):
-        # a consensus made only of generic voters (technical/rl/momentum/...) wins
-        # ~15-29% historically; pattern (48%) or sentiment (44%) must co-sign.
-        if need_reliable and support_ok and not has_reliable_buy:
-            support_ok = False
-            blocked.append("no proven BUY voter (pattern/sentiment) co-signed — "
-                           "generic consensus alone historically loses")
+        # ── Scored entry gate (2026-07-14) ────────────────────────────────────
+        # The gate used to be a hard AND of ~13 conditions; each filter was
+        # individually justified but their joint pass-probability collapsed to
+        # ~zero (two full 0-trade days on 07-13/14 while BIOCON rallied +4.5%
+        # through 14 blocked BUY triggers). Genuine risk stops stay HARD vetoes
+        # (hard_block); the quality conditions contribute points to a 0-100
+        # score against gate["score_min"], so ONE marginal shortfall (RSI 56,
+        # thin net consensus) no longer zeroes an otherwise strong setup while
+        # two shortfalls together still block. Weights: consensus 30, reliable
+        # co-sign 10, trend 25, RSI timing 25, ensemble stance 10 (+5 tsig).
+        hard_block = False
+        score = 0.0
+        if gate["require_buy"] and not (ens_action == "BUY" and buy_votes >= min_buy):
+            hard_block = True
+            blocked.append(f"strict: need ensemble BUY with {min_buy}+ votes (got {ens_action}, {buy_votes} BUY)")
+        if ens_action == "SELL":
+            hard_block = True
+            blocked.append("ensemble is bearish (SELL)")
+        if buy_votes == 0:
+            hard_block = True
+            blocked.append("no agent on the long side (0 BUY votes)")
         # ── Panel dissent rules (CF-validated 2026-07-07, n=17 entry bars) ────
         # The gate counted BUY voters but was blind to SELL dissent: CMPDI
         # 09:39 entered 2-BUY-vs-2-SELL with meanrev screaming SELL at 0.84
@@ -598,17 +605,50 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         # >= 2 won 89% (+0.82%) vs 25% (-0.28%) below it; and a reliable agent
         # dissenting at >=0.75 never occurs on winning entries. Small sample —
         # re-audit after a week of live entries.
-        sell_voters_n = sum(1 for a in agents if a.get("action") == "SELL")
+        # Re-audit 2026-07-14 (two 0-trade days): day_structure and meanrev vote
+        # SELL *by construction* exactly where the entry band opens — day_structure
+        # near the day's high, meanrev fading any stretch above the mean — so their
+        # SELLs are a statement about position in range, not directional dissent.
+        # Counting them made "net >= 2" and "RSI 58-70 uptrend" nearly mutually
+        # exclusive (BIOCON 07-14: blocked 2-BUY-vs-3-SELL through a +4.5% rally).
+        # day_structure keeps its own dedicated veto below; meanrev SELL still
+        # matters inside a stretch (it caps the RSI band at 70 anyway).
+        _STRUCTURAL_SELLERS = {"day_structure", "meanrev"}
+        sell_voters_n = sum(1 for a in agents if a.get("action") == "SELL"
+                            and a.get("agent_name") not in _STRUCTURAL_SELLERS)
         net_consensus = buy_votes - sell_voters_n
-        if support_ok and net_consensus < 2:
-            support_ok = False
-            blocked.append(f"panel dissent: net consensus {buy_votes} BUY - {sell_voters_n} SELL "
-                           f"= {net_consensus} (need >= 2) — divided experts historically lose")
+        # Consensus points (max 30): full marks needs min_buy voters AND net
+        # consensus >= 2; a thin net or a sub-min vote count costs points
+        # instead of zeroing the entry outright.
+        if buy_votes >= min_buy:
+            if net_consensus >= 2:
+                score += 30
+            elif net_consensus == 1:
+                score += 22
+                blocked.append(f"thin net consensus: {buy_votes} BUY - {sell_voters_n} SELL = 1 (-8)")
+            else:
+                score += 12
+                blocked.append(f"panel dissent: net consensus {buy_votes} BUY - {sell_voters_n} SELL "
+                               f"= {net_consensus} — divided experts historically lose (-18)")
+        elif reliable_single and has_reliable_buy:
+            score += 14
+            blocked.append(f"single proven-agent BUY (loose gate) (-16)")
+        else:
+            score += 8
+            blocked.append(f"insufficient BUY consensus: {buy_votes} agents voted BUY (need {min_buy}+) (-22)")
+        # Reliable co-sign (max 10): a consensus made only of generic voters
+        # (technical/momentum/...) wins ~15-29% historically; pattern (48%) or
+        # sentiment (44%) co-signing is worth real points.
+        if has_reliable_buy:
+            score += 10
+        else:
+            blocked.append("no proven BUY voter (pattern/sentiment) co-signed (-10)")
         rel_dissent = max((float(a.get("confidence") or 0) for a in agents
                            if a.get("action") == "SELL"
-                           and a.get("agent_name") in _RELIABLE_BUY_AGENTS), default=0.0)
-        if support_ok and rel_dissent >= 0.75:
-            support_ok = False
+                           and a.get("agent_name") in _RELIABLE_BUY_AGENTS
+                           and a.get("agent_name") not in _STRUCTURAL_SELLERS), default=0.0)
+        if rel_dissent >= 0.75:
+            hard_block = True
             blocked.append(f"trusted-expert dissent: a proven agent votes SELL at "
                            f"{rel_dissent:.0%} — not entering against it")
         if tsig == -1:
@@ -625,9 +665,23 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         # opened counter-trend (price below VWAP / SMA5<SMA20) — falling knives.
         # Only enter with the stock's own trend, and never long a bearish market.
         price_now = candle.get("close", 0.0)
-        uptrend = (ind.get("sma5", 0) >= ind.get("sma20", 0)) and (price_now >= ind.get("vwap", price_now))
-        if not uptrend:
-            blocked.append("counter-trend (price below VWAP or SMA5<SMA20) — long only with the trend")
+        vwap_ok = price_now >= ind.get("vwap", price_now)
+        sma_ok  = ind.get("sma5", 0) >= ind.get("sma20", 0)
+        # Trend points (max 25): both legs failing is the falling knife — still
+        # a hard block; one leg a hair off (price grazing VWAP on a pullback,
+        # or a fresh cross not yet reflected in SMA5) just costs points.
+        if not (vwap_ok or sma_ok):
+            hard_block = True
+            blocked.append("counter-trend (price below VWAP and SMA5<SMA20) — falling knife, long only with the trend")
+        else:
+            if vwap_ok:
+                score += 13
+            else:
+                blocked.append("price below VWAP (-13)")
+            if sma_ok:
+                score += 12
+            else:
+                blocked.append("SMA5<SMA20 (-12)")
         # NOTE: no hard broad-market veto. The per-stock uptrend filter above is
         # the real direction gate — a stock in an intraday uptrend is a valid long
         # even on a red market day, and a blanket "market is bearish" block just
@@ -659,19 +713,30 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         # over-volume choice toward the 90% target. The <45 case keeps its own
         # message since it's the extreme of the same failure.
         _RSI_FLOOR = 58
-        good_timing = _RSI_FLOOR <= rsi_now <= 70
-        if rsi_now > 70:
-            blocked.append(f"overbought (RSI {rsi_now:.0f}>70) — wait for a pullback")
-        elif rsi_now < 45:
+        # RSI timing points (max 25), graded by the CF win-rate ladder above:
+        # the [58,70] band earns full marks, 52-58 partial (64% zone shading
+        # into coin-flip), 45-52 nearly nothing, >70 a token (unproven above
+        # the band). <45 stays a HARD block (0/8 on CF labels). A falling RSI
+        # costs 13 — reaching the band from above is a rollover, not strength.
+        if rsi_now < 45:
+            hard_block = True
             blocked.append(f"failing bounce (RSI {rsi_now:.0f}<45) — dip entries in "
                            f"uptrends lost 8/8 on CF labels; wait for strength")
-        elif rsi_now < _RSI_FLOOR:
-            blocked.append(f"insufficient strength (RSI {rsi_now:.0f}<{_RSI_FLOOR}) — "
-                           f"the 45-58 zone wins ~55-60% (coin-flip); wait for RSI>={_RSI_FLOOR}")
-        if good_timing and rsi_falling:
-            good_timing = False
-            blocked.append(f"RSI falling into the band ({rsi_prev:.0f}→{rsi_now:.0f}) — "
-                           f"spike rollover, not strength; wait for rising RSI")
+        else:
+            if _RSI_FLOOR <= rsi_now <= 70:
+                rsi_pts = 25
+            elif rsi_now < _RSI_FLOOR:
+                rsi_pts = 14 if rsi_now >= 52 else 5
+                blocked.append(f"insufficient strength (RSI {rsi_now:.0f}<{_RSI_FLOOR}) — "
+                               f"the 45-58 zone wins ~55-60% (coin-flip) (-{25 - rsi_pts})")
+            else:
+                rsi_pts = 5
+                blocked.append(f"overbought (RSI {rsi_now:.0f}>70) — extended past the proven band (-20)")
+            if rsi_falling:
+                rsi_pts = max(0, rsi_pts - 13)
+                blocked.append(f"RSI falling ({rsi_prev:.0f}→{rsi_now:.0f}) — "
+                               f"spike rollover, not strength (-13)")
+            score += rsi_pts
         # The confidence band only describes a BUY decision. When the ensemble's
         # winning action is HOLD (gentle/loose entering on BUY support), its
         # confidence is the HOLD confidence — irrelevant to the BUY, so skip it.
@@ -711,11 +776,21 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         ens_veto = getattr(decision, "veto", "")
         if ens_veto:
             blocked.append(f"ensemble veto honored — {ens_veto}")
+        # Ensemble stance points (max 10) + timing-trigger bonus (5, capped).
+        if ens_action == "BUY":
+            score += 10
+        elif ens_action == "HOLD":
+            score += 5
+        if tsig == 1:
+            score = min(100.0, score + 5)
         # `throttle is None` term: the cold-streak throttle used to be appended to
         # `blocked` only and never gated `enter` — CGCL entered at a 14% rolling
         # win-rate on 2026-07-10 (the very symbol the throttle was written for)
         # and took the day's biggest loss.
-        enter = (tsig != -1 and support_ok and conf_ok and uptrend and good_timing
+        score_min = gate.get("score_min", 78)
+        if not hard_block and score < score_min:
+            blocked.append(f"entry score {score:.0f} < {score_min} ({gate['label']} gate)")
+        enter = (not hard_block and score >= score_min and tsig != -1 and conf_ok
                  and not confident_override and not ens_veto and throttle is None)
         # ── Post-loss cooldown ────────────────────────────────────────────────
         # After a losing exit, stay out for _LOSS_COOLDOWN_MIN minutes instead of
@@ -795,7 +870,8 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
                 logger.debug("pattern gate skipped: %s", exc)
         action = "BUY" if enter else "HOLD"
         if action == "BUY":
-            reason = f"Entry: {buy_votes} agents voted BUY (ensemble {ens_action} {conf:.0%}). {reason}".strip()
+            reason = (f"Entry [score {score:.0f}/{gate.get('score_min', 78)}]: {buy_votes} agents voted BUY "
+                      f"(ensemble {ens_action} {conf:.0%}). {reason}").strip()
         else:
             reason = f"No entry [{gate['label']} gate] — " + "; ".join(blocked) + "."
     else:  # LONG
