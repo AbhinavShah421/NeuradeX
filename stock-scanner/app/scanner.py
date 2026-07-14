@@ -74,6 +74,18 @@ COMMITTED_MAX         = int(os.getenv("SCAN_COMMITTED_MAX", "3"))
 COMMITTED_HORIZON     = int(os.getenv("SCAN_COMMITTED_HORIZON", "3"))
 COMMITTED_TARGET_PCT  = float(os.getenv("SCAN_COMMITTED_TARGET_PCT", "1.0"))
 _COMMITTED_DONE_KEY   = "ai_engine:committed_eval_done:{}"
+_HC_STALE_KEY         = "ai_engine:hc_stale_since"   # ISO timestamp of the first 0-qualified sweep
+_HC_STALE_EASE_H      = float(os.getenv("SCAN_HC_STALE_EASE_HOURS", "24"))
+# Daily-candle lookback for _analyze()/_fetch_daily(). Must comfortably clear
+# 100 TRADING days so SMA100 (the `long_trend` confirmation _is_committed()
+# hard-requires) is actually computable — 140 CALENDAR days nets only
+# ~95-100 trading bars after weekends/NSE holidays, which left `long_trend`
+# at None for every single candidate (verified: 200/200 grade-A BUY picks on
+# 2026-07-14). That silently passed before 07-08 (the gate only rejected a
+# *confirmed* downtrend), then became a hard, universal reject after the
+# loophole was closed — starving the committed tier ever since, independent
+# of the adaptive wp_floor/min_factors.
+DAILY_LOOKBACK_DAYS   = int(os.getenv("SCAN_DAILY_LOOKBACK_DAYS", "200"))
 
 
 async def get_auto_scan() -> bool:
@@ -140,6 +152,47 @@ async def _load_hc_params() -> dict:
     except Exception:
         pass
     return {"min_factors": HC_MIN_FACTORS, "wp_floor": HC_WP_FLOOR}
+
+
+async def _ease_hc_if_stuck(qualified_now: int) -> None:
+    """Deadlock guard for the high-conviction bar.
+
+    `_tune_hc_params`'s own "ease off once nothing qualifies" branch only runs
+    from *inside* the daily committed-grading pass — but grading itself
+    early-returns before reaching that call whenever there's nothing to grade
+    (no committed picks that day). So once the bar gets tight enough that zero
+    picks clear it, the escape hatch never fires: zero qualified -> nothing to
+    grade -> tuner never invoked -> bar stays exactly as tight forever. That
+    locked the tier at 0 qualified/day for a week straight (2026-07-08 on),
+    invisible until the Dashboard's high-conviction line simply stopped adding
+    points.
+
+    This runs on every live sweep, independent of grading, and eases the same
+    knobs by the same step `_tune_hc_params` would use — but only once per
+    `_HC_STALE_EASE_H` hours of continuous zero-qualified sweeps, so it can't
+    thrash against same-day tightening from a real grading miss.
+    """
+    try:
+        r = await _get_redis()
+        if qualified_now > 0:
+            await r.delete(_HC_STALE_KEY)
+            return
+        raw = await r.get(_HC_STALE_KEY)
+        now = _ist_now()
+        if not raw:
+            await r.set(_HC_STALE_KEY, now.isoformat(), ex=86400 * 30)
+            return
+        stuck_since = datetime.fromisoformat(raw)
+        if (now - stuck_since).total_seconds() < _HC_STALE_EASE_H * 3600:
+            return
+        p = await _load_hc_params()
+        p["wp_floor"] = round(max(0.60, p["wp_floor"] - 0.02), 3)
+        p["min_factors"] = max(4, p["min_factors"] - (1 if p["min_factors"] > 4 else 0))
+        await r.set(_HC_PARAMS_KEY, json.dumps(p), ex=86400 * 120)
+        await r.set(_HC_STALE_KEY, now.isoformat(), ex=86400 * 30)   # restart the clock for the next step
+        logger.info("high-conviction bar eased after %.0fh stuck at 0 qualified: %s", _HC_STALE_EASE_H, p)
+    except Exception:
+        logger.debug("hc stale-ease check failed", exc_info=True)
 
 
 # Pattern-recognition model gate — the scanner pulls the backend model's learned
@@ -714,7 +767,7 @@ async def _fetch_chart(client: httpx.AsyncClient, ysym: str, days: int = 140) ->
 
 
 async def _fetch_daily(client: httpx.AsyncClient, symbol: str) -> list[dict]:
-    return await _fetch_chart(client, f"{symbol}.NS")
+    return await _fetch_chart(client, f"{symbol}.NS", days=DAILY_LOOKBACK_DAYS)
 
 
 # ── Scan universe ─────────────────────────────────────────────────────────────
@@ -1027,6 +1080,7 @@ async def scan_once(phase: str = "intraday") -> dict:
         c["committed"] = True
     committed_list = [c for c in candidates if c["committed"]]
     logger.info("committed tier: %d qualified, top %d committed", len(qualified), len(committed_list))
+    await _ease_hc_if_stuck(len(qualified))
 
     # Watchlist AFTER conviction tagging (was before — an ordering bug that left
     # the "most-convicted" board blind to the committed flag and signal counts
