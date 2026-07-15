@@ -483,6 +483,11 @@ async def _finalize_session(s: dict) -> None:
         logger.warning("_finalize_session failed: %s", exc)
 
 
+_WARMUP_BARS = 25           # min bars before ANY entry — RSI(14)/SMA20 return neutral
+                            # placeholders below this and the gate scored them as real
+                            # (2026-07-15: two first-15-min entries on default RSI 50.0)
+_MEM_VOTE_MIN_CASES = 3     # memory BUY counts toward consensus only with this many
+                            # similar cases behind it (its own ensemble gate arms at 8)
 _PAPER_DROP_CANDLES = 6     # N consecutive lower closes = drop pattern (3 was triggering on normal chop)
 _LOSS_COOLDOWN_MIN  = 10    # after a losing exit, block new entries for this many minutes
                             # (stops the system re-scalping the same chop range — the
@@ -564,6 +569,19 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         # Genuine BUY support: which agents independently voted BUY, and whether
         # any of them is a high-precision agent (sentiment/pattern/memory/gbm).
         buy_voters = {a.get("agent_name") for a in agents if a.get("action") == "BUY"}
+        # A memory BUY with (almost) no precedent behind it is not evidence.
+        # 2026-07-15 PURVA (-0.95%): the 2-voter consensus was sentiment (a
+        # sticky 90-min news vote that backed all three of the day's entries)
+        # plus memory reporting "cold-start: only 1 BUY cases — gate inactive".
+        # If memory's recall is too thin to arm its own ensemble gate, it is
+        # too thin to be the deciding consensus voter.
+        if "memory" in buy_voters:
+            _mem = next((a for a in agents if a.get("agent_name") == "memory"), None)
+            _mem_n = int(((_mem or {}).get("indicators") or {}).get("n_BUY") or 0)
+            if _mem_n < _MEM_VOTE_MIN_CASES:
+                buy_voters = buy_voters - {"memory"}
+                blocked.append(f"memory BUY not counted — only {_mem_n} similar case(s) "
+                               f"(need {_MEM_VOTE_MIN_CASES}+); cold-start recall is not consensus")
         buy_votes  = len(buy_voters)
         has_reliable_buy = bool(buy_voters & _RELIABLE_BUY_AGENTS)
         min_buy = gate.get("min_buy", 2)
@@ -589,6 +607,19 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         # co-sign 10, trend 25, RSI timing 25, ensemble stance 10 (+5 tsig).
         hard_block = False
         score = 0.0
+        # ── Indicator warm-up (hard) ─────────────────────────────────────────
+        # RSI(14)/SMA20 need real history; below _WARMUP_BARS the indicator
+        # helpers silently return neutral defaults (RSI reads exactly 50.0) and
+        # the gate scores those placeholders as if they were measured.
+        # 2026-07-15: GOLDIAM entered on 14 bars and SONATSOFTW on 10 — both
+        # with default RSI 50.0 and SMA20 averaged over 10-14 bars, in the
+        # day's choppiest half hour; one lost, one scratched, and all three of
+        # the day's trades were first-30-minutes entries. No measurable
+        # indicators, no entry.
+        if len(window) < _WARMUP_BARS:
+            hard_block = True
+            blocked.append(f"indicator warm-up: {len(window)} bars (need {_WARMUP_BARS}+) — "
+                           f"RSI/SMA20 are placeholders this early")
         if gate["require_buy"] and not (ens_action == "BUY" and buy_votes >= min_buy):
             hard_block = True
             blocked.append(f"strict: need ensemble BUY with {min_buy}+ votes (got {ens_action}, {buy_votes} BUY)")

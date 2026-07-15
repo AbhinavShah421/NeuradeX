@@ -1799,6 +1799,11 @@ AGRADE_TRIG_MOM_MIN_PCT   = float(os.getenv("AGRADE_TRIG_MOM_MIN_PCT", "0.15")) 
 AGRADE_WATCH_WARMUP_SECS  = int(os.getenv("AGRADE_WATCH_WARMUP_SECS", "600"))      # observe before a symbol may trigger
 AGRADE_RESCORE_COOLDOWN   = int(os.getenv("AGRADE_RESCORE_COOLDOWN", "900"))       # retry backoff after a failed re-score
 AGRADE_MAX_PROMOTIONS     = int(os.getenv("AGRADE_MAX_PROMOTIONS", "5"))           # daily promotion cap
+# Last minute-of-day a promotion is allowed. The backend blocks new paper
+# ENTRIES after ~13:00 IST, so promoting later just creates spectator sessions
+# (2026-07-15: six promotions at 12:26-12:47 got 13-34 min of entry window,
+# never traded, and polled until close). 12:30 leaves a real 30-min window.
+AGRADE_PROMOTE_LAST_MIN   = int(os.getenv("AGRADE_PROMOTE_LAST_MIN", str(12 * 60 + 30)))
 
 _AGRADE_WATCH_KEY    = "ai_engine:agrade_watch"        # live snapshot (UI + restart rehydration)
 _LIVE_PROMOTIONS_KEY = "ai_engine:live_promotions:{}"  # dated list the autopilot trades
@@ -1928,6 +1933,11 @@ async def _agrade_append_promotion(r, symbol: str, res: dict | None, forced: boo
         return {"promoted": False, "reason": "already promoted today"}
     if len(promos) >= AGRADE_MAX_PROMOTIONS:
         return {"promoted": False, "reason": f"daily cap ({AGRADE_MAX_PROMOTIONS}) reached"}
+    _now = _ist_now()
+    if not forced and (_now.hour * 60 + _now.minute) > AGRADE_PROMOTE_LAST_MIN:
+        return {"promoted": False,
+                "reason": f"past {AGRADE_PROMOTE_LAST_MIN // 60:02d}:{AGRADE_PROMOTE_LAST_MIN % 60:02d} — "
+                          f"too little entry window left before the paper no-entry cutoff"}
     s = _agrade_state["symbols"].get(symbol) or {}
     entry = {"symbol": symbol, "promoted_at": _ist_now().isoformat(),
              "ltp": s.get("ltp"), "chg_pct": s.get("chg_pct"),

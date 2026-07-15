@@ -77,6 +77,13 @@ _BT_UNIVERSE: list[str] = [
 
 MARKET_OPEN_MIN  = 9 * 60 + 15
 MARKET_CLOSE_MIN = 15 * 60 + 30
+# The backend blocks new paper ENTRIES after ~13:00 IST (its "auto" no-entry
+# cutoff), so a session opened shortly before that is a spectator for the rest
+# of the day. 2026-07-15: six A-grade watcher promotions landed 12:26-12:47,
+# got 13-34 minutes of permitted entry time, took zero trades, and then polled
+# uselessly until close. Don't open a session that can't realistically trade.
+PAPER_ENTRY_CUTOFF_MIN = int(os.getenv("AUTOPILOT_ENTRY_CUTOFF_MIN", str(13 * 60)))
+MIN_ENTRY_WINDOW_MIN   = int(os.getenv("AUTOPILOT_MIN_ENTRY_WINDOW_MIN", "30"))
 
 # Backtest only runs *outside* the paper-trading window so the agents focus
 # entirely on live paper trading during market hours. It is allowed before the
@@ -465,6 +472,13 @@ async def _daily_pnl_pct() -> float:
 
 async def _do_paper_tick() -> None:
     if not _market_open():
+        return
+
+    # No new sessions once too little of the entry window remains — the backend
+    # refuses entries after its cutoff anyway, so a late-started session can
+    # only burn decisions without ever being allowed to trade.
+    _m = _now_ist().hour * 60 + _now_ist().minute
+    if _m > PAPER_ENTRY_CUTOFF_MIN - MIN_ENTRY_WINDOW_MIN:
         return
 
     # Daily loss circuit-breaker: halt if losses exceed limit

@@ -60,7 +60,7 @@ THIN_NET = [  # 2 BUY - 1 non-structural SELL = net 1 → consensus 22
 ]
 
 
-def _run(monkeypatch, agents, ind, ens_action="HOLD", conf=0.60, veto=""):
+def _run(monkeypatch, agents, ind, ens_action="HOLD", conf=0.60, veto="", bars=30):
     decision = SimpleNamespace(action=ens_action, confidence=conf, reasoning="test",
                                veto=veto, vote_mode="directional",
                                prediction_id="pid-test")
@@ -85,7 +85,7 @@ def _run(monkeypatch, agents, ind, ens_action="HOLD", conf=0.60, veto=""):
                         lambda: (_ for _ in ()).throw(RuntimeError("no pattern engine")))
 
     s = _session()
-    asyncio.run(svc._step(s, _window(), force_close=False))
+    asyncio.run(svc._step(s, _window(bars), force_close=False))
     return s
 
 
@@ -176,3 +176,38 @@ def test_ensemble_veto_is_hard_block(monkeypatch):
     s = _run(monkeypatch, BUY3, UPTREND_IND, veto="anomaly veto: test")
     assert s["position"]["status"] == "NONE"
     assert "ensemble veto honored" in s["last_decision"]["reason"]
+
+
+def test_warmup_blocks_early_entries(monkeypatch):
+    # Below _WARMUP_BARS the indicator helpers return neutral placeholders
+    # (RSI exactly 50.0) — a textbook-looking setup on 15 bars must NOT enter
+    # (2026-07-15: two first-15-min entries fired on default indicators).
+    s = _run(monkeypatch, BUY3, UPTREND_IND, bars=15)
+    assert s["position"]["status"] == "NONE"
+    assert "indicator warm-up" in s["last_decision"]["reason"]
+
+
+def test_memory_cold_start_vote_not_counted(monkeypatch):
+    # sentiment + a memory BUY backed by a single similar case is not a real
+    # 2-voter consensus (2026-07-15 PURVA, -0.95%).
+    agents = [
+        {"agent_name": "sentiment", "action": "BUY", "confidence": 0.64},
+        {"agent_name": "memory", "action": "BUY", "confidence": 0.79,
+         "indicators": {"n_BUY": 1}},
+        {"agent_name": "technical", "action": "HOLD", "confidence": 0.50},
+    ]
+    s = _run(monkeypatch, agents, UPTREND_IND)
+    assert s["position"]["status"] == "NONE"
+    assert "memory BUY not counted" in s["last_decision"]["reason"]
+
+
+def test_memory_vote_with_real_precedent_counts(monkeypatch):
+    # The same consensus with memory recalling plenty of cases is legitimate.
+    agents = [
+        {"agent_name": "sentiment", "action": "BUY", "confidence": 0.64},
+        {"agent_name": "memory", "action": "BUY", "confidence": 0.79,
+         "indicators": {"n_BUY": 12, "wr_BUY": 0.62}},
+        {"agent_name": "technical", "action": "HOLD", "confidence": 0.50},
+    ]
+    s = _run(monkeypatch, agents, UPTREND_IND)
+    assert s["position"]["status"] == "LONG"
