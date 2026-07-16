@@ -201,6 +201,22 @@ def test_memory_cold_start_vote_not_counted(monkeypatch):
     assert "memory BUY not counted" in s["last_decision"]["reason"]
 
 
+def test_day_structure_buy_not_counted_as_consensus(monkeypatch):
+    # day_structure's BUY is a range-position statement, not directional
+    # conviction — sentiment + day_structure alone is a 1-voter consensus
+    # (2026-07-16 BANKINDIA, -0.25%: entered on exactly this pair with rl
+    # voting SELL).
+    agents = [
+        {"agent_name": "sentiment", "action": "BUY", "confidence": 0.64},
+        {"agent_name": "day_structure", "action": "BUY", "confidence": 0.70,
+         "indicators": {}},
+        {"agent_name": "technical", "action": "HOLD", "confidence": 0.50},
+    ]
+    s = _run(monkeypatch, agents, UPTREND_IND)
+    assert s["position"]["status"] == "NONE"
+    assert "insufficient BUY consensus" in s["last_decision"]["reason"]
+
+
 def test_memory_vote_with_real_precedent_counts(monkeypatch):
     # The same consensus with memory recalling plenty of cases is legitimate.
     agents = [

@@ -42,6 +42,18 @@ RESYNC_SECS   = 20.0    # how often to pick up new symbols / token changes
 # only real fix is to not let them accumulate in-process: bail out and let
 # Docker (`restart: unless-stopped`) hand us a clean interpreter.
 MAX_INIT_FAILS = 3
+# Staleness watchdog. 2026-07-16 11:31:08 IST: the NATS socket died mid-session
+# ("nats: unexpected EOF") and the SDK's internal reconnect failed every 4s for
+# the REST OF THE DAY (its socket JWT had gone stale; only a new GrowwFeed()
+# mints a fresh one). get_ltp() kept returning the last cached prices and this
+# loop kept re-publishing them with a FRESH timestamp — so every downstream
+# freshness check passed while all 275 symbols sat frozen for 4 hours (one
+# paper exit executed on a phantom price; the whole afternoon's sessions saw
+# flat candles). Detect it the only way that works: during market hours a
+# 275-symbol subscription MUST show some price change — if nothing moves for
+# STALE_EXIT_SECS, the socket is dead regardless of what get_ltp() claims, so
+# exit and let Docker restart us (a fresh process mints a fresh socket token).
+STALE_EXIT_SECS = float(os.getenv("FEED_STALE_EXIT_SECS", "180"))
 
 _r = redis.from_url(REDIS_URL, decode_responses=True)
 
@@ -51,6 +63,8 @@ _token = None
 _tok2sym: dict[str, str] = {}     # exchange_token -> SYMBOL
 _subscribed: set[str] = set()
 _logged_shape = False
+_last_px: dict[str, float] = {}   # token -> last published price (watchdog)
+_last_change = time.time()        # last time ANY published price changed
 
 
 def _get_token() -> str | None:
@@ -129,7 +143,7 @@ def _extract_prices(node, out: dict) -> None:
 
 
 def _publish_ticks() -> int:
-    global _logged_shape
+    global _logged_shape, _last_change
     if _feed is None:
         return 0
     try:
@@ -147,12 +161,26 @@ def _publish_ticks() -> int:
         sym = _tok2sym.get(tok)
         if not sym:
             continue
+        if _last_px.get(tok) != px:
+            _last_px[tok] = px
+            _last_change = now
         try:
             _r.set(LTP_PREFIX + sym, f"{px}:{now}", ex=60)
             written += 1
         except Exception:
             pass
     return written
+
+
+def _market_hours_ist() -> bool:
+    """NSE trading window with a small margin (09:20–15:25 IST, Mon–Fri) —
+    the only period the staleness watchdog may fire (outside it, frozen
+    prices are legitimate)."""
+    t = time.gmtime(time.time() + 5.5 * 3600)
+    if t.tm_wday >= 5:
+        return False
+    m = t.tm_hour * 60 + t.tm_min
+    return (9 * 60 + 20) <= m <= (15 * 60 + 25)
 
 
 def main() -> None:
@@ -186,6 +214,14 @@ def main() -> None:
                     _subscribe(new)
 
             _publish_ticks()
+
+            # Staleness watchdog (see STALE_EXIT_SECS comment).
+            if (_subscribed and _market_hours_ist()
+                    and now - _last_change > STALE_EXIT_SECS):
+                log.warning("no price change across %d symbols for %.0fs during market "
+                            "hours — socket presumed dead, exiting for a clean restart",
+                            len(_subscribed), now - _last_change)
+                sys.exit(2)
         except Exception as exc:
             log.warning("loop error: %s", exc)
         time.sleep(POLL_SECS)

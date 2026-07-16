@@ -568,7 +568,18 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         blocked: list[str] = []
         # Genuine BUY support: which agents independently voted BUY, and whether
         # any of them is a high-precision agent (sentiment/pattern/memory/gbm).
-        buy_voters = {a.get("agent_name") for a in agents if a.get("action") == "BUY"}
+        # day_structure's vote is a position-in-range statement, not directional
+        # conviction — its SELLs were excluded from panel dissent on 2026-07-14,
+        # and counting its BUYs as consensus was the same error in mirror:
+        # 2026-07-16 BANKINDIA (-0.25%) entered on sentiment+day_structure — a
+        # news vote plus a range-position vote, with no price-trend agent
+        # agreeing and rl actively voting SELL. It keeps its dedicated veto and
+        # its ensemble weight; it just isn't a consensus vote in either
+        # direction. (meanrev BUY still counts — dip-buying precision measured
+        # 60% on the 07-07 forward audit; only its fade-the-rip SELL is
+        # structural.)
+        buy_voters = {a.get("agent_name") for a in agents
+                      if a.get("action") == "BUY" and a.get("agent_name") != "day_structure"}
         # A memory BUY with (almost) no precedent behind it is not evidence.
         # 2026-07-15 PURVA (-0.95%): the 2-voter consensus was sentiment (a
         # sticky 90-min news vote that backed all three of the day's entries)
