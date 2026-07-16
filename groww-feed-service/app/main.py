@@ -13,6 +13,7 @@ Everything is best-effort: on any error it backs off and retries; it never needs
 to be up for trading to work (the backend falls back to REST/Yahoo).
 """
 import os
+import sys
 import time
 import logging
 
@@ -29,6 +30,18 @@ EXCHANGE      = "NSE"
 SEGMENT       = "CASH"
 POLL_SECS     = 1.0
 RESYNC_SECS   = 20.0    # how often to pick up new symbols / token changes
+# growwapi.GrowwFeed._key() mints a brand-new random socket token on every call,
+# so its CLASS-LEVEL `_nats_clients` cache (keyed on that token) never gets a
+# repeat key and never evicts old entries — and NatsClient has no close()/
+# disconnect(), each one also leaking a background reconnect thread. Every
+# failed _init() here constructs a fresh GrowwFeed(), so a stuck token (or any
+# other persistent failure) piles these up forever: observed 2026-07-14 to
+# 2026-07-16, ~10s retry cadence, ~150MB RSS and eventually "maximum recursion
+# depth exceeded" on construction (never recovered — 10k+ leaked clients/
+# threads in one process). There is no public hook to tear these down, so the
+# only real fix is to not let them accumulate in-process: bail out and let
+# Docker (`restart: unless-stopped`) hand us a clean interpreter.
+MAX_INIT_FAILS = 3
 
 _r = redis.from_url(REDIS_URL, decode_responses=True)
 
@@ -145,6 +158,7 @@ def _publish_ticks() -> int:
 def main() -> None:
     log.info("groww-feed-service starting; redis=%s", REDIS_URL)
     last_resync = 0.0
+    init_fails = 0
     while True:
         try:
             token = _get_token()
@@ -154,8 +168,14 @@ def main() -> None:
                 continue
             if token != _token or _feed is None:
                 if not _init(token):
+                    init_fails += 1
+                    if init_fails >= MAX_INIT_FAILS:
+                        log.warning("init failed %d times in a row — exiting so Docker restarts "
+                                    "us with a clean process (see MAX_INIT_FAILS comment)", init_fails)
+                        sys.exit(1)
                     time.sleep(10)
                     continue
+                init_fails = 0
 
             now = time.time()
             if now - last_resync >= RESYNC_SECS:

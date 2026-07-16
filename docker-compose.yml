@@ -15,7 +15,12 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./scripts/init_timescale.sql:/docker-entrypoint-initdb.d/init_timescale.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U stock_user"]
+      # -d is required: pg_isready defaults the target database to the
+      # username when omitted, so this logged a harmless but noisy
+      # FATAL "database \"stock_user\" does not exist" every 10s for 3+ days
+      # (pg_isready still reports healthy on that response — nothing was
+      # actually broken, just ~15k junk log lines).
+      test: ["CMD-SHELL", "pg_isready -U stock_user -d stock_prediction_db"]
       interval: 10s
       timeout: 5s
       retries: 5
