@@ -525,7 +525,21 @@ def _grade_from_winprob(win_probability: float, action: str, fit: bool) -> str:
     return "D"
 
 
-def _analyze(candles: list[dict], regime: int = 0, calib: dict | None = None) -> dict | None:
+async def _load_factor_cal() -> dict:
+    """Learned per-factor win-probability deltas from the A-grade day-end loop.
+    Returns {} until evaluate_agrades() has accumulated enough graded days."""
+    try:
+        r = await _get_redis()
+        raw = await r.get(_AGRADE_CAL_KEY)
+        if raw:
+            return json.loads(raw).get("deltas") or {}
+    except Exception:
+        pass
+    return {}
+
+
+def _analyze(candles: list[dict], regime: int = 0, calib: dict | None = None,
+             fcal: dict | None = None) -> dict | None:
     if len(candles) < 35:
         return None
     opens  = [c["o"] for c in candles]
@@ -639,6 +653,19 @@ def _analyze(candles: list[dict], regime: int = 0, calib: dict | None = None) ->
                 "volume": 0.12, "regime": 0.10, "rsi": 0.06, "tradability": 0.10}
     align = sum(confirmations[k] * w for k, w in _WEIGHTS.items())   # 0..1
     win_probability = round(min(0.95, max(0.05, align * mult)), 3)
+    # ── Learned A-grade factor calibration (day-end learning loop) ────────────
+    # evaluate_agrades() grades every published A-grade after the close and
+    # maintains a per-factor win-rate EMA over OUR OWN outcomes. Factors whose
+    # confirmation actually discriminated winners from losers earn a positive
+    # delta; factors that confirmed on losers as often as winners go negative.
+    # Applying the deltas here moves borderline names across the A/B line in
+    # the direction the realised evidence points — the numeric half of the
+    # "learn from yesterday's mistakes" loop.
+    if fcal and action == "BUY":
+        _adj = sum(float(fcal.get(k, 0.0)) for k in _LEARN_FACTORS
+                   if confirmations.get(k, 0) >= 1.0)
+        if _adj:
+            win_probability = round(min(0.95, max(0.05, win_probability + _adj)), 3)
     grade = _grade_from_winprob(win_probability, action, fit)
     confirmed_factors = sum(1 for k in ("trend", "momentum", "macd", "volume", "regime", "rsi")
                             if confirmations[k] >= 1.0)
@@ -962,6 +989,7 @@ async def scan_once(phase: str = "intraday") -> dict:
         logger.debug("ranked prev snapshot skipped: %s", exc)
 
     calib = await _load_calibration()
+    fcal = await _load_factor_cal()      # learned A-grade factor deltas (day-end loop)
     await _load_pattern_weights()        # pull the pattern model's weights for local scoring
     wl_max = await _watchlist_max()      # runtime-configurable intraday watchlist size
     universe = await _load_universe()
@@ -996,7 +1024,7 @@ async def scan_once(phase: str = "intraday") -> dict:
         for sym, name in universe.items():
             candles = await _fetch_daily(client, sym)
             scanned += 1
-            res = _analyze(candles, regime=regime, calib=calib)
+            res = _analyze(candles, regime=regime, calib=calib, fcal=fcal)
             if res:
                 base = {"symbol": sym, "name": name, "source": "scanner", **res}
                 if res["intraday_fit"]:
@@ -1142,6 +1170,31 @@ async def scan_once(phase: str = "intraday") -> dict:
             # 14-day retention so delivery picks survive long enough to be graded
             # on their multi-day forward return.
             await r.set(f"{_PREMARKET_KEY}:{now.strftime('%Y-%m-%d')}", json.dumps(payload), ex=86400 * 14)
+            # A-grade learning snapshot: EVERY A-grade BUY (not just the top-10
+            # watchlist) with its full factor evidence, plus the grade map of all
+            # fit candidates — evaluate_agrades() grades both after the close.
+            try:
+                agrades = [{"symbol": c["symbol"], "price": c.get("price"),
+                            "win_probability": c.get("win_probability"),
+                            "signal_score": c.get("signal_score"),
+                            "confidence": c.get("confidence"),
+                            "confirmations": c.get("confirmations"),
+                            "confirmed_factors": c.get("confirmed_factors"),
+                            "long_trend": c.get("long_trend"),
+                            "pattern_p_up": c.get("pattern_p_up"),
+                            "catalyst_boost": c.get("catalyst_boost")}
+                           for c in candidates if c.get("grade") == "A" and c.get("action") == "BUY"]
+                graded_map = {c["symbol"]: {"grade": c.get("grade"), "action": c.get("action"),
+                                            "win_probability": c.get("win_probability"),
+                                            "confirmations": c.get("confirmations")}
+                              for c in candidates}
+                await r.set(_AGRADE_SNAP_KEY.format(now.strftime("%Y-%m-%d")),
+                            json.dumps({"date": now.strftime("%Y-%m-%d"), "agrades": agrades,
+                                        "graded": graded_map, "factor_cal": fcal}), ex=86400 * 7)
+                logger.info("agrade snapshot %s: %d A-grade BUYs of %d candidates",
+                            now.strftime("%Y-%m-%d"), len(agrades), len(candidates))
+            except Exception as exc:
+                logger.debug("agrade snapshot write failed: %s", exc)
     except Exception as exc:
         logger.warning("watchlist write failed: %s", exc)
 
@@ -1489,6 +1542,276 @@ async def grade_due_committed() -> None:
             logger.debug("committed grade %s skipped: %s", d, exc)
 
 
+# ── A-grade day-end learning loop ─────────────────────────────────────────────
+
+async def _fetch_day_gainers(client: httpx.AsyncClient, count: int = 25) -> list[dict]:
+    """Best-effort market-wide top gainers (Yahoo predefined screener, region IN).
+    Used to spot big movers the scan never even ranked; returns [] on any failure
+    (the ranked-board miss analysis below doesn't depend on it)."""
+    try:
+        r = await client.get(
+            "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved",
+            params={"scrIds": "day_gainers", "count": count, "region": "IN", "lang": "en-IN"},
+            headers=_UA, timeout=12.0)
+        r.raise_for_status()
+        quotes = (((r.json().get("finance") or {}).get("result") or [{}])[0].get("quotes")) or []
+        out = []
+        for q in quotes:
+            sym = str(q.get("symbol") or "")
+            if not sym.endswith(".NS"):
+                continue
+            out.append({"symbol": sym[:-3],
+                        "day_return_pct": round(float(q.get("regularMarketChangePercent") or 0.0), 2)})
+        return out
+    except Exception as exc:
+        logger.debug("day-gainers screener skipped: %s", exc)
+        return []
+
+
+def _agrade_lessons_rules(accuracy: float, losers: list[dict], missed: list[dict],
+                          deltas: dict) -> list[dict]:
+    """Deterministic fallback lessons from the day's aggregates."""
+    lessons: list[dict] = []
+    if losers:
+        from collections import Counter
+        conf_ctr: Counter = Counter()
+        for row in losers:
+            conf = (row.get("factors") or {}).get("confirmations") or {}
+            for f in _LEARN_FACTORS:
+                if conf.get(f, 0) >= 1.0:
+                    conf_ctr[f] += 1
+        worst = ", ".join(f"{f} ({n}/{len(losers)})" for f, n in conf_ctr.most_common(3))
+        lessons.append({"lesson": f"A-grades failed most often WITH these factors confirmed: {worst} — "
+                                  f"confirmation of these did not protect the pick.",
+                        "evidence": f"{len(losers)} losing A-grades"})
+    if missed:
+        from collections import Counter
+        miss_ctr: Counter = Counter()
+        for m in missed:
+            for f in m.get("unconfirmed") or []:
+                miss_ctr[f] += 1
+        blockers = ", ".join(f"{f} ({n}/{len(missed)})" for f, n in miss_ctr.most_common(3))
+        lessons.append({"lesson": f"Top gainers were graded below A most often because these factors were "
+                                  f"unconfirmed at scan time: {blockers} — over-weighting them costs recall.",
+                        "evidence": f"{len(missed)} missed gainers ≥{AGRADE_MISS_GAIN_PCT}%"})
+    active = {f: d for f, d in (deltas or {}).items() if d}
+    if active:
+        lessons.append({"lesson": f"Applied win-probability deltas for tomorrow: {active} "
+                                  f"(positive = factor genuinely discriminates, negative = it confirms on losers too).",
+                        "evidence": f"A-tier accuracy today {accuracy:.0%}"})
+    return lessons
+
+
+async def _agrade_lessons_llm(date_str: str, accuracy: float, winners: list[dict],
+                              losers: list[dict], missed: list[dict],
+                              deltas: dict) -> list[dict] | None:
+    """LLM synthesis of the day's scan mistakes into reusable lessons. Uses the
+    in-network Ollama directly (no new deps — plain HTTP); returns None on any
+    failure so the rule-based fallback takes over."""
+    def _slim(rows, n):
+        return [{"symbol": r["symbol"], "day_return_pct": r.get("day_return_pct"),
+                 "win_probability": r.get("win_probability"),
+                 "confirmed": [f for f in _LEARN_FACTORS
+                               if ((r.get("factors") or {}).get("confirmations") or
+                                   r.get("confirmations") or {}).get(f, 0) >= 1.0]}
+                for r in rows[:n]]
+    evidence = {
+        "date": date_str, "a_grade_accuracy": round(accuracy, 3),
+        "winners_sample": _slim(sorted(winners, key=lambda r: -(r.get("day_return_pct") or 0)), 6),
+        "losers_sample": _slim(sorted(losers, key=lambda r: (r.get("day_return_pct") or 0)), 8),
+        "missed_gainers_sample": [{"symbol": m["symbol"], "grade": m.get("grade"),
+                                   "day_return_pct": m.get("day_return_pct"),
+                                   "unconfirmed": m.get("unconfirmed")} for m in missed[:8]],
+        "factor_deltas_applied": deltas,
+    }
+    prompt = f"""You are the post-market analyst for an NSE intraday stock scanner. It graded stocks A/B/C/D before the open; below is today's realised outcome of every A-grade plus the big gainers it under-graded.
+
+{json.dumps(evidence)}
+
+Explain, using ONLY this evidence, what the scanner got wrong today and what to change. Reply with ONLY valid JSON:
+{{"lessons": [{{"lesson": "one concrete, reusable rule for future scans", "evidence": "the specific numbers/symbols backing it"}}], "summary": "one sentence on today's scan quality"}}
+3 to 5 lessons. Be specific about factors (trend/momentum/macd/volume/regime/rsi), not generic advice."""
+    try:
+        # CPU-hosted 8B model: prompt eval + ~500 tokens of JSON can take 2-4
+        # minutes cold. The post-close pass has the time; the fallback still
+        # catches a genuinely hung server.
+        async with httpx.AsyncClient(timeout=float(os.getenv("AGRADE_LLM_TIMEOUT", "300"))) as client:
+            r = await client.post(f"{OLLAMA_URL}/api/generate",
+                                  json={"model": LLM_MODEL, "prompt": prompt, "stream": False,
+                                        "format": "json",
+                                        "options": {"temperature": 0.2, "num_predict": 500}})
+            r.raise_for_status()
+            txt = (r.json().get("response") or "").strip()
+        start, end = txt.find("{"), txt.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        parsed = json.loads(txt[start:end + 1])
+        lessons = parsed.get("lessons") or []
+        if parsed.get("summary"):
+            lessons.append({"lesson": parsed["summary"], "evidence": "day summary"})
+        return [l for l in lessons if isinstance(l, dict) and l.get("lesson")] or None
+    except Exception as exc:
+        logger.info("agrade LLM lessons unavailable (%s) — using rule-based fallback", exc)
+        return None
+
+
+async def evaluate_agrades(date_str: str | None = None, learn: bool = True) -> dict:
+    """Day-end A-grade learning loop.
+
+    Grades EVERY A-grade BUY the premarket scan published (all of them, not the
+    top-10 watchlist) against the realised day move, finds the day's top gainers
+    the scan graded below A, updates the per-factor win-rate memory, computes
+    the win-probability deltas future scans apply, and synthesises the day's
+    mistakes into lessons (LLM with rule-based fallback)."""
+    now = _ist_now()
+    date_str = date_str or now.strftime("%Y-%m-%d")
+    r = await _get_redis()
+    if learn and await r.get(_AGRADE_EVAL_DONE.format(date_str)):
+        return {"status": "already_graded", "date": date_str}
+    raw = await r.get(_AGRADE_SNAP_KEY.format(date_str))
+    if not raw:
+        return {"status": "no_snapshot", "date": date_str}
+    snap = json.loads(raw)
+    agrades = snap.get("agrades") or []
+    graded_map: dict = snap.get("graded") or {}
+    if not agrades:
+        return {"status": "empty", "date": date_str}
+
+    # Day returns for every A-grade + the most-plausible non-A candidates
+    # (bounded — a full-universe day-return pass would be another 15-min sweep).
+    a_syms = [a["symbol"] for a in agrades]
+    others = sorted((s for s in graded_map if s not in set(a_syms)),
+                    key=lambda s: -(graded_map[s].get("win_probability") or 0.0))
+    check_syms = a_syms + others[:AGRADE_MISS_CHECK_MAX]
+    day_ret: dict[str, dict] = {}
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        gainers_wide = await _fetch_day_gainers(client)
+        for sym in check_syms:
+            candles = await _fetch_daily(client, sym)
+            await asyncio.sleep(FETCH_DELAY * 0.5 + random.uniform(0, 0.15))
+            bar = next((b for b in reversed(candles) if _bar_date(b) == date_str), None)
+            if bar and bar.get("o"):
+                day_ret[sym] = {"ret": (bar["c"] - bar["o"]) / bar["o"] * 100,
+                                "max": (bar["h"] - bar["o"]) / bar["o"] * 100}
+
+    # ── Grade the A tier ──────────────────────────────────────────────────────
+    results, winners, losers = [], [], []
+    for a in agrades:
+        dr = day_ret.get(a["symbol"])
+        if not dr:
+            continue
+        ok = dr["ret"] >= AGRADE_TARGET_PCT
+        row = {"symbol": a["symbol"], "action": "BUY", "trade_kind": "agrade",
+               "predicted_confidence": a.get("confidence"),
+               "predicted_signal_score": a.get("signal_score"),
+               "win_probability": a.get("win_probability"),
+               "day_return_pct": round(dr["ret"], 2),
+               "realized_return_pct": round(dr["ret"], 2),
+               "max_gain_pct": round(dr["max"], 2), "correct": bool(ok),
+               "factors": {"confirmations": a.get("confirmations"),
+                           "long_trend": a.get("long_trend"),
+                           "pattern_p_up": a.get("pattern_p_up"),
+                           "catalyst_boost": a.get("catalyst_boost")}}
+        results.append(row)
+        (winners if ok else losers).append(row)
+    if not results:
+        return {"status": "no_data", "date": date_str}
+    hits = len(winners)
+    accuracy = round(hits / len(results), 4)
+
+    # ── Missed gainers: big movers the scan graded below A ───────────────────
+    missed = []
+    for sym, meta in graded_map.items():
+        if meta.get("grade") == "A" and meta.get("action") == "BUY":
+            continue
+        dr = day_ret.get(sym)
+        if dr and dr["ret"] >= AGRADE_MISS_GAIN_PCT:
+            conf = meta.get("confirmations") or {}
+            missed.append({"symbol": sym, "grade": meta.get("grade"), "action": meta.get("action"),
+                           "win_probability": meta.get("win_probability"),
+                           "day_return_pct": round(dr["ret"], 2),
+                           "unconfirmed": [f for f in _LEARN_FACTORS if conf.get(f, 0) < 1.0]})
+    missed.sort(key=lambda m: -m["day_return_pct"])
+    unscanned_gainers = [g for g in gainers_wide if g["symbol"] not in graded_map][:10]
+
+    # ── Per-factor win-rate memory → tomorrow's deltas ────────────────────────
+    deltas = {f: 0.0 for f in _LEARN_FACTORS}
+    if learn:
+        stats = json.loads(await r.get(_AGRADE_STATS_KEY) or "{}")
+        f_stats = stats.get("factors") or {f: {"cw": 0.0, "ct": 0.0, "uw": 0.0, "ut": 0.0}
+                                           for f in _LEARN_FACTORS}
+        overall = stats.get("overall") or {"wins": 0.0, "total": 0.0}
+        for f in _LEARN_FACTORS:
+            f_stats.setdefault(f, {"cw": 0.0, "ct": 0.0, "uw": 0.0, "ut": 0.0})
+            for k in f_stats[f]:
+                f_stats[f][k] *= AGRADE_STATS_DECAY
+        overall["wins"] *= AGRADE_STATS_DECAY
+        overall["total"] *= AGRADE_STATS_DECAY
+        for row in results:
+            win = 1.0 if row["correct"] else 0.0
+            overall["wins"] += win
+            overall["total"] += 1.0
+            conf = (row.get("factors") or {}).get("confirmations") or {}
+            for f in _LEARN_FACTORS:
+                side = "c" if conf.get(f, 0) >= 1.0 else "u"
+                f_stats[f][side + "w"] += win
+                f_stats[f][side + "t"] += 1.0
+        wr_all = (overall["wins"] + 1.0) / (overall["total"] + 2.0)
+        for f in _LEARN_FACTORS:
+            st = f_stats[f]
+            if st["ct"] >= AGRADE_MIN_EFF_N:
+                wr_c = (st["cw"] + 1.0) / (st["ct"] + 2.0)
+                deltas[f] = round(max(-AGRADE_DELTA_MAX,
+                                      min(AGRADE_DELTA_MAX, (wr_c - wr_all) * 0.5)), 4)
+        await r.set(_AGRADE_STATS_KEY, json.dumps({"factors": f_stats, "overall": overall,
+                                                   "updated_at": now.isoformat()}), ex=86400 * 120)
+        await r.set(_AGRADE_CAL_KEY, json.dumps({"deltas": deltas,
+                                                 "a_tier_win_rate_ema": round(wr_all, 4),
+                                                 "effective_samples": round(overall["total"], 1),
+                                                 "updated_at": now.isoformat()}), ex=86400 * 120)
+
+    # ── Lessons (LLM, rule-based fallback) ────────────────────────────────────
+    lessons = (await _agrade_lessons_llm(date_str, accuracy, winners, losers, missed, deltas)
+               or _agrade_lessons_rules(accuracy, losers, missed, deltas))
+
+    evaluation = {
+        "date": date_str, "evaluated_at": now.isoformat(), "trade_kind": "agrade",
+        "picks": len(results), "hits": hits, "accuracy": accuracy,
+        "avg_realized_return_pct": round(sum(g["realized_return_pct"] for g in results) / len(results), 2),
+        "target": SCAN_ACCURACY_TARGET, "meets_target": accuracy >= SCAN_ACCURACY_TARGET,
+        "losers": sorted(losers, key=lambda g: g["day_return_pct"])[:40],
+        "missed_gainers": missed[:40], "unscanned_gainers": unscanned_gainers,
+        "factor_deltas": deltas, "lessons": lessons, "learned": bool(learn),
+        "results": results,
+    }
+    try:
+        slim = {k: v for k, v in evaluation.items() if k != "results"}
+        await r.set(_AGRADE_EVAL_KEY.format(date_str), json.dumps(slim), ex=86400 * 30)
+        await r.set(_AGRADE_EVAL_LATEST, json.dumps(slim), ex=86400 * 30)
+        await r.set(_AGRADE_LESSONS_KEY, json.dumps({"date": date_str, "lessons": lessons}), ex=86400 * 30)
+        if learn:
+            await r.set(_AGRADE_EVAL_DONE.format(date_str), "1", ex=86400 * 30)
+    except Exception:
+        pass
+    if learn:
+        await _push_feedback(evaluation)
+    logger.info("agrade eval %s: %d A-grades, accuracy %.0f%% (%d missed gainers, deltas %s)%s",
+                date_str, len(results), accuracy * 100, len(missed), deltas,
+                "" if learn else " [dry-run]")
+    return {"status": "ok", **{k: v for k, v in evaluation.items() if k != "results"}}
+
+
+async def get_agrade_eval() -> dict:
+    try:
+        r = await _get_redis()
+        raw = await r.get(_AGRADE_EVAL_LATEST)
+        if raw:
+            return json.loads(raw)
+    except Exception:
+        pass
+    return {}
+
+
 async def backfill_delivery(days: int = 14, limit: int = 250) -> dict:
     """Reconstruct delivery-pick accuracy for the last `days` trading days so the
     accuracy graph has delivery history immediately (no waiting for live snapshots
@@ -1730,6 +2053,12 @@ async def schedule_loop() -> None:
                 # Grade older delivery + committed picks whose horizon has elapsed.
                 await grade_due_delivery()
                 await grade_due_committed()
+                # A-grade day-end learning loop: grade every published A-grade,
+                # hunt missed gainers, update factor deltas, synthesise lessons.
+                try:
+                    await evaluate_agrades(today)
+                except Exception as exc:
+                    logger.warning("agrade evaluation failed for %s: %s", today, exc)
         except asyncio.CancelledError:
             break
         except Exception as exc:
@@ -1804,6 +2133,31 @@ AGRADE_MAX_PROMOTIONS     = int(os.getenv("AGRADE_MAX_PROMOTIONS", "5"))        
 # (2026-07-15: six promotions at 12:26-12:47 got 13-34 min of entry window,
 # never traded, and polled until close). 12:30 leaves a real 30-min window.
 AGRADE_PROMOTE_LAST_MIN   = int(os.getenv("AGRADE_PROMOTE_LAST_MIN", str(12 * 60 + 30)))
+
+# ── A-grade day-end learning loop ─────────────────────────────────────────────
+# After every close the scanner grades EVERY A-grade it published at premarket
+# (all of them — 100 or 200, not just the top-10 watchlist) against the realised
+# day move, hunts the day's top gainers it graded below A, updates a per-factor
+# win-rate memory, and turns the day's mistakes into (a) numeric win-probability
+# deltas applied to future scans and (b) plain-language lessons (LLM, with a
+# rule-based fallback). This is the "evolve day by day" loop: precision on the
+# A tier is the target, abstention is the mechanism.
+_AGRADE_SNAP_KEY    = "ai_engine:agrade_snapshot:{}"   # dated: all A-grade BUYs + full graded map at premarket
+_AGRADE_EVAL_KEY    = "ai_engine:agrade_eval:{}"       # dated evaluation result
+_AGRADE_EVAL_LATEST = "ai_engine:agrade_eval:latest"
+_AGRADE_EVAL_DONE   = "ai_engine:agrade_eval_done:{}"
+_AGRADE_STATS_KEY   = "ai_engine:agrade_factor_stats"  # per-factor EMA win counts (the memory)
+_AGRADE_CAL_KEY     = "ai_engine:agrade_factor_cal"    # per-factor wp deltas applied at scan time
+_AGRADE_LESSONS_KEY = "ai_engine:agrade_lessons"       # latest lessons (LLM or rule-based)
+AGRADE_TARGET_PCT     = float(os.getenv("AGRADE_TARGET_PCT", "0.5"))      # day gain (%) that counts as a hit
+AGRADE_MISS_GAIN_PCT  = float(os.getenv("AGRADE_MISS_GAIN_PCT", "2.0"))   # day gain (%) that counts as a missed gainer
+AGRADE_MISS_CHECK_MAX = int(os.getenv("AGRADE_MISS_CHECK_MAX", "300"))    # extra non-A symbols to check for misses
+AGRADE_STATS_DECAY    = float(os.getenv("AGRADE_STATS_DECAY", "0.90"))    # per-day EMA decay (≈10-day memory)
+AGRADE_DELTA_MAX      = float(os.getenv("AGRADE_DELTA_MAX", "0.06"))      # max ± wp adjustment per factor
+AGRADE_MIN_EFF_N      = float(os.getenv("AGRADE_MIN_EFF_N", "8.0"))       # effective samples before a delta arms
+OLLAMA_URL            = os.getenv("OLLAMA_URL", "http://ollama:11434")
+LLM_MODEL             = os.getenv("OLLAMA_MODEL") or os.getenv("LLM_MODEL") or "llama3.1:8b"
+_LEARN_FACTORS = ("trend", "momentum", "macd", "volume", "regime", "rsi")
 
 _AGRADE_WATCH_KEY    = "ai_engine:agrade_watch"        # live snapshot (UI + restart rehydration)
 _LIVE_PROMOTIONS_KEY = "ai_engine:live_promotions:{}"  # dated list the autopilot trades

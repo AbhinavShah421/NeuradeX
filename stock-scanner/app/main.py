@@ -16,6 +16,7 @@ from .scanner import (
     get_state, get_latest_eval, warm_state, get_auto_scan, set_auto_scan,
     get_auto_scan_interval, set_auto_scan_interval, next_scan_at,
     agrade_watch_loop, agrade_status, agrade_force_promote,
+    evaluate_agrades, get_agrade_eval,
 )
 from .universe import UNIVERSE
 
@@ -149,6 +150,24 @@ async def backfill_intraday_ep(days: int = 14, limit: int = 400, _: None = Depen
     latest completed day. Runs in background."""
     asyncio.create_task(backfill_intraday(days=days, limit=limit))
     return {"status": "started", "days": days, "limit": limit}
+
+
+@app.post("/evaluate-agrades")
+async def evaluate_agrades_ep(date: str | None = None, learn: bool = True,
+                              _: None = Depends(_require_internal)):
+    """Day-end A-grade learning loop: grade every published A-grade against the
+    realised day move, find missed top gainers, update the per-factor
+    win-probability deltas, and synthesise lessons. learn=false = dry-run
+    (evaluates and reports but updates no calibration and pushes no feedback)."""
+    asyncio.create_task(evaluate_agrades(date, learn=learn))
+    return {"status": "started", "date": date, "learn": learn}
+
+
+@app.get("/agrade-eval")
+async def agrade_eval_latest():
+    """Latest A-grade day-end evaluation: accuracy, losers, missed gainers,
+    applied factor deltas, and the day's lessons."""
+    return {"status": "success", "data": await get_agrade_eval()}
 
 
 @app.get("/agrade-watch")
