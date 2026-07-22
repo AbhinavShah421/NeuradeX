@@ -1,6 +1,6 @@
 NeuradeX is LIVE
 
-https://a8e0-47-15-178-94.ngrok-free.app
+https://3563-47-15-184-135.ngrok-free.app
 
-Dashboard: https://a8e0-47-15-178-94.ngrok-free.app/neuradex
-Updated:   2026-07-20 08:46:05 +05:30
+Dashboard: https://3563-47-15-184-135.ngrok-free.app/neuradex
+Updated:   2026-07-22 07:35:29 +05:30
