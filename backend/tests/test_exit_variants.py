@@ -11,7 +11,7 @@ Locks in:
 """
 from app.agents.counterfactual import (
     BASELINE_POLICY, LIVE_POLICY, EXIT_VARIANTS, _day_indicators,
-    _simulate_policy, _simulate_long,
+    _simulate_policy, _simulate_long, _aggregate_ab_rows,
 )
 from app.services.sessions_service import (
     TRADE_GATES, _RELIABLE_BUY_AGENTS, _LATE_ENTRY_CUTOFF_MIN, _PAPER_CONFIG_DEFAULT,
@@ -183,3 +183,72 @@ def test_paper_times_default_auto_and_resolve():
     assert _resolve_paper_minutes("14:00", 780) == 14 * 60
     assert _resolve_paper_minutes("", 885) == 885          # empty → auto
     assert _resolve_paper_minutes("garbage", 885) == 885   # unparsable → auto
+
+
+# ── A/B aggregation fairness ─────────────────────────────────────────────────
+# The bug this section locks out: exit_ab_report summed every row per variant,
+# so a variant added later was scored only on the days it happened to exist for
+# (n ranged 2,611–30,479 across variants) and the two entry populations were
+# pooled despite very different base rates. Every exit-policy adoption to date
+# was decided on that table.
+
+def _row(day, variant, source, n, wins, avg):
+    return (day, variant, source, n, wins, avg)
+
+
+def test_days_missing_a_variant_are_excluded():
+    # d1 has both variants; d2 was evaluated before "new" existed.
+    daily = [
+        _row("d1", "old", "sessions", 100, 50, 1.0),
+        _row("d1", "new", "sessions", 100, 10, -1.0),
+        _row("d2", "old", "sessions", 100, 90, 5.0),
+    ]
+    summary, coverage = _aggregate_ab_rows(daily)
+    assert coverage["sessions"]["common_days"] == ["d1"]
+    assert coverage["sessions"]["excluded_days"] == ["d2"]
+    # "old" must NOT get credit for d2, where "new" never ran.
+    old = next(r for r in summary if r["variant"] == "old")
+    assert old["avg_pnl_pct"] == 1.0
+    assert old["n"] == 100
+
+
+def test_every_variant_compared_on_equal_sample():
+    daily = [
+        _row("d1", "a", "sessions", 100, 50, 1.0),
+        _row("d1", "b", "sessions", 100, 25, 2.0),
+        _row("d2", "a", "sessions", 200, 50, 1.0),
+        _row("d2", "b", "sessions", 200, 25, 2.0),
+    ]
+    summary, _ = _aggregate_ab_rows(daily)
+    assert len({r["n"] for r in summary}) == 1, "variants must share one sample size"
+
+
+def test_populations_are_never_pooled():
+    # Same variant, both sources — must stay two rows, not one merged number.
+    daily = [
+        _row("d1", "a", "sessions", 100, 10, -1.0),
+        _row("d1", "a", "store", 100, 90, 5.0),
+    ]
+    summary, coverage = _aggregate_ab_rows(daily)
+    assert {r["source"] for r in summary} == {"sessions", "store"}
+    assert len(summary) == 2
+    by_src = {r["source"]: r["avg_pnl_pct"] for r in summary}
+    assert by_src["sessions"] == -1.0 and by_src["store"] == 5.0
+
+
+def test_live_policy_is_flagged():
+    live_name = next(k for k, v in EXIT_VARIANTS.items() if v == LIVE_POLICY)
+    daily = [_row("d1", live_name, "sessions", 10, 5, 0.0),
+             _row("d1", "baseline", "sessions", 10, 5, 0.0)]
+    summary, _ = _aggregate_ab_rows(daily)
+    assert next(r for r in summary if r["variant"] == live_name)["is_live"]
+    assert not next(r for r in summary if r["variant"] == "baseline")["is_live"]
+
+
+def test_summary_sorted_best_first_within_source():
+    daily = [
+        _row("d1", "worse", "sessions", 100, 10, -2.0),
+        _row("d1", "better", "sessions", 100, 50, -1.0),
+    ]
+    summary, _ = _aggregate_ab_rows(daily)
+    assert [r["variant"] for r in summary] == ["better", "worse"]

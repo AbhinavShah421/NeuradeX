@@ -159,6 +159,12 @@ EXIT_VARIANTS: dict[str, dict] = {
                                "fast_cut": False, "grace_min": 10, "hold_cap": 60,
                                "lock_gain": 0.8, "cap_trend_extend": True,
                                "lock_confirm_mom": True},
+    # Live policy with the stop pulled in to match what winners actually pay
+    # (2026-07-17 audit): realized wins avg +0.24-0.42% (lock/stagnancy harvest
+    # them long before the 2.5% target) while the 1.5%/1.5×ATR stop lets losers
+    # run to ~2x the win size — a structural risk-2-to-make-0.5 book at ~35%
+    # win-rate. Candidate — adopt only if the A/B proves it.
+    "tight_stop_run": {**LIVE_POLICY, "stop_atr_mult": 1.0, "stop_floor": 1.0},
 }
 
 
@@ -561,12 +567,18 @@ async def _store_ab_results(day: str, source: str, stats: dict[str, list[float]]
     return out
 
 
-async def run_exit_ab(day: str) -> dict:
+async def run_exit_ab(day: str, force: bool = False) -> dict:
     """Evaluate every EXIT_VARIANT on the SAME entry population — the day's
     labeled decisions — against the recorded bars, and store per-variant
     aggregates in cf_exit_ab. This is the offline policy evaluation that decides
     the live exit-policy change with data instead of intuition. Idempotent per
-    day. Returns {variant: {n, wins, avg_pnl_pct}}."""
+    day unless force=True. Returns {variant: {n, wins, avg_pnl_pct}}.
+
+    force exists to backfill: a day evaluated before a variant was added holds
+    no row for it, and exit_ab_report can only compare variants on days where
+    all of them ran — so without a re-run, adding a variant permanently shrinks
+    the comparable history.
+    """
     from sqlalchemy import text
     from app.database.postgres import engine
     from app.utils.redis_client import get_redis
@@ -574,7 +586,7 @@ async def run_exit_ab(day: str) -> dict:
 
     r = get_redis()
     flag = _AB_TRAINED_KEY + day
-    if await r.get(flag):
+    if not force and await r.get(flag):
         return {}
 
     async with engine.begin() as conn:
@@ -671,10 +683,119 @@ async def run_exit_ab_store(day: str, force: bool = False) -> dict:
     return out
 
 
+def _aggregate_ab_rows(daily) -> tuple[list[dict], dict]:
+    """Fair aggregation of raw cf_exit_ab rows → (summary, coverage).
+
+    Pure so the comparison rules are testable without a database. Rows are
+    (day, variant, source, n, wins, avg_pnl_pct). See exit_ab_report for why
+    the two rules below exist.
+    """
+    # source → day → variant → (n, wins, avg)
+    by_source: dict[str, dict[str, dict[str, tuple]]] = {}
+    for day, variant, source, n, wins, avg in daily:
+        by_source.setdefault(source, {}).setdefault(day, {})[variant] = (
+            n or 0, wins or 0, avg or 0.0)
+
+    summary: list[dict] = []
+    coverage: dict[str, dict] = {}
+    for source, per_day in by_source.items():
+        variants = {v for vs in per_day.values() for v in vs}
+        common = sorted(d for d, vs in per_day.items() if set(vs) == variants)
+        dropped = sorted(set(per_day) - set(common))
+        coverage[source] = {
+            "variants": sorted(variants),
+            "common_days": common,
+            "excluded_days": dropped,
+            "excluded_reason": ("days missing one or more variants — a variant "
+                                "scored only on its own day set is not comparable"),
+        }
+        totals: dict[str, dict] = {}
+        for day in common:
+            for variant, (n, wins, avg) in per_day[day].items():
+                t = totals.setdefault(variant, {"n": 0, "wins": 0, "pnl_sum": 0.0})
+                t["n"] += n
+                t["wins"] += wins
+                t["pnl_sum"] += avg * n
+        rows = [
+            {"variant": v, "source": source, "days": len(common), "n": t["n"],
+             "win_rate": round(t["wins"] / t["n"], 3) if t["n"] else 0.0,
+             "avg_pnl_pct": round(t["pnl_sum"] / t["n"], 4) if t["n"] else 0.0,
+             "is_live": EXIT_VARIANTS.get(v) == LIVE_POLICY,
+             "policy": EXIT_VARIANTS.get(v, {})}
+            for v, t in totals.items()
+        ]
+        rows.sort(key=lambda x: x["avg_pnl_pct"], reverse=True)
+        summary.extend(rows)
+    return summary, coverage
+
+
+async def backfill_exit_ab(days: int = 30, source: str = "sessions") -> dict:
+    """Re-run the A/B for days that are missing one or more of the CURRENT
+    variants, so exit_ab_report's common-day comparison spans the real history
+    instead of only the days since the newest variant was added.
+
+    Only incomplete days are recomputed, so this is cheap to re-run and a no-op
+    once coverage is full. Returns {day: variant_count} for the days rebuilt.
+    """
+    from sqlalchemy import text
+    from app.database.postgres import engine
+
+    want = set(EXIT_VARIANTS)
+    async with engine.begin() as conn:
+        await _ensure_ab_schema(conn)
+        rows = (await conn.execute(text("""
+            SELECT day, variant FROM cf_exit_ab
+            WHERE source = :src
+              AND day >= (NOW() AT TIME ZONE 'Asia/Kolkata' - make_interval(days => :d))::date::text
+        """), {"src": source, "d": days})).fetchall()
+
+    have: dict[str, set] = {}
+    for day, variant in rows:
+        have.setdefault(day, set()).add(variant)
+    incomplete = sorted(d for d, vs in have.items() if vs != want)
+    if not incomplete:
+        return {}
+
+    rebuilt: dict[str, int] = {}
+    for day in incomplete:
+        try:
+            out = (await run_exit_ab(day, force=True) if source == "sessions"
+                   else await run_exit_ab_store(day, force=True))
+            if out:
+                rebuilt[day] = len(out)
+        except Exception as exc:
+            logger.warning("exit A/B backfill failed for %s (%s): %s", day, source, exc)
+    logger.info("exit A/B backfill (%s): %d of %d incomplete days rebuilt",
+                source, len(rebuilt), len(incomplete),
+                extra={"log_type": "ai_engine", "event": "cf_exit_ab_backfill",
+                       "source": source, "rebuilt": len(rebuilt)})
+    return rebuilt
+
+
 async def exit_ab_report(days: int = 14) -> dict:
-    """Aggregated A/B results for the API: per-variant totals over the last N
-    days plus the per-day rows — the evidence table for changing the live exit
-    policy."""
+    """Aggregated A/B results for the API — the evidence table for changing the
+    live exit policy.
+
+    Two rules make the comparison decision-grade, and both were violated by the
+    naive "sum every row per variant" aggregation this replaces:
+
+      1. COMMON DAYS ONLY. Variants were added over time (6 → 7 → 8 → 9), so
+         each one carries a different day set: `baseline` had 18,240 samples
+         against `tight_stop_run`'s 2,611, and a variant's score was really a
+         score for the days it happened to be present on. Restricting to days
+         where EVERY variant ran reversed the ranking outright — `baseline`
+         went from worst to best and the adopted live policy from near-best to
+         worst — which means every exit-policy adoption to date was decided on
+         a confounded table.
+      2. NEVER POOL POPULATIONS. `sessions` (what the gates actually faced) and
+         `store` (synthesized entries across the whole tick store) have very
+         different base rates (~21% vs ~39% win). Pooling them let a variant
+         look good merely by having more `store` days in its window.
+
+    `coverage` reports which days were used and which were dropped, so a
+    shrunken common set (the cost of adding a new variant) is visible rather
+    than silently narrowing the evidence.
+    """
     from sqlalchemy import text
     from app.database.postgres import engine
     try:
@@ -686,28 +807,17 @@ async def exit_ab_report(days: int = 14) -> dict:
                 WHERE day >= (NOW() AT TIME ZONE 'Asia/Kolkata' - make_interval(days => :d))::date::text
                 ORDER BY day DESC, source, avg_pnl_pct DESC
             """), {"d": days})).fetchall()
-        totals: dict[str, dict] = {}
-        for day, variant, source, n, wins, avg in daily:
-            t = totals.setdefault(variant, {"n": 0, "wins": 0, "pnl_sum": 0.0})
-            t["n"] += n or 0
-            t["wins"] += wins or 0
-            t["pnl_sum"] += (avg or 0.0) * (n or 0)
-        summary = [
-            {"variant": v, "n": t["n"],
-             "win_rate": round(t["wins"] / t["n"], 3) if t["n"] else 0.0,
-             "avg_pnl_pct": round(t["pnl_sum"] / t["n"], 4) if t["n"] else 0.0,
-             "policy": EXIT_VARIANTS.get(v, {})}
-            for v, t in totals.items()
-        ]
-        summary.sort(key=lambda x: x["avg_pnl_pct"], reverse=True)
+
+        summary, coverage = _aggregate_ab_rows(daily)
         return {
             "summary": summary,
+            "coverage": coverage,
             "daily": [{"day": d, "variant": v, "source": s, "n": n, "wins": w, "avg_pnl_pct": a}
                       for d, v, s, n, w, a in daily],
         }
     except Exception as exc:
         logger.warning("exit_ab_report failed: %s", exc)
-        return {"summary": [], "daily": []}
+        return {"summary": [], "coverage": {}, "daily": []}
 
 
 # ── Background loop (runner/full role) ────────────────────────────────────────
@@ -767,6 +877,9 @@ async def counterfactual_loop() -> None:
                 await promote_memory_phantoms(day)
                 await run_exit_ab(day)
                 await run_exit_ab_store(day)   # whole-tick-store population too
+                # Re-run days missing a variant added after they were evaluated,
+                # so the report's common-day comparison keeps its history.
+                await backfill_exit_ab(source="sessions")
                 # Fresh CF labels change the per-action correctness rates —
                 # republish so the next session runs on current weights.
                 await _sync_learning_rates("cf_sweep")
