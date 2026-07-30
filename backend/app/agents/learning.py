@@ -37,6 +37,32 @@ _EXCLUDE_SIM_OUTCOMES = """
 # the mean to 1.0 so the *relative* ordering is what matters, not absolute drift.
 _DECAY_PER_TRADE = 0.99654   # 0.5 ** (1/200) → half-life ≈ 200 recorded outcomes
 
+# Agents that never emit a directional action — they exist to veto, and their
+# signal is consumed through `indicators`, not through the BUY/SELL contest.
+# Scoring them as if they were forecasters is meaningless (`anomaly` voted HOLD
+# on 200,877 of 200,877 bars) and actively harmful: every abstention collected
+# weight, carrying anomaly from its 0.7 default to 1.286 — the largest weight in
+# the panel — which then piles onto HOLD in the exit-side legacy vote (see
+# ensemble.py, where HOLD is only excluded from the *entry* contest) and keeps
+# losing positions open. They are excluded from weight drift and from the
+# accuracy counters entirely.
+_VETO_ONLY_AGENTS: frozenset[str] = frozenset({"anomaly"})
+
+# Neutral weight a veto-only agent is held at (anomaly's original seed). Applied
+# on every init_db so the value is self-healing rather than a one-off migration:
+# these agents are never learned, so any drift in the row is stale state.
+_VETO_ONLY_WEIGHT = 0.7
+
+# Abstention credit (HOLD votes). These were 0.5 for a correct abstention vs
+# 0.15 for a missed winner — a 3.3x asymmetry that, at the observed ~29% win
+# rate, gave any indiscriminate abstainer a strongly positive expected weight
+# drift. That is a structural incentive to never trade, independent of skill,
+# and it is the mechanism behind the drift toward ~4-6 executions/day out of
+# ~2,000 decisions. A single symmetric coefficient makes the expected drift of a
+# skill-less abstainer non-positive, so weight is earned by being right about
+# direction rather than by staying silent.
+_ABSTAIN_CREDIT = 0.25
+
 
 def _shrunk_rate(correct: int, total: int, base: float, k: int = _SHRINK_K) -> float:
     """Bayesian-shrunk accuracy: pulls small samples toward the base rate so an
@@ -116,6 +142,18 @@ class LearningSystem:
             async with engine.begin() as conn:
                 for stmt in _DDL_STATEMENTS:
                     await conn.execute(text(stmt))
+                # Veto-only agents hold no learned state. Reset the row rather
+                # than leaving the weight the old abstention-credit rule drifted
+                # it to (anomaly reached 1.286 — the top of the panel — purely by
+                # voting HOLD on every bar), since that weight still lands on
+                # HOLD in the exit-side vote.
+                await conn.execute(text("""
+                    UPDATE ai_engine_agent_weights
+                    SET weight = :w, total_predictions = 0,
+                        correct_predictions = 0, total_reward = 0.0,
+                        updated_at = NOW()
+                    WHERE agent_name = ANY(:veto)
+                """), {"w": _VETO_ONLY_WEIGHT, "veto": list(_VETO_ONLY_AGENTS)})
             logger.info("AI engine DB tables ready",
                         extra={"log_type": "ai_engine", "event": "db_init"})
         except Exception as exc:
@@ -168,6 +206,13 @@ class LearningSystem:
                 inserted = result.fetchone()
                 if inserted:
                     for sig in signals:
+                        # Veto-only agents are not scored (see _VETO_ONLY_AGENTS):
+                        # counting their predictions here while record_outcome
+                        # never credits them would drag their displayed accuracy
+                        # toward 0% — as meaningless as the inflated number it
+                        # replaces. Keep them out of both sides of the ratio.
+                        if sig["agent"] in _VETO_ONLY_AGENTS:
+                            continue
                         await conn.execute(text("""
                             UPDATE ai_engine_agent_weights
                             SET total_predictions = total_predictions + 1,
@@ -236,6 +281,11 @@ class LearningSystem:
                     _LR = 0.06   # per-trade learning rate; weight bounds [0.3, 3.0]
                     for sig in signals:
                         act = sig["action"]
+                        if sig["agent"] in _VETO_ONLY_AGENTS:
+                            # Veto-only agent: it never takes a directional side,
+                            # so there is nothing to be right or wrong about here.
+                            # Leave its weight and counters untouched.
+                            continue
                         if act == "BUY":
                             # BUY was the correct call if the trade won
                             delta   = _LR * reward
@@ -246,16 +296,18 @@ class LearningSystem:
                             correct = reward < 0
                         else:
                             # HOLD = "I wouldn't enter this trade."
-                            # When the trade loses, HOLD was correct — reward the
-                            # agent so defensive agents (Memory cold-start, Anomaly
-                            # veto, Sentiment no-signal) don't get demoted for being
-                            # right. When the trade wins, HOLD missed a good entry —
-                            # apply a small miss penalty.
+                            # When the trade loses, HOLD was correct — defensive
+                            # agents (Memory cold-start, Sentiment no-signal)
+                            # shouldn't be demoted for being right. When the trade
+                            # wins, HOLD missed a good entry. Both directions use
+                            # the SAME coefficient: with a ~29% win rate, crediting
+                            # abstention more than it costs (the old 0.5 vs 0.15)
+                            # paid agents to stay silent regardless of skill.
                             if reward < 0:
-                                delta   = _LR * abs(reward) * 0.5   # correct abstention
+                                delta   = _LR * abs(reward) * _ABSTAIN_CREDIT
                                 correct = True
                             else:
-                                delta   = -_LR * reward * 0.15      # missed winning trade
+                                delta   = -_LR * reward * _ABSTAIN_CREDIT
                                 correct = False
 
                         await conn.execute(text("""
@@ -283,16 +335,24 @@ class LearningSystem:
                     #   2. Renormalize the mean to 1.0 — only *relative* weight
                     #      matters in the vote, so absolute drift is pure noise
                     #      that eats headroom under the clamp.
+                    # Veto-only agents carry no learned weight, so they neither
+                    # decay nor take part in the mean the others are normalized
+                    # against — otherwise a frozen weight would skew everyone
+                    # else's scale.
+                    veto = list(_VETO_ONLY_AGENTS)
                     await conn.execute(text("""
                         UPDATE ai_engine_agent_weights
                         SET weight = 1.0 + (weight - 1.0) * :decay
-                    """), {"decay": _DECAY_PER_TRADE})
+                        WHERE agent_name <> ALL(:veto)
+                    """), {"decay": _DECAY_PER_TRADE, "veto": veto})
                     await conn.execute(text("""
                         UPDATE ai_engine_agent_weights
                         SET weight = GREATEST(0.3, LEAST(3.0,
                                 weight / NULLIF((SELECT AVG(weight)
-                                                 FROM ai_engine_agent_weights), 0)))
-                    """))
+                                                 FROM ai_engine_agent_weights
+                                                 WHERE agent_name <> ALL(:veto)), 0)))
+                        WHERE agent_name <> ALL(:veto)
+                    """), {"veto": veto})
         except Exception as exc:
             logger.warning("record_outcome failed: %s", exc)
 
@@ -485,6 +545,11 @@ class LearningSystem:
 
             rates: dict[str, dict[str, float]] = {}
             for (agent, action), (total, correct) in counts.items():
+                # Veto-only agents publish no rate: their single HOLD "action"
+                # just tracks the base loss rate, so the ensemble would scale a
+                # pure abstention by an accuracy it never earned.
+                if agent in _VETO_ONLY_AGENTS:
+                    continue
                 if total >= _MIN_ACTION_SAMPLES and action in base:
                     rates.setdefault(agent, {})[action] = round(
                         _shrunk_rate(correct, total, base[action]), 3)

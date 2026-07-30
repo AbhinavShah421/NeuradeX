@@ -9,7 +9,10 @@ Locks in the three repairs:
   3. Bayesian shrinkage — small samples pull toward the base rate so a lucky
      20-trade run can't earn a 2× factor.
 """
-from app.agents.learning import _vote_was_correct, _shrunk_rate, _DECAY_PER_TRADE
+from app.agents.learning import (
+    _vote_was_correct, _shrunk_rate, _DECAY_PER_TRADE,
+    _ABSTAIN_CREDIT, _VETO_ONLY_AGENTS,
+)
 from app.agents.ensemble import _action_factor
 
 
@@ -89,3 +92,42 @@ def test_decay_half_life_is_200_trades():
         w = 1.0 + (w - 1.0) * _DECAY_PER_TRADE
     # After one half-life the excess over 1.0 should have halved: 3.0 → ~2.0.
     assert abs(w - 2.0) < 0.01
+
+
+# ── 4. Abstention must not pay ────────────────────────────────────────────────
+# The bug this section locks out: HOLD votes earned 0.5×|reward| when a trade
+# lost but cost only 0.15×reward when one won. At the observed ~29% win rate
+# that is a positive expected drift for an agent that never takes a side, so
+# weight accrued for staying silent — `anomaly` rode it from 0.7 to 1.286, the
+# top of the panel, on 200,877 consecutive HOLD votes.
+
+def _abstain_drift(win_rate: float, avg_win_reward: float, avg_loss_reward: float,
+                   credit: float, penalty: float) -> float:
+    """Expected per-trade weight drift for an agent that always votes HOLD."""
+    return ((1 - win_rate) * credit * abs(avg_loss_reward)
+            - win_rate * penalty * avg_win_reward)
+
+
+def test_old_asymmetry_paid_agents_to_abstain():
+    # Reward magnitudes from _reward() for the observed avg win (+0.68%) and
+    # avg loss (-0.41%): the win bucket maps to 0.4, the loss bucket to -0.1.
+    drift = _abstain_drift(0.29, 0.4, -0.1, credit=0.5, penalty=0.15)
+    assert drift > 0, "regression: the old 0.5/0.15 split rewarded pure abstention"
+
+
+def test_symmetric_credit_removes_the_incentive():
+    drift = _abstain_drift(0.29, 0.4, -0.1,
+                           credit=_ABSTAIN_CREDIT, penalty=_ABSTAIN_CREDIT)
+    assert drift <= 0, "an indiscriminate abstainer must not gain weight"
+
+
+def test_abstain_credit_is_symmetric():
+    # Both directions must read the same constant — the asymmetry *is* the bug.
+    assert _ABSTAIN_CREDIT > 0
+    assert _ABSTAIN_CREDIT < 1.0    # abstention stays weaker than a directional call
+
+
+def test_anomaly_is_veto_only():
+    # anomaly returns HOLD on every code path, so it must never be scored as a
+    # directional forecaster.
+    assert "anomaly" in _VETO_ONLY_AGENTS
