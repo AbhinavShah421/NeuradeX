@@ -252,3 +252,43 @@ def test_summary_sorted_best_first_within_source():
     ]
     summary, _ = _aggregate_ab_rows(daily)
     assert [r["variant"] for r in summary] == ["better", "worse"]
+
+
+# ── Entry cutoff parity (CF labels vs live gates) ────────────────────────────
+# The bug this section locks out: the CF labeler had no entry cutoff, so 43.4%
+# of labels were bars the live gates would never open on. Past the 14:45
+# square-off a simulated entry exits on the SAME bar for exactly the round-trip
+# cost — near-deterministic small losses that carried no signal about the exit
+# rules, yet made up 43% of the exit-policy A/B sample.
+
+def test_entry_cutoff_matches_live_sessions():
+    # counterfactual.py cannot import sessions_service (circular), so the two
+    # constants are pinned together here instead.
+    from app.agents.counterfactual import _ENTRY_CUTOFF_MIN
+    assert _ENTRY_CUTOFF_MIN == _LATE_ENTRY_CUTOFF_MIN
+
+
+def test_tradeable_entry_predicate():
+    from app.agents.counterfactual import _is_tradeable_entry
+    assert _is_tradeable_entry("09:15")
+    assert _is_tradeable_entry("12:59")
+    # The live gate refuses an entry AT the cutoff minute, not just after it.
+    assert not _is_tradeable_entry("13:00")
+    assert not _is_tradeable_entry("14:50")   # past square-off: same-bar exit
+    assert not _is_tradeable_entry("garbage")
+
+
+def test_store_population_uses_the_same_cutoff():
+    # The store A/B used 13:30 while live was 13:00. That half-hour gap is one
+    # reason the two populations ranked the exit variants differently.
+    from app.agents.counterfactual import _AB_STORE_LAST_ENTRY_MIN, _ENTRY_CUTOFF_MIN
+    assert _AB_STORE_LAST_ENTRY_MIN == _ENTRY_CUTOFF_MIN
+
+
+def test_tradeable_sql_filter_is_chronological():
+    # candle_time is TEXT 'HH:MM', so the SQL filter relies on zero-padded
+    # lexicographic ordering being chronological ordering.
+    from app.agents.counterfactual import _ENTRY_CUTOFF_HHMM
+    assert _ENTRY_CUTOFF_HHMM == "13:00"
+    assert "09:15" < _ENTRY_CUTOFF_HHMM
+    assert not ("13:38" < _ENTRY_CUTOFF_HHMM)

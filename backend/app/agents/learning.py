@@ -469,6 +469,11 @@ class LearningSystem:
         try:
             from sqlalchemy import text
             from app.database.postgres import engine
+            # Counterfactual labels cover bars the live gates would never enter
+            # on (43.4% of them). _TRADEABLE_ENTRY_SQL is the one definition of
+            # that filter; imported lazily because counterfactual.py reaches back
+            # into this module.
+            from app.agents.counterfactual import _TRADEABLE_ENTRY_SQL
             async with engine.begin() as conn:
                 base_row = (await conn.execute(text("""
                     SELECT COUNT(*)::int,
@@ -502,8 +507,9 @@ class LearningSystem:
                     cf_base_row = (await conn.execute(text("""
                         SELECT COUNT(*)::int,
                                SUM(CASE WHEN cf_pnl_pct >= 0 THEN 1 ELSE 0 END)::int
-                        FROM session_decisions
-                        WHERE cf_pnl_pct IS NOT NULL AND executed = FALSE
+                        FROM session_decisions d
+                        WHERE d.cf_pnl_pct IS NOT NULL AND d.executed = FALSE
+                          """ + _TRADEABLE_ENTRY_SQL + """
                     """))).fetchone()
                     cf_rows = (await conn.execute(text("""
                         SELECT
@@ -519,6 +525,7 @@ class LearningSystem:
                         CROSS JOIN LATERAL jsonb_array_elements(d.agents) AS sig
                         WHERE d.cf_pnl_pct IS NOT NULL AND d.executed = FALSE
                           AND sig->>'agent' IS NOT NULL
+                          """ + _TRADEABLE_ENTRY_SQL + """
                         GROUP BY sig->>'agent', sig->>'action'
                     """))).fetchall()
                 except Exception:

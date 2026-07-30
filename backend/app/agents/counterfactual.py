@@ -48,6 +48,41 @@ _LABEL_BATCH_DAYS      = 3      # look back at most this many trading days
 
 _SQUAREOFF_MIN = 14 * 60 + 45   # 14:45 IST forced square-off (same as _tech_signal)
 
+# Live sessions stop opening positions at 13:00 IST (sessions_service's
+# _LATE_ENTRY_CUTOFF_MIN; test_entry_cutoff_matches_live_sessions pins the two
+# together — they cannot be imported directly without a circular import).
+#
+# The CF labeler had no such cutoff, so 43.4% of all labels were entries the
+# live system would never take. They are not merely extra data: past the 14:45
+# square-off a simulated entry exits on the same bar for exactly the round-trip
+# cost, making them near-deterministic small losses. That dragged the labeled
+# win rate down (23.8% vs 33.6% for tradeable bars) while flattering the average
+# (-0.110 vs -0.124, because a forced same-bar exit cannot lose big), and it
+# compressed the exit-policy A/B — every variant exits identically on a bar with
+# no runway, so 43% of the sample carried no signal about the exit rules at all.
+#
+# Rows are still LABELED (the factual "what would this have done" record is
+# worth keeping, and the 8.2% hour-15 win rate stays reproducible); they are
+# excluded at the point of CONSUMPTION. _TRADEABLE_ENTRY_SQL is the single
+# definition of that filter — learning.py imports it too, so the rule cannot
+# drift between the RL, memory, action-rate and A/B consumers.
+_ENTRY_CUTOFF_MIN = 13 * 60
+_ENTRY_CUTOFF_HHMM = f"{_ENTRY_CUTOFF_MIN // 60:02d}:{_ENTRY_CUTOFF_MIN % 60:02d}"
+
+# candle_time is TEXT 'HH:MM' zero-padded, so lexicographic ordering is
+# chronological ordering.
+_TRADEABLE_ENTRY_SQL = f"AND d.candle_time < '{_ENTRY_CUTOFF_HHMM}'"
+
+
+def _is_tradeable_entry(hhmm: str) -> bool:
+    """Whether the live gates would consider opening a position on this bar."""
+    try:
+        h, m = hhmm.split(":")
+        return (int(h) * 60 + int(m)) < _ENTRY_CUTOFF_MIN
+    except (ValueError, AttributeError):
+        return False
+
+
 _RL_TRAINED_KEY  = "counterfactual:rl_trained:"     # + date → dedupe flag
 _MEM_TRAINED_KEY = "counterfactual:mem_trained:"    # + date → dedupe flag
 
@@ -395,6 +430,7 @@ async def train_rl_from_labels(day: str) -> int:
             WHERE d.cf_pnl_pct IS NOT NULL AND d.executed = FALSE
               AND COALESCE(sm.date,
                            (d.created_at AT TIME ZONE 'Asia/Kolkata')::date::text) = :day
+              """ + _TRADEABLE_ENTRY_SQL + """
         """), {"day": day})).fetchall()
     if not rows:
         return 0
@@ -458,6 +494,7 @@ async def promote_memory_phantoms(day: str) -> int:
             WHERE d.cf_pnl_pct IS NOT NULL AND d.executed = FALSE
               AND COALESCE(sm.date,
                            (d.created_at AT TIME ZONE 'Asia/Kolkata')::date::text) = :day
+              """ + _TRADEABLE_ENTRY_SQL + """
             ORDER BY ABS(d.cf_pnl_pct) DESC
         """), {"day": day})).fetchall()
 
@@ -514,9 +551,13 @@ _AB_TRAINED_KEY   = "counterfactual:ab_trained:"          # + date → dedupe fl
 _AB_STORE_KEY     = "counterfactual:ab_store_trained:"    # + date → dedupe flag
 _AB_MAX_PER_DAY   = 4000                                  # decision sample cap per day
 _AB_STORE_STRIDE  = 3        # store population: an entry every N minutes
-_AB_STORE_LAST_ENTRY_MIN = 13 * 60 + 30   # entries up to 13:30 IST — matches the
-                                          # live entry-cutoff regime the winning
-                                          # policy would actually trade under
+# The store population always had a cutoff, but at 13:30 — 30 minutes past the
+# live gates' 13:00. That half-hour gap is not academic: it is one reason the
+# two populations ranked the exit variants differently, since `sessions` carried
+# post-square-off entries and `store` did not. Both now derive from the same
+# constant, so the populations differ only in how entries are CHOSEN, which is
+# the whole point of running both.
+_AB_STORE_LAST_ENTRY_MIN = _ENTRY_CUTOFF_MIN
 
 _AB_DDL = """CREATE TABLE IF NOT EXISTS cf_exit_ab (
     day         TEXT NOT NULL,
@@ -598,6 +639,7 @@ async def run_exit_ab(day: str, force: bool = False) -> dict:
             WHERE d.cf_pnl_pct IS NOT NULL
               AND COALESCE(sm.date,
                            (d.created_at AT TIME ZONE 'Asia/Kolkata')::date::text) = :day
+              """ + _TRADEABLE_ENTRY_SQL + """
             ORDER BY d.id
         """), {"day": day})).fetchall()
     if not rows:
@@ -665,7 +707,8 @@ async def run_exit_ab_store(day: str, force: bool = False) -> dict:
                 h, m = int(bars[i]["time"].split(":")[0]), int(bars[i]["time"].split(":")[1])
             except (KeyError, ValueError, IndexError):
                 continue
-            if (h * 60 + m) > _AB_STORE_LAST_ENTRY_MIN:
+            # >= , not > : the live gate refuses an entry AT the cutoff minute.
+            if (h * 60 + m) >= _AB_STORE_LAST_ENTRY_MIN:
                 break
             for name, policy in EXIT_VARIANTS.items():
                 pnl = _simulate_policy(bars, inds, i + 1, policy)
