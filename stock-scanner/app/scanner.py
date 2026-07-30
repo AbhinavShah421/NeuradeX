@@ -806,8 +806,13 @@ async def _fetch_daily(client: httpx.AsyncClient, symbol: str) -> list[dict]:
 # Resolved once per trading day and cached in Redis (survives restarts), with
 # graceful degradation nse → directory → bundled if a source is unavailable.
 UNIVERSE_SOURCE      = os.getenv("SCAN_UNIVERSE_SOURCE", "nse").lower()
-NSE_EQUITY_LIST_URL  = os.getenv("NSE_EQUITY_LIST_URL",
-                                 "https://archives.nseindia.com/content/equities/EQUITY_L.csv")
+# NSE moved its archive host; the old archives.nseindia.com now 503s. Try the
+# env override first, then each known host in order.
+NSE_EQUITY_LIST_URLS = [u for u in (
+    os.getenv("NSE_EQUITY_LIST_URL"),
+    "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv",
+    "https://archives.nseindia.com/content/equities/EQUITY_L.csv",
+) if u]
 _UNIVERSE_CACHE_KEY  = "ai_engine:scan_universe"
 _universe_cache: dict = {"date": None, "universe": None}
 
@@ -816,10 +821,20 @@ async def _fetch_nse_equity_universe() -> dict[str, str]:
     """Every NSE-listed equity (EQ series) from the official equity master CSV."""
     import csv, io
     headers = {"User-Agent": _UA["User-Agent"], "Accept": "text/csv,application/csv,*/*"}
+    rows: list[list[str]] = []
+    last_exc: Exception | None = None
     async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
-        r = await client.get(NSE_EQUITY_LIST_URL, headers=headers)
-        r.raise_for_status()
-        rows = list(csv.reader(io.StringIO(r.text)))
+        for url in NSE_EQUITY_LIST_URLS:
+            try:
+                r = await client.get(url, headers=headers)
+                r.raise_for_status()
+                rows = list(csv.reader(io.StringIO(r.text)))
+                break
+            except Exception as exc:
+                last_exc = exc
+                logger.warning("NSE equity list fetch failed from %s (%s)", url, exc)
+    if not rows and last_exc is not None:
+        raise last_exc
     if not rows:
         return {}
     head = [h.strip().upper() for h in rows[0]]
@@ -877,8 +892,10 @@ async def _load_universe() -> dict[str, str]:
         except Exception as exc:
             logger.warning("directory universe fetch failed (%s); using bundled list", exc)
     if not uni:
-        uni = dict(UNIVERSE)
-        logger.info("scan universe: bundled fallback → %d symbols", len(uni))
+        # Degraded mode: don't cache (in Redis or in-process), so the next sweep
+        # retries the real sources instead of being stuck on 108 stocks all day.
+        logger.info("scan universe: bundled fallback → %d symbols (not cached)", len(UNIVERSE))
+        return dict(UNIVERSE)
 
     try:
         rc = await _get_redis()
