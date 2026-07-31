@@ -108,15 +108,33 @@ async def set_auto_scan(enabled: bool) -> None:
 
 
 async def get_auto_scan_interval() -> int:
-    """Gap between scheduled auto sweeps (seconds); Redis override wins over env."""
+    """Gap between scheduled auto sweeps (seconds).
+
+    Inside the entry window the gap is capped at ENTRY_WINDOW_SCAN_GAP,
+    because that is the only time a newly-promoted symbol can still be traded.
+    Outside it, the configured gap (Redis override, else SCAN_INTERVAL) applies.
+
+    Why the cap exists — 2026-07-31: the pre-open sweep finished at 09:23 and
+    the runtime override was 3h, so the next look at the universe began at
+    12:23. 63MOONS rallied 09:15-10:15 and simply was not being watched: its
+    first decision landed at 12:25, two hours after the move, and entries taken
+    anywhere in that first hour averaged +1.365%. The pre-open scan runs on
+    pre-open data by construction, so it can never see a stock that gaps and
+    runs at the open — only a prompt intraday re-sweep can.
+    """
+    configured = SCAN_INTERVAL
     try:
         r = await _get_redis()
         val = await r.get(_AUTO_INTERVAL_KEY)
         if val:
-            return max(300, min(6 * 3600, int(val)))
+            configured = max(300, min(6 * 3600, int(val)))
     except Exception:
         pass
-    return SCAN_INTERVAL
+    now = _ist_now()
+    minutes = now.hour * 60 + now.minute
+    if now.weekday() < 5 and MARKET_OPEN_MIN <= minutes < ENTRY_CUTOFF_MIN:
+        return min(configured, ENTRY_WINDOW_SCAN_GAP)
+    return configured
 
 
 async def set_auto_scan_interval(seconds: int) -> int:
@@ -444,6 +462,16 @@ MARKET_OPEN_MIN  = int(os.getenv("SCAN_MARKET_OPEN_MIN", str(9 * 60 + 15)))    #
 MARKET_CLOSE_MIN = int(os.getenv("SCAN_MARKET_CLOSE_MIN", str(15 * 60 + 30)))  # 15:30
 PREMARKET_MIN    = int(os.getenv("SCAN_PREMARKET_MIN", str(9 * 60)))           # 09:00 pre-open scan
 POSTMARKET_MIN   = int(os.getenv("SCAN_POSTMARKET_MIN", str(15 * 60 + 40)))    # 15:40 grade
+# Sessions stop opening positions at 13:00 IST (sessions_service's
+# _LATE_ENTRY_CUTOFF_MIN), so a symbol promoted after this can no longer be
+# traded today — scanning aggressively past it buys nothing.
+ENTRY_CUTOFF_MIN = int(os.getenv("SCAN_ENTRY_CUTOFF_MIN", str(13 * 60)))       # 13:00
+# Maximum gap between sweeps INSIDE the entry window. A full sweep of the
+# ~2,075-symbol universe takes ~21 min, so this is the dominant term in how
+# long a fresh breakout waits to be noticed: worst case is roughly this gap
+# plus one sweep. At the previous 3h override that worst case was ~3h20m and
+# the entry window got exactly one sweep.
+ENTRY_WINDOW_SCAN_GAP = int(os.getenv("SCAN_ENTRY_WINDOW_GAP_SECS", "900"))    # 15 min
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
 
