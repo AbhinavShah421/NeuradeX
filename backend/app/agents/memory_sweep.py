@@ -7,6 +7,7 @@ unbounded growth. LIVE cases (real trade outcomes) are preserved untouched.
 """
 from __future__ import annotations
 import asyncio
+import os
 from datetime import datetime, timedelta, timezone
 
 from app.config import settings
@@ -38,6 +39,21 @@ async def run_memory_sweep(
     global _last_sweep
     if _sweep_lock.locked():
         return {"status": "already_running"}
+
+    # Honour the pattern-memory freeze (REPLAY_MEMORY_WRITES=0), same flag the
+    # session engine's per-trade _feed_memory respects. This sweep bulk-REPLACES
+    # every BACKTEST case in a single transaction, so during a validation batch it
+    # silently rewrites the bank the memory agent gates entries on, mid-run —
+    # sessions before and after face different evidence, which is the exact
+    # confound the freeze exists to prevent. Observed 2026-07-27: the scheduled
+    # sweep fired ~3h into a 15h batch and rewrote all 7,039 BACKTEST cases while
+    # per-trade writes were correctly blocked. Read at call time, not import time,
+    # since the sweep runs on a long timer.
+    if os.getenv("REPLAY_MEMORY_WRITES", "1").lower() in ("0", "false", "no"):
+        logger.info("Pattern memory sweep skipped — REPLAY_MEMORY_WRITES=0 (bank frozen)",
+                    extra={"log_type": "ai_engine", "event": "memory_sweep_skipped",
+                           "trigger": trigger})
+        return {"status": "skipped_frozen", "trigger": trigger}
 
     async with _sweep_lock:
         # Imported lazily to avoid a circular import at module load time

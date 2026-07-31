@@ -372,8 +372,20 @@ def _entry_fingerprint(candles: list[dict]):
         return None, "unknown"
 
 
+# Simulated sessions normally feed their closed trades back into the pattern-memory
+# bank. During a *validation* batch (re-running a fixed symbol/date universe to
+# measure the current entry gate) that write-back is a confound: the bank the
+# memory agent gates on would grow as the batch progresses, so late sessions face
+# a different gate than early ones and the run corrupts its own measurement.
+# Set REPLAY_MEMORY_WRITES=0 to freeze the bank for the duration of such a batch.
+# Default "1" — unchanged behaviour for normal replay/backtest use.
+_REPLAY_MEMORY_WRITES = os.getenv("REPLAY_MEMORY_WRITES", "1").lower() not in ("0", "false", "no")
+
+
 async def _feed_memory(symbol: str, fp, regime: str, pnl_pct: float, entry: float, exit_: float, mode: str):
     if not fp:
+        return
+    if mode in ("replay", "backtest") and not _REPLAY_MEMORY_WRITES:
         return
     try:
         from app.agents import get_memory

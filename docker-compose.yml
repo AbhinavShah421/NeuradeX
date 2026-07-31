@@ -303,6 +303,12 @@ services:
       NEWS_MIN_SCORE: "0.3"
       BACKEND_ROLE: "runner"    # session runner + ML sweeps only, no HTTP load
       CANDLE_STORE_DIR: /data/candles
+      # Set to 0 only while running a validation batch (re-running a fixed
+      # symbol/date universe to measure the current entry gate). Replay trades
+      # normally feed pattern_memory, which the memory agent gates entries on —
+      # during a batch that write-back grows the bank mid-run, so late sessions
+      # face a different gate than early ones. Defaults to 1 (normal learning).
+      REPLAY_MEMORY_WRITES: ${REPLAY_MEMORY_WRITES:-1}
     volumes:
       - ./backend/app:/app/app
       - candle_data:/data/candles      # 1s tick-store dataset (shared read/write)
