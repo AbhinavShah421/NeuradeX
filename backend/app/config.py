@@ -148,6 +148,17 @@ class Settings(BaseSettings):
     MEMORY_SWEEP_HOUR_IST: int = 2        # run at ~02:00 IST (after market close)
     MEMORY_SWEEP_LOOKBACK_DAYS: int = 730 # 2 years of daily candles per symbol
 
+    # Loss learning (post-mortems on losing trades). This only ever existed as a
+    # manual POST /ai-engine/loss-learning/run endpoint, so it ran exactly as
+    # often as somebody remembered to call it — the last time was 2026-06-18,
+    # leaving 60 post-mortems and a stale lessons cache while the losing trades
+    # kept accumulating. Runs at 03:00 IST, an hour after the memory sweep, so
+    # the two LLM-backed jobs don't contend for ollama.
+    LOSS_LEARNING_ENABLED: bool = True
+    LOSS_LEARNING_HOUR_IST: int = 3
+    LOSS_LEARNING_LIMIT: int = 200        # recent trades scanned per run
+    LOSS_LEARNING_MAX_NEW: int = 25       # new post-mortems per run (LLM calls)
+
     # Gradient-Boosted P(up) model nightly auto-retrain (rotates the universe so it
     # strengthens over successive runs, like the pattern model)
     GBM_AUTOTRAIN_ENABLED: bool = True

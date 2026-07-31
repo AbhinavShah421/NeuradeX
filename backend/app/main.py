@@ -89,6 +89,18 @@ async def lifespan(app: FastAPI):
             except Exception as exc:
                 logger.warning("Could not schedule GBM auto-retrain: %s", exc)
 
+            # Nightly loss post-mortems. Previously reachable only through its
+            # manual endpoint, so it last ran 2026-06-18 while losing trades kept
+            # accumulating and the active-lessons cache the entry prompts read
+            # went stale.
+            try:
+                from app.services.ai_engine_service import loss_learning_loop
+                app.state.loss_learning_task = asyncio.create_task(loss_learning_loop())
+                logger.info("Loss-learning nightly post-mortems scheduled",
+                            extra={"log_type": "app_lifecycle", "event": "loss_learning_scheduled"})
+            except Exception as exc:
+                logger.warning("Could not schedule loss learning: %s", exc)
+
             # Background runner that advances live trading sessions server-side
             try:
                 from app.api.sessions import session_runner_loop

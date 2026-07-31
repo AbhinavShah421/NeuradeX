@@ -726,9 +726,14 @@ async def _refresh_active_lessons() -> list[dict]:
                 GROUP BY failure_mode ORDER BY n DESC, avg_loss ASC LIMIT 12
             """))).fetchall()
         for r in rows:
+            # pnl_pct is stored as a FRACTION here (it is copied straight from
+            # the feedback-service, which reports trade_records.pnl_pct — e.g.
+            # -0.0045 for a -0.45% loss). Rounding the fraction to 2 dp made
+            # every lesson read "avg -0.0%", so the decision prompts were told
+            # each past mistake had cost nothing. Convert to percent first.
             lessons.append({
                 "failure_mode": r[0], "occurrences": int(r[1]),
-                "avg_loss_pct": round(float(r[2] or 0), 2),
+                "avg_loss_pct": round(float(r[2] or 0) * 100.0, 2),
                 "lesson": r[3], "avoid_when": r[4],
             })
     except Exception as exc:
@@ -793,6 +798,53 @@ async def loss_learning_run(limit: int = 60, max_new: int = 15):
 
     lessons = await _refresh_active_lessons()
     return {"status": "success", "data": {"losing_trades": len(losses), "newly_analyzed": analyzed, "lessons": len(lessons)}}
+
+
+def _seconds_until_hour_ist(hour: int) -> float:
+    """Seconds until the next occurrence of `hour` in IST."""
+    from datetime import datetime, timedelta, timezone
+    ist = timezone(timedelta(hours=5, minutes=30))
+    now = datetime.now(ist)
+    target = now.replace(hour=hour % 24, minute=0, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return (target - now).total_seconds()
+
+
+async def loss_learning_loop() -> None:
+    """Run the loss post-mortems once daily at LOSS_LEARNING_HOUR_IST.
+
+    loss_learning_run was only ever reachable through its manual endpoint, so it
+    ran when somebody remembered to call it — last on 2026-06-18. Losing trades
+    kept accruing while the post-mortem table and the active-lessons cache the
+    entry prompts read from both went stale. Same shape as the memory sweep and
+    GBM auto-retrain loops: sleep to the target hour, run, back off an hour on
+    failure.
+    """
+    from app.config import settings
+    if not getattr(settings, "LOSS_LEARNING_ENABLED", True):
+        logger.info("Loss learning disabled via config")
+        return
+    while True:
+        try:
+            wait = _seconds_until_hour_ist(int(getattr(settings, "LOSS_LEARNING_HOUR_IST", 3)))
+            logger.info("Next loss-learning run in %.0f min", wait / 60)
+            await asyncio.sleep(wait)
+            res = await loss_learning_run(
+                limit=int(getattr(settings, "LOSS_LEARNING_LIMIT", 200)),
+                max_new=int(getattr(settings, "LOSS_LEARNING_MAX_NEW", 25)),
+            )
+            data = (res or {}).get("data", {})
+            logger.info("loss-learning run: %s losing trades, %s new post-mortems, %s lessons",
+                        data.get("losing_trades"), data.get("newly_analyzed"), data.get("lessons"),
+                        extra={"log_type": "ai_engine", "event": "loss_learning_run",
+                               "newly_analyzed": data.get("newly_analyzed"),
+                               "lessons": data.get("lessons")})
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.error("Scheduled loss-learning error: %s", exc)
+            await asyncio.sleep(3600)
 
 
 async def loss_learning_postmortems(limit: int = 50):
