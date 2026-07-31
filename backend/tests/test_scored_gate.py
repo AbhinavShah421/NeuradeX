@@ -53,7 +53,7 @@ BUY3 = [  # 3 BUY incl. a reliable voter, no SELL → consensus 30 + co-sign 10
     {"agent_name": "technical", "action": "HOLD", "confidence": 0.50},
 ]
 
-THIN_NET = [  # 2 BUY - 1 non-structural SELL = net 1 → consensus 22
+THIN_NET = [  # 2 BUY - 1 non-structural SELL = net 1 → consensus 15
     {"agent_name": "sentiment", "action": "BUY", "confidence": 0.64},
     {"agent_name": "momentum", "action": "BUY", "confidence": 0.55},
     {"agent_name": "technical", "action": "SELL", "confidence": 0.60},
@@ -99,27 +99,32 @@ def test_textbook_setup_enters(monkeypatch):
     assert "Entry [score" in s["last_decision"]["reason"]
 
 
-def test_one_shortfall_rsi56_still_enters(monkeypatch):
-    # RSI 56 costs 11 (25→14): 30+10+25+14+5 = 84 ≥ 78. The old AND-gate
-    # blocked this outright ("insufficient strength").
-    ind = dict(UPTREND_IND, rsi=56.0)
-    s = _run(monkeypatch, BUY3, ind)
-    assert s["position"]["status"] == "LONG"
+def test_rsi_is_not_a_shortfall(monkeypatch):
+    # RSI was neutralised 2026-07-28: on 52,794 CF-labeled decisions it showed a
+    # 2.1-point hit-rate spread across its whole range with no ordering, so it
+    # costs nothing at any level. 30+10+25+25+5 = 95 ≥ 78 regardless of RSI.
+    for rsi in (40.0, 56.0, 63.0, 78.0):
+        s = _run(monkeypatch, BUY3, dict(UPTREND_IND, rsi=rsi))
+        assert s["position"]["status"] == "LONG", f"RSI {rsi} should not block"
 
 
 def test_one_shortfall_thin_net_still_enters(monkeypatch):
-    # Net consensus 1 costs 8 (30→22): 22+10+25+25+5 = 87 ≥ 78. The old gate's
-    # "panel dissent" rule blocked this outright.
+    # Net consensus 1 costs 15 (30→15, repriced 2026-07-17 — CF labels put
+    # net=1 in a 25%-win class): 15+10+25+25+5 = 80 ≥ 78. Alone on a perfect
+    # tape it still enters; the old gate's "panel dissent" rule blocked it
+    # outright.
     s = _run(monkeypatch, THIN_NET, UPTREND_IND)
     assert s["position"]["status"] == "LONG"
 
 
 def test_two_shortfalls_block(monkeypatch):
-    # Thin net AND weak RSI: 22+10+25+14+5 = 76 < 78 — quality debt compounds.
-    ind = dict(UPTREND_IND, rsi=56.0)
+    # Quality debt still compounds — but RSI is no longer one of the debts it can
+    # be built from (see test_rsi_is_not_a_shortfall). Thin net AND a broken SMA
+    # leg: 15 + 10 + 13(vwap only) + 25 + 5 = 68 < 78.
+    ind = dict(UPTREND_IND, sma5=99.5, sma20=100.5)   # price still above VWAP
     s = _run(monkeypatch, THIN_NET, ind)
     assert s["position"]["status"] == "NONE"
-    assert "entry score 76 < 78" in s["last_decision"]["reason"]
+    assert "entry score 68 < 78" in s["last_decision"]["reason"]
 
 
 # ── The risk stops stay hard ─────────────────────────────────────────────────
@@ -132,11 +137,14 @@ def test_falling_knife_is_hard_block(monkeypatch):
     assert "falling knife" in s["last_decision"]["reason"]
 
 
-def test_rsi_below_45_is_hard_block(monkeypatch):
+def test_rsi_below_45_no_longer_blocks(monkeypatch):
+    # Was a hard veto ("failing bounce", justified on 8 CF samples). At n=11,177
+    # entry-eligible decisions the <45 band hit 32.1% — the second-best band of
+    # five — so vetoing it was discarding an average-or-better population.
     ind = dict(UPTREND_IND, rsi=40.0)
     s = _run(monkeypatch, BUY3, ind)
-    assert s["position"]["status"] == "NONE"
-    assert "failing bounce" in s["last_decision"]["reason"]
+    assert s["position"]["status"] == "LONG"
+    assert "failing bounce" not in s["last_decision"]["reason"]
 
 
 def test_trusted_dissent_is_hard_block(monkeypatch):

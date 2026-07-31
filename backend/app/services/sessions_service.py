@@ -483,9 +483,14 @@ async def _finalize_session(s: dict) -> None:
         logger.warning("_finalize_session failed: %s", exc)
 
 
-_WARMUP_BARS = 25           # min bars before ANY entry — RSI(14)/SMA20 return neutral
+_WARMUP_BARS = 30           # min bars before ANY entry — RSI(14)/SMA20 return neutral
                             # placeholders below this and the gate scored them as real
-                            # (2026-07-15: two first-15-min entries on default RSI 50.0)
+                            # (2026-07-15: two first-15-min entries on default RSI 50.0).
+                            # 25 → 30 (2026-07-17): day_structure needs 30 candles, so
+                            # bars 25-29 ran with the top-of-range/R-R veto offline —
+                            # BHEL entered at bar 26 on the day's exact high tick
+                            # (446.45, stoch 100) and was the day's only loss. Entry
+                            # opens only when the full panel is live.
 _MEM_VOTE_MIN_CASES = 3     # memory BUY counts toward consensus only with this many
                             # similar cases behind it (its own ensemble gate arms at 8)
 _PAPER_DROP_CANDLES = 6     # N consecutive lower closes = drop pattern (3 was triggering on normal chop)
@@ -666,8 +671,14 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
             if net_consensus >= 2:
                 score += 30
             elif net_consensus == 1:
-                score += 22
-                blocked.append(f"thin net consensus: {buy_votes} BUY - {sell_voters_n} SELL = 1 (-8)")
+                # 22 → 15 (2026-07-17): the CF ladder above prices net=1 as a
+                # 25%-win class, yet it cost less than an RSI shading (-11) —
+                # 2026-07-17 BHEL entered net-1 (rl actively SELL) at 92/78 and
+                # was the day's only loss. Alone on a perfect tape it still
+                # clears (15+10+25+25+5 = 80); paired with ANY other shortfall
+                # it now blocks.
+                score += 15
+                blocked.append(f"thin net consensus: {buy_votes} BUY - {sell_voters_n} SELL = 1 (-15)")
             else:
                 score += 12
                 blocked.append(f"panel dissent: net consensus {buy_votes} BUY - {sell_voters_n} SELL "
@@ -734,51 +745,28 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         # require positive momentum: a pullback within the uptrend is a better long
         # than chasing strength, so a mildly-negative mom is fine.)
         rsi_now = ind.get("rsi", 50.0)
-        # Level alone isn't enough: the band can be hit from ABOVE, when an
-        # opening spike rolls over (2026-07-10: CGCL entered at RSI 76.7→69.4
-        # and ATHERENERG at 64.4→58.9, the two biggest losses of the day, while
-        # every winner entered with RSI rising). Require the band to be reached
-        # from below — falling RSI in the band is a rollover, not strength.
-        # 1.0-pt tolerance so a flat RSI doesn't flap the gate.
-        rsi_prev = _intraday_indicators(window, idx - 2).get("rsi", rsi_now) if idx >= 2 else rsi_now
-        rsi_falling = rsi_now < rsi_prev - 1.0
-        # RSI entry band [58, 70] — "trade strength, not weakness". Win rate is
-        # MONOTONIC in entry RSI across the strict CF-labeled population (n=127):
-        #   RSI 45-55  54% win / -0.14%   ← coin flips, negative after costs
-        #   RSI 55-60  64%
-        #   RSI 60-65  68%
-        #   RSI 65-70 100% / +0.42%
-        # In a confirmed uptrend, RSI in the 45-55 zone is a stalling/failing
-        # bounce, not a pullback to buy. Floor raised 45 → 58 (2026-07-09): on
-        # the labeled population this lifts the entry set from 66% → ~83% win
-        # and roughly DOUBLES avg P&L, at ~half the trade count — a precision-
-        # over-volume choice toward the 90% target. The <45 case keeps its own
-        # message since it's the extreme of the same failure.
-        _RSI_FLOOR = 58
-        # RSI timing points (max 25), graded by the CF win-rate ladder above:
-        # the [58,70] band earns full marks, 52-58 partial (64% zone shading
-        # into coin-flip), 45-52 nearly nothing, >70 a token (unproven above
-        # the band). <45 stays a HARD block (0/8 on CF labels). A falling RSI
-        # costs 13 — reaching the band from above is a rollover, not strength.
-        if rsi_now < 45:
-            hard_block = True
-            blocked.append(f"failing bounce (RSI {rsi_now:.0f}<45) — dip entries in "
-                           f"uptrends lost 8/8 on CF labels; wait for strength")
-        else:
-            if _RSI_FLOOR <= rsi_now <= 70:
-                rsi_pts = 25
-            elif rsi_now < _RSI_FLOOR:
-                rsi_pts = 14 if rsi_now >= 52 else 5
-                blocked.append(f"insufficient strength (RSI {rsi_now:.0f}<{_RSI_FLOOR}) — "
-                               f"the 45-58 zone wins ~55-60% (coin-flip) (-{25 - rsi_pts})")
-            else:
-                rsi_pts = 5
-                blocked.append(f"overbought (RSI {rsi_now:.0f}>70) — extended past the proven band (-20)")
-            if rsi_falling:
-                rsi_pts = max(0, rsi_pts - 13)
-                blocked.append(f"RSI falling ({rsi_prev:.0f}→{rsi_now:.0f}) — "
-                               f"spike rollover, not strength (-13)")
-            score += rsi_pts
+        # ── RSI timing: NEUTRALISED 2026-07-28 (was max 25 pts + a <45 hard block) ──
+        # The old ladder ([58,70] full marks, 52-58 partial, <45 hard block) came
+        # from a CF-labeled population of n=127 that showed win-rate rising
+        # monotonically 54% → 100% with entry RSI. That ladder does not survive
+        # sample size. Re-measured on the 2026-07-27 batch — 52,794 CF-labeled
+        # decisions over 9 trading days — RSI has NO discriminating power, both
+        # unconditionally and within the entry-eligible population (>=2 BUY votes
+        # and at least one trend leg intact, n=11,177):
+        #     RSI <45    32.1% hit      RSI 52-58   30.5%
+        #     RSI 45-52  31.9%          RSI 58-70   32.6%   ← the old "proven band"
+        #                               RSI >70     31.4%
+        # A 2.1-point spread across the whole range, with no ordering: the band
+        # the gate paid 25 points for is indistinguishable from the zone it hard-
+        # blocked. Note <45 (32.1%) scored SECOND BEST while being an outright
+        # veto — the "dip entries lost 8/8 on CF labels" evidence was 8 samples.
+        #
+        # Points are awarded unconditionally rather than deleted so score_min
+        # (86/78/65) keeps its meaning against an unchanged 0-100 scale. Net
+        # effect: strictly more entries, no loss of entry quality — which also
+        # relieves the sample-size problem that blocks validating anything else.
+        # rsi_now is still surfaced in the reason string for diagnostics.
+        score += 25
         # The confidence band only describes a BUY decision. When the ensemble's
         # winning action is HOLD (gentle/loose entering on BUY support), its
         # confidence is the HOLD confidence — irrelevant to the BUY, so skip it.
