@@ -159,6 +159,14 @@ class Settings(BaseSettings):
     LOSS_LEARNING_LIMIT: int = 200        # recent trades scanned per run
     LOSS_LEARNING_MAX_NEW: int = 25       # new post-mortems per run (LLM calls)
 
+    # LLM rejection reviewer — points the model at what the gate THREW AWAY
+    # rather than what it accepted. Runs at 04:00 IST, after counterfactual
+    # labelling, so every verdict is scoreable against a known outcome the
+    # model never saw. Shadow only; see services/llm_rejection_review.py.
+    LLM_REJECTION_REVIEW_ENABLED: bool = True
+    LLM_REJECTION_REVIEW_HOUR_IST: int = 4
+    LLM_REJECTION_REVIEW_CAP: int = 40    # LLM calls per nightly sweep
+
     # Gradient-Boosted P(up) model nightly auto-retrain (rotates the universe so it
     # strengthens over successive runs, like the pattern model)
     GBM_AUTOTRAIN_ENABLED: bool = True

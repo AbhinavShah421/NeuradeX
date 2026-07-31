@@ -101,6 +101,19 @@ async def lifespan(app: FastAPI):
             except Exception as exc:
                 logger.warning("Could not schedule loss learning: %s", exc)
 
+            # LLM rejection reviewer — the model aimed at the ~250k decisions
+            # the gate declined rather than the ~600 it took. Runs after
+            # counterfactual labelling so every verdict is immediately
+            # scoreable against an outcome the model never saw.
+            try:
+                from app.services.llm_rejection_review import rejection_review_loop
+                app.state.llm_rejection_task = asyncio.create_task(rejection_review_loop())
+                logger.info("LLM rejection review scheduled",
+                            extra={"log_type": "app_lifecycle",
+                                   "event": "llm_rejection_review_scheduled"})
+            except Exception as exc:
+                logger.warning("Could not schedule LLM rejection review: %s", exc)
+
             # Background runner that advances live trading sessions server-side
             try:
                 from app.api.sessions import session_runner_loop

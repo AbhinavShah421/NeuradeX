@@ -527,3 +527,19 @@ async def exit_variants(days: int = 14):
     This is the evidence table for changing the live exit policy."""
     from app.agents.counterfactual import exit_ab_report
     return {"status": "success", "data": await exit_ab_report(days)}
+
+
+@router.get("/llm/rejection-review")
+async def llm_rejection_review_report(days: int = 30):
+    """Scorecard for the LLM rejection reviewer: what the setups it wanted to
+    take actually did, versus the ones it agreed to skip. `edge_pts` > 0 means
+    its judgement carries information the gate did not have."""
+    from app.services.llm_rejection_review import rejection_review_report
+    return {"status": "success", "data": await rejection_review_report(days)}
+
+
+@router.post("/llm/rejection-review/run")
+async def llm_rejection_review_run(day: str | None = None, limit: int = 40):
+    """Run the rejection review now (normally nightly at 04:00 IST)."""
+    from app.services.llm_rejection_review import review_rejections
+    return {"status": "success", "data": await review_rejections(day, limit)}

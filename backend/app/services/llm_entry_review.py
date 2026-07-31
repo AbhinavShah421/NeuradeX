@@ -17,11 +17,13 @@ import asyncio
 import json
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from app.utils.elk_logger import get_logger
 
 logger = get_logger(__name__)
+
+_IST = timezone(timedelta(hours=5, minutes=30))
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS llm_entry_reviews (
@@ -63,6 +65,8 @@ def _build_dossier(symbol: str, candle: dict, agents: list[dict], ind: dict,
     return {
         "symbol": symbol,
         "time": candle.get("time"),
+        # The day being TRADED (replay/backtest sessions trade a past date).
+        "trade_date": session.get("date"),
         "price": candle.get("close"),
         "gate": gate_label,
         "mode": session.get("mode", "paper"),
@@ -139,8 +143,15 @@ async def _review(dossier: dict, session_id: str | None) -> None:
                 VALUES (:sid,:sym,:d,:ct,:px,:v,:c,:r,:m,:lat,:dos)
                 ON CONFLICT (symbol, trade_date, candle_time) DO NOTHING
             """), {
+                # The SESSION's trading date, not the server's today: a replay
+                # or backtest session reviews a historical bar, and stamping it
+                # with the wall-clock date silently detaches the verdict from
+                # the decision it judged (the join to outcomes then finds
+                # nothing). Live/paper sessions are unaffected — for them the
+                # two are the same day.
                 "sid": session_id, "sym": dossier["symbol"],
-                "d": datetime.now().date(), "ct": dossier.get("time"),
+                "d": dossier.get("trade_date") or datetime.now(_IST).date(),
+                "ct": dossier.get("time"),
                 "px": dossier.get("price"), "v": verdict, "c": conf,
                 "r": reason, "m": active_model(), "lat": latency,
                 "dos": json.dumps(dossier, default=str),
