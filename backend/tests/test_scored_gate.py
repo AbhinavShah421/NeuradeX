@@ -46,15 +46,15 @@ def _session() -> dict:
 UPTREND_IND = {"rsi": 63.0, "vwap": 100.0, "sma5": 100.4, "sma20": 100.1,
                "mom5": 0.1, "atr": 0.2}
 
-BUY3 = [  # 3 BUY incl. a reliable voter, no SELL → consensus 30 + co-sign 10
-    {"agent_name": "sentiment", "action": "BUY", "confidence": 0.64},
+BUY3 = [  # 3 BUY incl. a reliable voter (gbm), no SELL → consensus 30 + co-sign 10
+    {"agent_name": "gbm", "action": "BUY", "confidence": 0.64},
     {"agent_name": "pattern", "action": "BUY", "confidence": 0.60},
     {"agent_name": "momentum", "action": "BUY", "confidence": 0.55},
     {"agent_name": "technical", "action": "HOLD", "confidence": 0.50},
 ]
 
 THIN_NET = [  # 2 BUY - 1 non-structural SELL = net 1 → consensus 15
-    {"agent_name": "sentiment", "action": "BUY", "confidence": 0.64},
+    {"agent_name": "gbm", "action": "BUY", "confidence": 0.64},
     {"agent_name": "momentum", "action": "BUY", "confidence": 0.55},
     {"agent_name": "technical", "action": "SELL", "confidence": 0.60},
 ]

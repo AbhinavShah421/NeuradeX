@@ -60,17 +60,64 @@ TRADE_GATE_KEY = "ai_engine:trade_gate"
 # (win-rate 16% at >0.90 vs 40% at 0.50–0.60). So disciplined gates also skip
 # OVER-confident setups. Expectancy on the [floor, ceiling] band is positive
 # where the unbounded gate was negative. "loose" stays uncapped by design.
-# Agents whose BUY vote is genuinely predictive. Forensics over the full 14k
-# round-trip history (intraday, WIN/LOSS): pattern BUY 48.2% win / +0.38% avg,
-# sentiment BUY 44.1% / +0.27% — the only two positive-EV BUY voters. memory
-# (21.8%) and gbm (~base-rate) were previously in this set on older, smaller
-# analysis and are removed: their BUYs showed no edge at scale.
-# rl + meanrev added 2026-07-07: forward-return audit of that day's 2,531 live
-# bars showed rl BUY 65% hit / +0.39% avg-30m (n=100) and meanrev 60% / +0.17%
-# (n=310), while pattern was near-mute on 1-min bars (since fixed) — the old
-# two-agent set left the co-sign gate resting on sentiment alone. Single-day
-# evidence at 1-min scale: re-audit after a week of live entries.
-_RELIABLE_BUY_AGENTS = frozenset({"sentiment", "pattern", "rl", "meanrev"})
+# Agents whose BUY vote is genuinely predictive.
+#
+# Re-audited 2026-07-31 on 142,194 counterfactual-labelled tradeable bars over
+# 24 market days — the "re-audit after a week of live entries" the previous
+# single-day note asked for. Each agent's BUY lift over the day's base rate,
+# with the days split in half so the ranking is not just fitted to itself:
+#
+#     agent           train      test     verdict
+#     gbm            +0.004    +0.133     positive in both
+#     meanrev        +0.027    +0.075     positive in both
+#     day_structure  +0.054    +0.018     positive in both
+#     memory         +0.016    +0.014     positive in both (most stable)
+#     pattern        -0.008    -0.022     NEGATIVE in both
+#     technical      -0.011    -0.037     NEGATIVE in both
+#     sentiment      +0.019    -0.086     flips sign
+#     regime/volatility/momentum          flip sign — noise
+#
+# So three of the four agents this set used to name were the wrong ones:
+# pattern is negative out-of-sample and carries the lowest learned weight in
+# the panel (0.41 — the learning system had already worked this out, and the
+# hardcoded set was overriding it); sentiment flips sign and is a placeholder
+# model absent from 96.6% of bars, so it could rarely co-sign at all; rl votes
+# BUY on 1.1% of bars, so it was nearly a no-op as a required co-signer. The
+# earlier "memory 21.8% / gbm ~base-rate" reading came from the small
+# executed-trade sample; on the counterfactual population both are positive.
+#
+# Day-level (the correct unit — intraday decisions are highly correlated),
+# requiring >= 1 of this set lifts P&L by +0.101 pts/day, t=2.37, positive on
+# 16 of 20 days, while covering 36% MORE bars than the old set. Composition
+# also beats raw vote count: holding total BUY votes fixed at 3, the wrong
+# three score -0.217 and the right two -0.090 — a 0.158 pt spread from WHO
+# voted, not how many.
+_RELIABLE_BUY_AGENTS = frozenset({"gbm", "meanrev", "memory", "day_structure"})
+
+# Agents trusted enough that a confident SELL from them HARD-BLOCKS an entry.
+#
+# Deliberately NOT _RELIABLE_BUY_AGENTS. Being right about when to buy is a
+# different claim from being right about when to stay out, and the data says
+# they do not travel together. Lift in subsequent P&L when an agent votes SELL
+# at >= 0.75 (a genuine bear signal should be NEGATIVE — returns worse than
+# base — so positive means the agent is anti-predictive when bearish):
+#
+#     meanrev        -0.032   genuinely bearish, but exempt as structural
+#     day_structure  -0.007   genuinely bearish, but exempt as structural
+#     gbm            +0.022   ANTI-predictive
+#     pattern        +0.040   ANTI-predictive
+#     regime         +0.056   ANTI-predictive
+#     technical      +0.106   ANTI-predictive
+#     memory          n/a     never votes SELL
+#
+# So no non-structural agent has a validated bearish signal, and routing the
+# new BUY set through here would have made `gbm` — anti-predictive when
+# bearish, and the loudest SELL voice on the 2026-07-31 HEXT bars that went on
+# to rise in 86.6% of 60-minute windows — a hard veto it never used to be.
+# This keeps the PREVIOUS membership so entry behaviour is unchanged by the
+# BUY-side re-audit; the veto's own evidence is weak (pattern is +0.040) and
+# retiring it is a separate call on separate data.
+_TRUSTED_SELL_DISSENT = frozenset({"sentiment", "pattern", "rl"})
 
 # Trade-gate tuning is data-driven (see analysis):
 #   • BUY-vote count predicts win-rate: 1→21%, 2→41%, 3→50% (real ensemble tops
@@ -712,16 +759,17 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         else:
             score += 8
             blocked.append(f"insufficient BUY consensus: {buy_votes} agents voted BUY (need {min_buy}+) (-22)")
-        # Reliable co-sign (max 10): a consensus made only of generic voters
-        # (technical/momentum/...) wins ~15-29% historically; pattern (48%) or
-        # sentiment (44%) co-signing is worth real points.
+        # Reliable co-sign (max 10): a consensus made only of agents with no
+        # demonstrated BUY edge (technical/momentum/regime/...) is worth much
+        # less than one carrying a proven voter — see _RELIABLE_BUY_AGENTS.
         if has_reliable_buy:
             score += 10
         else:
-            blocked.append("no proven BUY voter (pattern/sentiment) co-signed (-10)")
+            blocked.append("no proven BUY voter (gbm/meanrev/memory/day_structure) "
+                           "co-signed (-10)")
         rel_dissent = max((float(a.get("confidence") or 0) for a in agents
                            if a.get("action") == "SELL"
-                           and a.get("agent_name") in _RELIABLE_BUY_AGENTS
+                           and a.get("agent_name") in _TRUSTED_SELL_DISSENT
                            and a.get("agent_name") not in _STRUCTURAL_SELLERS), default=0.0)
         if rel_dissent >= 0.75:
             hard_block = True

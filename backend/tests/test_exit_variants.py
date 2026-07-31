@@ -157,11 +157,28 @@ def test_conf_ceilings_under_the_070_cliff():
 
 
 def test_reliable_set_is_evidence_based():
-    # pattern 48.2% / sentiment 44.1% from the 12.6k-trade forensics; rl (65%
-    # hit / +0.39% avg-30m) and meanrev (60% / +0.17%) added 2026-07-07 from the
-    # forward-return audit of that day's live bars. memory (21.8%) and gbm
-    # (base-rate) stay out — their BUYs showed no edge at scale.
-    assert _RELIABLE_BUY_AGENTS == {"sentiment", "pattern", "rl", "meanrev"}
+    # Re-audited 2026-07-31 on 142,194 CF-labelled bars over 24 days, with the
+    # days split in half so the ranking is not fitted to itself. BUY lift over
+    # base, train -> test: gbm +0.004 -> +0.133, meanrev +0.027 -> +0.075,
+    # day_structure +0.054 -> +0.018, memory +0.016 -> +0.014 (all positive in
+    # BOTH halves). Dropped: pattern (-0.008 -> -0.022) and technical
+    # (-0.011 -> -0.037) are negative in both; sentiment flips (+0.019 ->
+    # -0.086) and is a placeholder absent from 96.6% of bars; rl votes BUY on
+    # 1.1% of bars so it could barely ever co-sign.
+    assert _RELIABLE_BUY_AGENTS == {"gbm", "meanrev", "memory", "day_structure"}
+
+
+def test_sell_dissent_set_is_separate_from_buy_set():
+    # Being right about when to BUY is a different claim from being right about
+    # when to stay out, and the two do not travel together: when gbm votes SELL
+    # at >= 0.75 subsequent P&L is +0.022 ABOVE base — anti-predictive — and
+    # memory never votes SELL at all. Routing the BUY set through the
+    # hard-blocking dissent veto would have created a veto on a bad signal, so
+    # the two sets are deliberately decoupled.
+    from app.services.sessions_service import _TRUSTED_SELL_DISSENT
+    assert _TRUSTED_SELL_DISSENT != _RELIABLE_BUY_AGENTS
+    assert "gbm" not in _TRUSTED_SELL_DISSENT
+    assert "memory" not in _TRUSTED_SELL_DISSENT
 
 
 def test_gentle_gate_requires_reliable_voter():
