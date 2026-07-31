@@ -235,3 +235,48 @@ def test_memory_vote_with_real_precedent_counts(monkeypatch):
     ]
     s = _run(monkeypatch, agents, UPTREND_IND)
     assert s["position"]["status"] == "LONG"
+
+
+# ── Anti-predictive SELL voters don't cancel BUY votes ───────────────────────
+# 2026-07-31 HEXT: 197 bars blocked on "panel dissent: 2 BUY - 2 SELL = 0"
+# through a move that rose in 86.6% of 60-minute windows. The consensus count
+# treated every SELL as equal evidence, so votes from agents that are
+# ANTI-predictive when bearish cancelled votes from agents that are not.
+
+def test_unreliable_sellers_excluded_from_consensus():
+    from app.services.sessions_service import _DISCOUNTED_SELLERS
+    for agent in ("momentum", "pattern", "regime", "volatility"):
+        assert agent in _DISCOUNTED_SELLERS, agent
+
+
+def test_sellers_that_flip_sign_keep_their_vote():
+    # gbm (+0.015 -> -0.083) and technical (+0.015 -> -0.015) flip across the
+    # day-split, so there is no stable basis to discount them. Conservative
+    # default: leave the gate as it is.
+    from app.services.sessions_service import _DISCOUNTED_SELLERS
+    assert "gbm" not in _DISCOUNTED_SELLERS
+    assert "technical" not in _DISCOUNTED_SELLERS
+
+
+def test_genuinely_bearish_seller_still_counts():
+    # rl is negative in BOTH halves (-0.007 -> -0.031): a SELL worth counting.
+    from app.services.sessions_service import _DISCOUNTED_SELLERS
+    assert "rl" not in _DISCOUNTED_SELLERS
+
+
+def test_structural_sellers_still_exempt():
+    from app.services.sessions_service import _STRUCTURAL_SELLERS, _DISCOUNTED_SELLERS
+    assert _STRUCTURAL_SELLERS <= _DISCOUNTED_SELLERS
+    assert {"day_structure", "meanrev"} == set(_STRUCTURAL_SELLERS)
+
+
+def test_anti_predictive_sells_no_longer_block_entry(monkeypatch):
+    # 3 BUY vs 2 SELL, both SELLs from anti-predictive agents. Previously
+    # net = 3-2 = 1 ("thin net", -15); now they don't count, so net = 3.
+    agents = BUY3 + [
+        {"agent_name": "regime", "action": "SELL", "confidence": 0.60},
+        {"agent_name": "momentum", "action": "SELL", "confidence": 0.60},
+    ]
+    s = _run(monkeypatch, agents, UPTREND_IND)
+    assert s["position"]["status"] == "LONG"
+    assert "thin net consensus" not in s["last_decision"]["reason"]

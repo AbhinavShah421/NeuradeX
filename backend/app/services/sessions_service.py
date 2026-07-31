@@ -119,6 +119,19 @@ _RELIABLE_BUY_AGENTS = frozenset({"gbm", "meanrev", "memory", "day_structure"})
 # retiring it is a separate call on separate data.
 _TRUSTED_SELL_DISSENT = frozenset({"sentiment", "pattern", "rl"})
 
+# Agents that sell BY CONSTRUCTION exactly where the entry band opens —
+# day_structure near the day's high, meanrev fading any stretch above the mean.
+# Their SELLs are a statement about position in range, not directional dissent.
+_STRUCTURAL_SELLERS = frozenset({"day_structure", "meanrev"})
+
+# Agents whose SELL vote is ANTI-predictive — see the note at the consensus
+# count. Anti-predictive in BOTH halves of a day-split; the two that flip sign
+# (gbm, technical) deliberately keep their vote.
+_UNRELIABLE_SELLERS = frozenset({"momentum", "pattern", "regime", "volatility"})
+
+# Excluded from the net-consensus count, for the two different reasons above.
+_DISCOUNTED_SELLERS = _STRUCTURAL_SELLERS | _UNRELIABLE_SELLERS
+
 # Trade-gate tuning is data-driven (see analysis):
 #   • BUY-vote count predicts win-rate: 1→21%, 2→41%, 3→50% (real ensemble tops
 #     out ~2-3 BUYs, so 2 is the practical consensus floor).
@@ -730,9 +743,35 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         # exclusive (BIOCON 07-14: blocked 2-BUY-vs-3-SELL through a +4.5% rally).
         # day_structure keeps its own dedicated veto below; meanrev SELL still
         # matters inside a stretch (it caps the RSI band at 70 anyway).
-        _STRUCTURAL_SELLERS = {"day_structure", "meanrev"}
+        # Agents whose SELL vote is ANTI-predictive: the stock does BETTER than
+        # base after they call for a sell, so counting them against the BUY side
+        # cancels good votes with noise. Lift in subsequent P&L when each votes
+        # SELL, days split in half (negative = genuinely bearish, which is what
+        # a vote worth counting looks like):
+        #
+        #     rl             -0.007 -> -0.031   bearish in both — KEPT
+        #     momentum       +0.010 -> +0.067   anti-predictive in both
+        #     pattern        +0.013 -> +0.040   anti-predictive in both
+        #     regime         +0.016 -> +0.026   anti-predictive in both
+        #     volatility     +0.058 -> +0.004   anti-predictive in both
+        #     gbm            +0.015 -> -0.083   FLIPS — left counting
+        #     technical      +0.015 -> -0.015   FLIPS — left counting
+        #
+        # Only the four that are anti-predictive in BOTH halves are dropped;
+        # the two that flip sign keep their vote, because there is no stable
+        # evidence either way and the conservative default is to leave the gate
+        # as it is. This is a different claim from _STRUCTURAL_SELLERS — those
+        # sell by construction where the entry band opens; these are simply
+        # wrong when bearish.
+        #
+        # Motivating case, 2026-07-31 HEXT: 197 bars blocked on "panel dissent:
+        # 2 BUY - 2 SELL = 0" through a move that rose in 86.6% of 60-minute
+        # windows. Across the labelled history 8,377 decisions currently
+        # penalised reach full consensus under this rule, and they are better
+        # than base (-0.092 vs -0.125, win 41.6% vs 33.5%); day-level lift
+        # +0.072 pts, t=2.04 on 20 days, positive on 15.
         sell_voters_n = sum(1 for a in agents if a.get("action") == "SELL"
-                            and a.get("agent_name") not in _STRUCTURAL_SELLERS)
+                            and a.get("agent_name") not in _DISCOUNTED_SELLERS)
         net_consensus = buy_votes - sell_voters_n
         # Consensus points (max 30): full marks needs min_buy voters AND net
         # consensus >= 2; a thin net or a sub-min vote count costs points
