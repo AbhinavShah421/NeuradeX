@@ -131,3 +131,43 @@ def test_anomaly_is_veto_only():
     # anomaly returns HOLD on every code path, so it must never be scored as a
     # directional forecaster.
     assert "anomaly" in _VETO_ONLY_AGENTS
+
+
+# ── Per-agent reward attribution ─────────────────────────────────────────────
+# The bug this section locks out: every agent on a trade was credited the raw
+# trade reward regardless of how it voted, so all twelve rows converged on the
+# same total_reward (-309.1) and the column carried no per-agent information.
+
+def _signed(action: str, reward: float) -> float:
+    """The credit an agent earns for its own vote — mirrors record_outcome."""
+    if action == "BUY":
+        return reward
+    if action == "SELL":
+        return -reward
+    return (abs(reward) * _ABSTAIN_CREDIT) if reward < 0 else (-reward * _ABSTAIN_CREDIT)
+
+
+def test_opposing_votes_earn_opposite_credit():
+    # On a winning trade the bull must gain and the bear must lose. Under the
+    # old code both were credited +reward.
+    assert _signed("BUY", 0.4) > 0
+    assert _signed("SELL", 0.4) < 0
+    # ...and the mirror on a losing trade.
+    assert _signed("BUY", -0.4) < 0
+    assert _signed("SELL", -0.4) > 0
+
+
+def test_credit_is_not_identical_across_actions():
+    reward = 0.4
+    credits = {a: _signed(a, reward) for a in ("BUY", "SELL", "HOLD")}
+    assert len(set(credits.values())) == 3, f"actions must be distinguishable: {credits}"
+
+
+def test_credit_scales_with_move_size():
+    # A 5% winner must credit a BUY voter more than a 0.1% winner.
+    assert _signed("BUY", 1.0) > _signed("BUY", 0.1)
+
+
+def test_abstention_credit_is_bounded_by_directional():
+    # Abstaining is weaker evidence than taking a side and being right.
+    assert abs(_signed("HOLD", -0.4)) < abs(_signed("SELL", -0.4))

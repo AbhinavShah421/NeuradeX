@@ -40,6 +40,7 @@ from app.services.backtest_service import (  # noqa: F401
     _llm_decide,
     _minutes_to_time,
     _tech_signal,
+    _tech_signal_ex,
     _time_to_minutes,
     _fetch_candles,
     _run_engine,

@@ -286,13 +286,22 @@ class LearningSystem:
                             # so there is nothing to be right or wrong about here.
                             # Leave its weight and counters untouched.
                             continue
+                        # `signed` is this agent's OWN credit for the outcome:
+                        # positive when its call was right, negative when wrong,
+                        # scaled by how big the move was. delta is just the
+                        # learning-rate-scaled version, and total_reward
+                        # accumulates `signed` — previously every agent was
+                        # credited the raw trade reward regardless of how it
+                        # voted, so all twelve rows converged to the same number
+                        # (-309.1) and the column carried no per-agent
+                        # information at all.
                         if act == "BUY":
                             # BUY was the correct call if the trade won
-                            delta   = _LR * reward
+                            signed  = reward
                             correct = reward > 0
                         elif act == "SELL":
                             # SELL was the correct call if the trade lost
-                            delta   = _LR * -reward
+                            signed  = -reward
                             correct = reward < 0
                         else:
                             # HOLD = "I wouldn't enter this trade."
@@ -304,12 +313,13 @@ class LearningSystem:
                             # abstention more than it costs (the old 0.5 vs 0.15)
                             # paid agents to stay silent regardless of skill.
                             if reward < 0:
-                                delta   = _LR * abs(reward) * _ABSTAIN_CREDIT
+                                signed  = abs(reward) * _ABSTAIN_CREDIT
                                 correct = True
                             else:
-                                delta   = -_LR * reward * _ABSTAIN_CREDIT
+                                signed  = -reward * _ABSTAIN_CREDIT
                                 correct = False
 
+                        delta = _LR * signed
                         await conn.execute(text("""
                             UPDATE ai_engine_agent_weights
                             SET correct_predictions = correct_predictions + :corr,
@@ -319,7 +329,7 @@ class LearningSystem:
                             WHERE agent_name = :name
                         """), {
                             "corr":  1 if correct else 0,
-                            "rw":    reward,
+                            "rw":    signed,
                             "delta": delta,
                             "name":  sig["agent"],
                         })

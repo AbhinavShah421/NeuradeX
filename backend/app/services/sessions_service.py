@@ -41,7 +41,7 @@ from app.utils.session_store import (
 # Replay machinery
 from app.api.backtest import (
     IST, _SQUAREOFF_MINUTES, _MARKET_OPEN_MINUTES,
-    _intraday_indicators, _tech_signal, _time_to_minutes, _compute_metrics,
+    _intraday_indicators, _tech_signal, _tech_signal_ex, _time_to_minutes, _compute_metrics,
     _build_trade_record, _derive_agent_signals, _save_backtest_trades,
     _prev_trading_day, _fetch_full_day_candles, _no_real_intraday_msg,
 )
@@ -560,8 +560,14 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
             held_minutes = max(0, (ch * 60 + cm) - (eh * 60 + em))
         except (ValueError, AttributeError):
             held_minutes = None
-    tsig = -1 if (force_close and pos_status == "LONG") else _tech_signal(
-        ind, pos_status, candle, entry_price, aggressive=aggressive, held_minutes=held_minutes)
+    # `tsig_trigger` names the branch that fired ("stop", "target", "trail_lock",
+    # …) so a closed trade can record WHY it exited — see _tech_signal_ex.
+    if force_close and pos_status == "LONG":
+        tsig, tsig_trigger = -1, "force_close"
+    else:
+        tsig, tsig_trigger = _tech_signal_ex(
+            ind, pos_status, candle, entry_price,
+            aggressive=aggressive, held_minutes=held_minutes)
 
     # The 11-agent ensemble (+memory gate) is the decision brain: it provides the
     # confidence, the reasoning, and can confirm or veto what the timing signal proposes.
@@ -575,9 +581,14 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
     else:
         ens_action = "SELL"
 
-    # Combine timing signal + ensemble verdict into the final action
+    # Combine timing signal + ensemble verdict into the final action.
+    # exit_trigger records WHICH rule closed the position; it is persisted as
+    # market_context.exit_reason so losses can be attributed to a stop vs a
+    # target vs a time exit (null on all 13,760 trades before this).
+    exit_trigger = ""
     if force_close and pos_status == "LONG":
         action, conf, reason = "SELL", 0.99, "Session end — squared off automatically."
+        exit_trigger = "session_end"
     elif pos_status == "NONE":
         # Entry is governed by the selected trade gate (strict / gentle / loose).
         gate_mode = await get_trade_gate()
@@ -944,6 +955,9 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         else:
             action = "SELL" if (tsig == -1 or ens_sell_exit) else "HOLD"
         if action == "SELL":
+            # tsig wins the attribution when it fired — it is the specific rule
+            # (stop/target/trail); the ensemble is the fallback explanation.
+            exit_trigger = tsig_trigger if tsig == -1 else "ensemble_sell"
             reason = f"Exit: intraday signal/ensemble {ens_action}. {reason}".strip()
         elif gain_pct >= 0.4:
             reason = (f"Letting winner run (+{gain_pct:.1f}%) — exit on stop/target/trail "
@@ -979,6 +993,7 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         if held >= max_hold:
             if manual_cap:
                 action = "SELL"
+                exit_trigger = "hold_cap"
                 reason = f"Hold cap (manual): position held {held}m ≥ {max_hold}m — force exit."
             else:
                 gain_now  = ((candle["close"] - entry_price) / entry_price * 100) if entry_price else 0.0
@@ -991,6 +1006,7 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
                               f"trend breaks.")
                 else:
                     action = "SELL"
+                    exit_trigger = "hold_review_stagnant"
                     reason = (f"Auto hold review: {held}m held without a trending gain — "
                               f"exiting (stagnant/broken positions don't improve with time).")
 
@@ -1026,6 +1042,7 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         # Square-off: force sell at or after squareoff time
         if pos_status == "LONG" and candle_m >= squareoff_m and action != "SELL":
             action = "SELL"
+            exit_trigger = "squareoff"
             reason = f"Square off at {squareoff_lbl} — active trading window closed."
 
         # Entry cutoff: no new buys at or after no_entry time
@@ -1043,6 +1060,7 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
                 recent_closes = [c["close"] for c in window[-(_PAPER_DROP_CANDLES + 1):]]
                 if all(recent_closes[i] > recent_closes[i + 1] for i in range(_PAPER_DROP_CANDLES)):
                     action = "SELL"
+                    exit_trigger = "drop_pattern"
                     reason = f"Drop pattern: {_PAPER_DROP_CANDLES} consecutive lower closes — exiting to preserve capital."
 
     # ── No more entries after a trade is closed in paper mode ────────────────
@@ -1125,6 +1143,7 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
             "time": candle["time"], "timestamp": candle.get("timestamp", 0),
             "action": "SELL", "price": exit_fill, "quantity": qty,
             "confidence": int(conf * 100), "reason": reason,
+            "exit_reason": exit_trigger or "unknown",
             "pnl": round(pnl, 2), "pnl_pct": pnl_pct, "candle_index": idx, "indicators": ind,
             "costs": fees,
             "agents": [{"agent": a.get("agent_name") or a.get("agent"),
@@ -1145,7 +1164,11 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
                 duration_minutes=dur,
                 agent_signals=(pos.get("entry_agents") or _derive_agent_signals("BUY", ind)),
                 market_context={"regime": "intraday", "vwap": ind.get("vwap"), "rsi": ind.get("rsi"),
-                                "session_mode": s["mode"], "session_id": s["id"]},
+                                "session_mode": s["mode"], "session_id": s["id"],
+                                # Which rule closed the position (see _tech_signal_ex).
+                                # "unknown" only if a new SELL path forgets to set it.
+                                "exit_reason": exit_trigger or "unknown",
+                                "held_minutes": dur},
                 confidence=pos.get("entry_conf", conf),
                 trade_source=s.get("trade_source", "PAPER" if s["mode"] == "paper" else "REPLAY"),
             )]))

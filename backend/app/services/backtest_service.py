@@ -18,7 +18,7 @@ without also updating those call sites:
     _compute_metrics, _intraday_indicators, _llm_decide, _minutes_to_time,
     _tech_signal, _time_to_minutes
   - app.api.sessions: IST, _SQUAREOFF_MINUTES, _MARKET_OPEN_MINUTES,
-    _intraday_indicators, _tech_signal, _time_to_minutes, _compute_metrics,
+    _intraday_indicators, _tech_signal, _tech_signal_ex, _time_to_minutes, _compute_metrics,
     _build_trade_record, _derive_agent_signals, _save_backtest_trades,
     _prev_trading_day, _fetch_full_day_candles, _no_real_intraday_msg
   - app.agents.pattern_model: _fetch_candles
@@ -850,7 +850,25 @@ _EXIT_GRACE_MIN = 10
 
 def _tech_signal(ind: dict, position: str, candle: dict, entry_price: float, aggressive: bool = False,
                  held_minutes: int | None = None) -> int:
-    """1 = buy, -1 = sell, 0 = hold based on technicals.
+    """1 = buy, -1 = sell, 0 = hold based on technicals. See _tech_signal_ex —
+    this is the signal-only wrapper kept for the existing call sites."""
+    return _tech_signal_ex(ind, position, candle, entry_price, aggressive, held_minutes)[0]
+
+
+def _tech_signal_ex(ind: dict, position: str, candle: dict, entry_price: float,
+                    aggressive: bool = False,
+                    held_minutes: int | None = None) -> tuple[int, str]:
+    """(signal, trigger) — the same rules as _tech_signal plus WHICH branch fired.
+
+    The trigger is a stable machine-readable slug ("stop", "target",
+    "trail_lock", ...), persisted as market_context.exit_reason on the closed
+    trade. Without it every one of the 13,760 recorded trades had a null exit
+    reason, so a loss could not be attributed to a stop vs a target vs a time
+    exit — which is exactly the breakdown needed to tell whether an exit policy
+    is cutting winners or letting losers run.
+
+    Implemented here (rather than as a parallel classifier) so the trigger can
+    never drift from the branch that actually fired.
 
     Entries are trend-filtered (no counter-trend knife-catching); exits are the
     "wide_hold60" policy that won the counterfactual exit A/B on ~13k identical
@@ -879,25 +897,25 @@ def _tech_signal(ind: dict, position: str, candle: dict, entry_price: float, agg
 
     # Force square-off ≥ 14:45
     if position == "LONG" and (h > 14 or (h == 14 and m >= 45)):
-        return -1
+        return -1, "squareoff"
 
     if position == "NONE":
         if aggressive:
             # Looser bar: only veto strong downtrends; wider RSI/momentum bands.
             if sma5 < sma20 and mom5 < -0.30:
-                return 0
-            if rsi < 48 and price >= vwap * 0.995 and mom5 > -0.10:   return 1   # dip near VWAP
-            if sma5 >= sma20 and mom5 > 0.05 and rsi < 72:            return 1   # trend continuation
-            if mom5 > 0.12 and price > vwap * 0.998 and rsi < 74:     return 1   # momentum
-            return 0
+                return 0, "downtrend_veto"
+            if rsi < 48 and price >= vwap * 0.995 and mom5 > -0.10:   return 1, "dip_near_vwap"
+            if sma5 >= sma20 and mom5 > 0.05 and rsi < 72:            return 1, "trend_continuation"
+            if mom5 > 0.12 and price > vwap * 0.998 and rsi < 74:     return 1, "momentum"
+            return 0, "no_trigger"
         # Trend filter: skip entries while clearly trending down (don't catch
         # falling knives). VWAP + RSI still gate the individual triggers.
         downtrend = sma5 < sma20 and mom5 < -0.10
         if downtrend:
-            return 0
-        if rsi < 38 and price >= vwap and mom5 > 0:          return 1   # oversold bounce off support
-        if sma5 >= sma20 and mom5 > 0.18 and rsi < 62:       return 1   # trend continuation
-        if mom5 > 0.35 and price > vwap and rsi < 66:        return 1   # momentum breakout
+            return 0, "downtrend_veto"
+        if rsi < 38 and price >= vwap and mom5 > 0:          return 1, "oversold_bounce"
+        if sma5 >= sma20 and mom5 > 0.18 and rsi < 62:       return 1, "trend_continuation"
+        if mom5 > 0.35 and price > vwap and rsi < 66:        return 1, "momentum_breakout"
     elif position == "LONG":
         gain_pct = (price - entry_price) / entry_price * 100
         stop = -max(1.5, 1.5 * atr_pct)        # wide ATR stop (was -max(1.0, 0.9×ATR):
@@ -907,10 +925,10 @@ def _tech_signal(ind: dict, position: str, candle: dict, entry_price: float, agg
         # Entry grace: 1-min noise wicks out normal stops in the first minutes —
         # during the grace window only a disaster stop (2×) can fire.
         if held_minutes is not None and held_minutes < _EXIT_GRACE_MIN:
-            return -1 if gain_pct <= 2 * stop else 0
+            return (-1, "disaster_stop") if gain_pct <= 2 * stop else (0, "grace")
 
-        if gain_pct <= stop:                   return -1   # volatility-scaled stop loss
-        if gain_pct >= take:                   return -1   # take profit (runs further than before)
+        if gain_pct <= stop:                   return -1, "stop"     # volatility-scaled stop loss
+        if gain_pct >= take:                   return -1, "target"   # take profit (runs further than before)
         # Profit-lock: once up ≥0.8%, exit if price loses the 5-bar MA (trail) —
         # protects gains without bailing on every momentum wiggle.
         # 1.2 → 0.8 (2026-07-09): the wide_hold60_lock08 exit variant posted
@@ -923,15 +941,15 @@ def _tech_signal(ind: dict, position: str, candle: dict, entry_price: float, agg
         # with momentum still positive is a pause, not a turn — the lock was
         # cashing out rising stocks at ~+0.9% (IIFL exited +0.99% with another
         # +0.98% run-up left). Exit needs the trail break AND momentum down.
-        if gain_pct >= 0.8 and price < sma5 and mom5 < 0:   return -1
+        if gain_pct >= 0.8 and price < sma5 and mom5 < 0:   return -1, "trail_lock"
         # NOTE: the "cut bad entries fast" momentum exits are deliberately gone —
         # they fired on 1-min noise and were the single biggest loss driver
         # (sub-30-min exits: 15% win). Removing them alone was worth ~+7.6pts
         # on identical entries in the exit A/B.
         # Overbought, but only when momentum has already turned down.
-        if rsi > 75 and mom5 < 0:              return -1
+        if rsi > 75 and mom5 < 0:              return -1, "rsi_exit"
 
-    return 0
+    return 0, "no_trigger"
 
 
 async def _llm_decide(

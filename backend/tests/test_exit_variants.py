@@ -292,3 +292,56 @@ def test_tradeable_sql_filter_is_chronological():
     assert _ENTRY_CUTOFF_HHMM == "13:00"
     assert "09:15" < _ENTRY_CUTOFF_HHMM
     assert not ("13:38" < _ENTRY_CUTOFF_HHMM)
+
+
+# ── Exit-reason attribution ──────────────────────────────────────────────────
+# market_context.exit_reason was null on all 13,760 recorded trades, so a loss
+# could not be attributed to a stop vs a target vs a time exit. _tech_signal_ex
+# reports which branch fired; _tech_signal stays the signal-only wrapper.
+
+def test_signal_wrapper_matches_ex():
+    from app.services.backtest_service import _tech_signal, _tech_signal_ex
+    bars = _flat(40)
+    inds = _day_indicators(bars)
+    for pos, entry in (("NONE", 0.0), ("LONG", 100.0)):
+        for i in (20, 30, 39):
+            ind, candle = inds[i], bars[i]
+            assert _tech_signal(ind, pos, candle, entry) == \
+                   _tech_signal_ex(ind, pos, candle, entry)[0]
+
+
+def test_squareoff_trigger_named():
+    from app.services.backtest_service import _tech_signal_ex
+    bars = _flat(40)
+    inds = _day_indicators(bars)
+    late = dict(bars[-1]); late["time"] = "14:50"
+    sig, trig = _tech_signal_ex(inds[-1], "LONG", late, 100.0)
+    assert sig == -1 and trig == "squareoff"
+
+
+def test_stop_and_target_triggers_named():
+    from app.services.backtest_service import _tech_signal_ex
+    bars = _flat(40)
+    inds = _day_indicators(bars)
+    candle = dict(bars[-1]); candle["time"] = "11:00"
+    # Deep loss → stop; large gain → target. entry_price set so gain clears the
+    # ATR-scaled thresholds on a flat (low-ATR) book.
+    candle["close"] = 100.0
+    sig, trig = _tech_signal_ex(inds[-1], "LONG", candle, 110.0)   # ~-9%
+    assert sig == -1 and trig == "stop"
+    sig, trig = _tech_signal_ex(inds[-1], "LONG", candle, 90.0)    # ~+11%
+    assert sig == -1 and trig == "target"
+
+
+def test_every_trigger_is_a_stable_slug():
+    # Slugs are persisted and grouped on; they must stay machine-readable.
+    from app.services.backtest_service import _tech_signal_ex
+    bars = _flat(40)
+    inds = _day_indicators(bars)
+    seen = set()
+    for pos, entry in (("NONE", 0.0), ("LONG", 100.0)):
+        for i in range(16, 40):
+            seen.add(_tech_signal_ex(inds[i], pos, bars[i], entry)[1])
+    assert seen, "no triggers produced"
+    for slug in seen:
+        assert slug and slug.replace("_", "").isalnum() and slug.islower(), slug
