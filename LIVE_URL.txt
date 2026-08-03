@@ -1,6 +1,6 @@
 NeuradeX is LIVE
 
-https://staring-deeply-waffle.ngrok-free.dev
+https://d29c-103-226-200-224.ngrok-free.app
 
-Dashboard: https://staring-deeply-waffle.ngrok-free.dev/neuradex
-Updated:   2026-07-31 12:39:27 +0530
+Dashboard: https://d29c-103-226-200-224.ngrok-free.app/neuradex
+Updated:   2026-08-03 09:16:38 +05:30
