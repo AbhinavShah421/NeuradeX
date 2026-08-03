@@ -3,11 +3,19 @@ PostgreSQL Database Setup
 """
 
 import logging
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# create_all() only creates missing tables — it never adds columns to a table
+# that already exists. Columns added to a model after first deploy need an
+# explicit DDL statement here.
+_COLUMN_MIGRATIONS = (
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS broker_key_type VARCHAR(20) DEFAULT 'approval'",
+)
 
 # Shared declarative base — all ORM models must import this
 Base = declarative_base()
@@ -42,6 +50,8 @@ async def init_postgres():
 
         async with engine.begin() as conn:
             await conn.run_sync(lambda c: Base.metadata.create_all(c, checkfirst=True))
+            for ddl in _COLUMN_MIGRATIONS:
+                await conn.execute(text(ddl))
 
         logger.info("✅ PostgreSQL initialized successfully")
     except Exception as e:

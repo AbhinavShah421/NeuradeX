@@ -3,6 +3,8 @@ import api from '../services/api';
 import { useAppStore } from '../stores/appStore';
 import { useAuthStore } from '../stores/authStore';
 
+type KeyType = 'approval' | 'totp';
+
 interface GrowwStatus {
   status: string;
   tokenExpiry: string | null;
@@ -11,6 +13,9 @@ interface GrowwStatus {
   failureReason: string;
   lastAttempt: string | null;
   hasToken: boolean;
+  keyType: KeyType;
+  /** false for an approval key — it cannot refresh without a manual tap in the Groww app. */
+  unattended: boolean;
 }
 
 const GrowwStatusBadge: React.FC = () => {
@@ -24,6 +29,7 @@ const GrowwStatusBadge: React.FC = () => {
   const [showCredForm, setShowCredForm] = useState(false);
   const [apiKey, setApiKey] = useState('');
   const [apiSecret, setApiSecret] = useState('');
+  const [keyType, setKeyType] = useState<KeyType>('approval');
   const [credSaving, setCredSaving] = useState(false);
   const [message, setMessage] = useState('');
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -100,11 +106,13 @@ const GrowwStatusBadge: React.FC = () => {
     setCredSaving(true);
     setMessage('');
     try {
-      const res = await api.updateGrowwCredentials(apiKey.trim(), apiSecret.trim());
+      const res = await api.updateGrowwCredentials(apiKey.trim(), apiSecret.trim(), keyType);
       setMessage(
         res.status === 'success'
           ? 'Credentials updated and token refreshed'
-          : 'Credentials saved — Groww TOTP session may still need approval'
+          : keyType === 'approval'
+            ? 'Saved — now approve the session in the Groww app'
+            : 'Saved, but the token refresh failed — check the reason above'
       );
       await load();
       setShowCredForm(false);
@@ -169,6 +177,11 @@ const GrowwStatusBadge: React.FC = () => {
             <Row label="Token valid" dark={dark}>
               {gwStatus.hasToken ? (isOk ? `${formatTime(gwStatus.timeRemainingSeconds)} remaining` : 'Expired') : 'None'}
             </Row>
+            <Row label="Key type" dark={dark}>
+              <span style={{ color: gwStatus.unattended ? '#22c55e' : '#eab308', fontWeight: 600 }}>
+                {gwStatus.keyType === 'totp' ? 'TOTP · auto' : 'Approval · manual'}
+              </span>
+            </Row>
             {gwStatus.tokenExpiry && (
               <Row label="Expires" dark={dark}>
                 {new Date(gwStatus.tokenExpiry).toLocaleString()}
@@ -181,7 +194,17 @@ const GrowwStatusBadge: React.FC = () => {
             )}
             {gwStatus.failureReason && (
               <div style={{ fontSize: 11, color: '#ef4444', wordBreak: 'break-word', marginTop: 2 }}>
-                {gwStatus.failureReason.slice(0, 120)}
+                {gwStatus.failureReason.slice(0, 160)}
+              </div>
+            )}
+            {!gwStatus.unattended && (
+              <div style={{
+                fontSize: 10, lineHeight: 1.45, marginTop: 2, padding: '6px 8px', borderRadius: 6,
+                background: dark ? 'rgba(234,179,8,0.12)' : '#fef9c3',
+                color: dark ? '#eab308' : '#854d0e',
+              }}>
+                An approval key needs a manual tap in the Groww app every day. Switch to a
+                TOTP key under Update Keys to refresh unattended.
               </div>
             )}
           </div>
@@ -212,7 +235,12 @@ const GrowwStatusBadge: React.FC = () => {
               {refreshing ? 'Refreshing…' : 'Refresh Token'}
             </button>
             <button
-              onClick={() => setShowCredForm(f => !f)}
+              onClick={() => {
+                // Start from whatever is configured, so reopening the form and
+                // saving cannot quietly downgrade a TOTP key back to approval.
+                if (!showCredForm) setKeyType(gwStatus.keyType ?? 'approval');
+                setShowCredForm(f => !f);
+              }}
               style={{
                 flex: 1, padding: '7px 0', borderRadius: 8,
                 border: `1px solid ${dark ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)'}`,
@@ -226,6 +254,33 @@ const GrowwStatusBadge: React.FC = () => {
 
           {showCredForm && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 4 }}>
+              {/* The two key types take a different second field and behave very
+                  differently day to day, so make the choice explicit up front. */}
+              <div style={{ display: 'flex', gap: 6 }}>
+                {(['approval', 'totp'] as KeyType[]).map(kt => {
+                  const active = keyType === kt;
+                  return (
+                    <button
+                      key={kt}
+                      onClick={() => setKeyType(kt)}
+                      style={{
+                        flex: 1, padding: '6px 0', borderRadius: 8, fontSize: 11, fontWeight: 600,
+                        cursor: 'pointer',
+                        border: `1px solid ${active ? 'var(--nd-primary)' : (dark ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)')}`,
+                        background: active ? 'var(--nd-primary)' : 'transparent',
+                        color: active ? '#000' : (dark ? '#94a3b8' : '#64748b'),
+                      }}
+                    >
+                      {kt === 'totp' ? 'TOTP' : 'Approval'}
+                    </button>
+                  );
+                })}
+              </div>
+              <div style={{ fontSize: 10, lineHeight: 1.45, color: dark ? '#64748b' : '#9ca3af' }}>
+                {keyType === 'totp'
+                  ? 'Refreshes on its own, including the pre-market warm-up at 08:45 IST.'
+                  : 'Needs a manual session approval in the Groww app every day.'}
+              </div>
               <input
                 placeholder="API Key (JWT)"
                 value={apiKey}
@@ -238,7 +293,7 @@ const GrowwStatusBadge: React.FC = () => {
                 }}
               />
               <input
-                placeholder="API Secret"
+                placeholder={keyType === 'totp' ? 'TOTP seed (base32)' : 'API Secret'}
                 value={apiSecret}
                 onChange={e => setApiSecret(e.target.value)}
                 type="password"

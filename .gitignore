@@ -116,6 +116,9 @@ mlflow.db
 *.onnx
 *.joblib
 models/
+# ...but a bare models/ also swallows the ORM package, which is source, not
+# artifacts — it has been untracked and absent from fresh clones.
+!backend/app/models/
 checkpoints/
 
 # ============================================================

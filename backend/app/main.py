@@ -47,12 +47,14 @@ async def lifespan(app: FastAPI):
             from app.database.postgres import AsyncSessionLocal
             async with AsyncSessionLocal() as _db:
                 row = await _db.execute(
-                    text("SELECT broker_api_key, broker_api_secret FROM users WHERE broker_api_key IS NOT NULL AND broker_api_key != '' LIMIT 1")
+                    text("SELECT broker_api_key, broker_api_secret, COALESCE(broker_key_type, 'approval') "
+                         "FROM users WHERE broker_api_key IS NOT NULL AND broker_api_key != '' LIMIT 1")
                 )
                 db_creds = row.fetchone()
             if db_creds and db_creds[0] and db_creds[1]:
-                init_groww_client(db_creds[0], db_creds[1])
-                logger.info("Groww API client ready (credentials from DB)", extra={"log_type": "app_lifecycle", "event": "groww_init"})
+                init_groww_client(db_creds[0], db_creds[1], db_creds[2])
+                logger.info("Groww API client ready (credentials from DB, key_type=%s)", db_creds[2],
+                            extra={"log_type": "app_lifecycle", "event": "groww_init", "key_type": db_creds[2]})
             else:
                 logger.warning(
                     "No Groww credentials in DB — update them via the UI. Stock data will use simulation.",
@@ -164,6 +166,28 @@ async def lifespan(app: FastAPI):
                             extra={"log_type": "app_lifecycle", "event": "delivery_paper_scheduled"})
             except Exception as exc:
                 logger.warning("Could not schedule delivery paper autopilot: %s", exc)
+
+            # session_decisions is append-only and unbounded — a single backtest
+            # sweep can add a quarter-million rows. Prune after the close.
+            try:
+                from app.data.retention import retention_loop
+                app.state.retention_task = asyncio.create_task(retention_loop())
+                logger.info("session_decisions retention scheduled",
+                            extra={"log_type": "app_lifecycle", "event": "retention_scheduled"})
+            except Exception as exc:
+                logger.warning("Could not schedule retention: %s", exc)
+
+            # Hold a valid Groww token across the trading window instead of
+            # minting on the first candle fetch. Sits in the "api" gate so
+            # exactly one process keeps it in both split and single-container
+            # mode; the runner picks the result up from Redis.
+            try:
+                from app.utils.groww_client import token_keeper_loop
+                app.state.groww_keeper_task = asyncio.create_task(token_keeper_loop())
+                logger.info("Groww token keeper scheduled",
+                            extra={"log_type": "app_lifecycle", "event": "groww_keeper_scheduled"})
+            except Exception as exc:
+                logger.warning("Could not schedule Groww token keeper: %s", exc)
 
         # Auto-squareoff loop — closes all MIS positions at 3:10 PM IST every trading day
         try:
