@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import os
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, date as date_type
@@ -20,6 +21,11 @@ setup_logging()
 logger = get_logger(__name__)
 
 from app.cors import configure_cors
+
+# Below this absolute move a trade is noise rather than a result. Round-trip
+# costs alone are ~0.1%, so anything inside this band says nothing about whether
+# the entry was any good.
+MATERIAL_PNL_PCT = float(os.getenv("MATERIAL_PNL_PCT", "0.0015"))   # 0.15%
 
 
 class Settings(BaseSettings):
@@ -269,8 +275,35 @@ async def get_stats():
         rows = await _pool.fetch(
             "SELECT outcome, COUNT(*) as count, AVG(pnl_pct) as avg_pnl FROM trade_records WHERE outcome IS NOT NULL GROUP BY outcome"
         )
+        # Headline win-rate counts any positive close as a win, including trades
+        # that resolved inside the noise band — 2026-08-04's ETERNAL closed
+        # +Rs1.70 on a Rs50,000 position and scored the same as a real winner.
+        # Across live paper trades since 2026-07-01 that was 12 of 52 trades
+        # (23%), 7 of them logged as wins, so the headline flatters itself.
+        # P&L figures were always right; only the rate was distorted.
+        material = await _pool.fetch(
+            """
+            SELECT COUNT(*) FILTER (WHERE abs(pnl_pct) >= $1)                          AS material,
+                   COUNT(*) FILTER (WHERE abs(pnl_pct) <  $1)                          AS scratch,
+                   COUNT(*) FILTER (WHERE abs(pnl_pct) >= $1 AND outcome = 'WIN')      AS material_wins,
+                   COUNT(*) FILTER (WHERE abs(pnl_pct) <  $1 AND outcome = 'WIN')      AS scratch_wins
+            FROM trade_records
+            WHERE outcome IN ('WIN','LOSS') AND pnl_pct IS NOT NULL AND trade_source = 'PAPER'
+            """,
+            MATERIAL_PNL_PCT,
+        )
+        m = dict(material[0]) if material else {}
+        n_mat = int(m.get("material") or 0)
         return {
             "trade_stats": [dict(r) for r in rows],
+            "material": {
+                "threshold_pct": MATERIAL_PNL_PCT * 100,
+                "material_trades": n_mat,
+                "scratch_trades": int(m.get("scratch") or 0),
+                "scratch_wins_removed": int(m.get("scratch_wins") or 0),
+                "material_win_pct": (round(100.0 * int(m.get("material_wins") or 0) / n_mat, 1)
+                                     if n_mat else None),
+            },
             "trades_since_retrain": _trade_count_since_retrain,
         }
     except Exception as exc:

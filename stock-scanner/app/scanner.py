@@ -2404,16 +2404,34 @@ async def _agrade_candidates() -> list[dict]:
         if not raw:
             return []
         wl = json.loads(raw)
-        if wl.get("scanning") or not _payload_fresh(wl):
+        if not _payload_fresh(wl):
             return []
+        # A mid-flight sweep used to return nothing at all. That was tolerable at
+        # an hourly cadence; at a 5-minute gap with a ~2.6-minute sweep it blanks
+        # the watcher roughly half the time — and the blanked cycles are exactly
+        # when a fresh board is landing. The partial board is still real scored
+        # data, and the re-score gate revalidates before any promotion, so use
+        # what is there rather than skipping the cycle.
         raw_rk = await r.get(_RANKED_KEY)
         items = (json.loads(raw_rk).get("items") or []) if raw_rk else []
         if not items:
             items = wl.get("items") or []
         cands = [it for it in items
                  if it.get("symbol") and it.get("grade") == "A" and it.get("action") == "BUY"]
-        cands.sort(key=lambda it: float(it.get("win_probability") or 0), reverse=True)
-        return cands[:AGRADE_WATCH_MAX_SYMBOLS]
+        # Ranking purely by win_probability meant the day's actual movers rarely
+        # made the cap: on 2026-08-04 MOREPENLAB was A-grade, ranked #2, and up
+        # 20% by midday, yet never entered the watch set. Take the strongest
+        # movers first, then fill the rest by win_probability — a name already
+        # running is the one where a promotion still has somewhere to go.
+        half = max(1, AGRADE_WATCH_MAX_SYMBOLS // 2)
+        by_move = sorted(cands, key=lambda it: -float(
+            (it.get("metrics") or {}).get("change_pct") or 0.0))
+        picked = {it["symbol"]: it for it in by_move[:half]}
+        for it in sorted(cands, key=lambda i: float(i.get("win_probability") or 0), reverse=True):
+            if len(picked) >= AGRADE_WATCH_MAX_SYMBOLS:
+                break
+            picked.setdefault(it["symbol"], it)
+        return list(picked.values())
     except Exception as exc:
         logger.debug("agrade candidates read failed: %s", exc)
         return []

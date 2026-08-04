@@ -200,6 +200,24 @@ EXIT_VARIANTS: dict[str, dict] = {
     # run to ~2x the win size — a structural risk-2-to-make-0.5 book at ~35%
     # win-rate. Candidate — adopt only if the A/B proves it.
     "tight_stop_run": {**LIVE_POLICY, "stop_atr_mult": 1.0, "stop_floor": 1.0},
+    # Earlier review point. Live paper trades since 2026-07-01 split hard on how
+    # long a position lived, not on how it was picked:
+    #     58+ min : 25 trades, 48% win, -0.089% avg,  -Rs1044   <- worst bucket
+    #     30-57   : 12 trades, 50% win, +0.269% avg,  +Rs1529   <- best bucket
+    #     15-29   : 10 trades, 60% win, +0.070% avg,   +Rs318
+    #     <15     :  5 trades, 20% win, -0.164% avg,   -Rs388
+    # Positions surviving to the 60-minute review have already stopped working —
+    # the review then exits them at a small loss (hold_review_stagnant averages
+    # +0.195% over 2 trades vs trail_lock's +0.937% over 3, at 62 vs 26 min).
+    # Reviewing at 30 minutes tests whether the bleed is avoidable; cap_trend_extend
+    # still lets a trending winner ride straight past it, so this shortens dead
+    # trades without capping live ones.
+    #
+    # NOT adopted live. hold_cap=60 won its A/B on ~13k entries and 25 live
+    # trades cannot overturn that — and the same CF-vs-live gap already burned
+    # the confidence ceiling, which was disabled on a CF result (conf>0.90:
+    # 8/8 wins) that live trading contradicts (8/19, -Rs1347). Let the A/B rule.
+    "hold_review30_run": {**LIVE_POLICY, "hold_cap": 30},
 }
 
 
