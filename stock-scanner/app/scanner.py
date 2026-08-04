@@ -471,7 +471,12 @@ DELIVERY_MIN_MOM     = float(os.getenv("SCAN_DELIVERY_MIN_MOM", "0.0"))       # 
 DELIVERY_TOP_N       = int(os.getenv("SCAN_DELIVERY_TOP_N", "10"))
 RANKED_MAX           = int(os.getenv("SCAN_RANKED_MAX", "250"))   # full ranked board size
 CANDIDATE_POOL_N = int(os.getenv("SCAN_CANDIDATE_POOL", "30"))   # names the sentiment-service covers
-SCAN_INTERVAL  = int(os.getenv("SCAN_INTERVAL", str(60 * 60)))   # default gap between auto sweeps (runtime-overridable)
+# Gap between auto sweeps (runtime-overridable via Redis). A sweep took 21 min
+# serially, so an hour's gap was the only sane setting; at ~2.6 min concurrent
+# the board can be minutes fresh instead of half an hour stale. 5 min keeps the
+# duty cycle near half and, now that sweeps are confined to the trading window,
+# costs ~80 passes a day rather than 288.
+SCAN_INTERVAL  = int(os.getenv("SCAN_INTERVAL", str(5 * 60)))
 _AUTO_INTERVAL_KEY  = "scanner:auto_scan_interval"    # runtime override for the auto-scan gap (seconds)
 _LAST_SCAN_END_KEY  = "scanner:last_scan_end_ts"      # epoch of the last completed sweep — schedule survives restarts
 FETCH_DELAY    = float(os.getenv("SCAN_FETCH_DELAY", "0.30"))    # base per-symbol delay (+jitter) — gentle on Yahoo
@@ -2202,13 +2207,23 @@ async def scanner_loop() -> None:
     gap (default 1h) after the previous one COMPLETED, rather than back to
     back. Manual scans and the pre-open scan reset the schedule too (they all
     stamp last_scan_end), so an auto sweep never piles onto a fresh manual one.
-    Checks once a minute; paused entirely when auto-scan is off."""
+    Checks once a minute; paused entirely when auto-scan is off.
+
+    Only sweeps inside the trading window. The loop used to run around the
+    clock, so most sweeps re-read yesterday's closes overnight and at weekends —
+    pointless work that, at a short interval, is also the fastest way to get the
+    IP throttled by the data provider the intraday fallback depends on."""
     await asyncio.sleep(5)
     while True:
         try:
             interval = await get_auto_scan_interval()
             _state["auto_scan_interval"] = interval
-            if await get_auto_scan():
+            now = _ist_now()
+            minutes = now.hour * 60 + now.minute
+            in_window = (now.weekday() < 5
+                         and PREMARKET_MIN <= minutes <= POSTMARKET_MIN)
+            _state["auto_scan_window"] = in_window
+            if await get_auto_scan() and in_window:
                 due = (_state.get("last_scan_end") or 0.0) + interval
                 if time.time() >= due and not _state.get("running"):
                     logger.info("auto-scan due (gap %ds) — starting sweep", interval)
