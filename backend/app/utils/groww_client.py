@@ -41,6 +41,55 @@ BASE_URL = "https://api.groww.in/v1"
 _REDIS_TOKEN_KEY = "groww:access_token"
 _REDIS_EXPIRY_KEY = "groww:token_expiry"
 
+# Groww expires every access token at 06:00 IST. Our containers run on UTC, so
+# every expiry calculation below is done in EXPLICIT IST — a naive
+# `datetime.now()` here is a 5.5-hour lie.
+#
+# Why this is spelled out — 2026-08-05: expiry was stored as
+# `(datetime.now() + 1 day).replace(hour=6)` with a naive, UTC clock, so a token
+# minted on the 4th recorded "expires 06:00" meaning 06:00 UTC = 11:30 IST. The
+# real death was 06:00 IST = 00:30 UTC. For the 5.5 hours in between — which is
+# exactly the pre-open and first two hours of the session — `_token_is_fresh()`
+# said fresh, the keeper skipped its refresh every tick, and groww-feed-service
+# crash-looped on "Authentication failed" against a token that had died before
+# dawn. Manually refreshing was the only thing that cleared it, every morning.
+IST = timezone(timedelta(hours=5, minutes=30))
+_TOKEN_EXPIRY_HOUR_IST = int(os.getenv("GROWW_TOKEN_EXPIRY_HOUR_IST", "6"))
+
+
+def _now_ist() -> datetime:
+    return datetime.now(IST)
+
+
+def _next_expiry_ist(now: Optional[datetime] = None) -> datetime:
+    """The next 06:00 IST strictly after `now` — when Groww kills this token.
+
+    Not simply "tomorrow at 6": a token minted at 05:00 IST dies an hour later,
+    not 25 hours later, and treating it as day-long would reintroduce exactly
+    the believed-fresh-but-dead window this function exists to close.
+    """
+    now = now or _now_ist()
+    expiry = now.replace(hour=_TOKEN_EXPIRY_HOUR_IST, minute=0, second=0, microsecond=0)
+    if expiry <= now:
+        expiry += timedelta(days=1)
+    return expiry
+
+
+def _parse_expiry(raw: str) -> Optional[datetime]:
+    """Read a stored expiry back as an IST-aware datetime.
+
+    A naive value is one written by the pre-2026-08-05 code, whose meaning was
+    wrong by 5.5 hours. There is no way to salvage it, and trusting it is what
+    caused the outage — so treat it as expired and let a fresh token be minted.
+    """
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(IST)
+
 # Client-side rate limit — kept safely UNDER Groww's published limits so we never
 # get a 429. Groww limits are per *type* and shared (Live Data: 10/s, 300/min;
 # Non-Trading: 20/s, 500/min). A single conservative global budget covers all.
@@ -149,8 +198,8 @@ class GrowwClient:
             token = await cache_get(_REDIS_TOKEN_KEY)
             expiry_str = await cache_get(_REDIS_EXPIRY_KEY)
             if token and expiry_str:
-                expiry = datetime.fromisoformat(expiry_str)
-                if datetime.now() < expiry:
+                expiry = _parse_expiry(expiry_str)
+                if expiry and _now_ist() < expiry:
                     self._access_token = token
                     self._token_expiry = expiry
                     self._status = STATUS_OK
@@ -167,7 +216,7 @@ class GrowwClient:
         try:
             from app.utils.redis_client import cache_set
             if self._access_token and self._token_expiry:
-                ttl = max(60, int((self._token_expiry - datetime.now()).total_seconds()))
+                ttl = max(60, int((self._token_expiry - _now_ist()).total_seconds()))
                 await cache_set(_REDIS_TOKEN_KEY, self._access_token, ttl)
                 await cache_set(_REDIS_EXPIRY_KEY, self._token_expiry.isoformat(), ttl)
         except Exception as exc:
@@ -215,7 +264,7 @@ class GrowwClient:
 
     async def _refresh_token(self) -> None:
         """Exchange API key for a short-lived access token via Groww token endpoint."""
-        self._last_attempt = datetime.now()
+        self._last_attempt = _now_ist()
         endpoint = "/token/api/access"
         start = time.monotonic()
         status_code: Optional[int] = None
@@ -294,10 +343,7 @@ class GrowwClient:
                     raise ValueError(f"No access_token in response: {resp.text[:200]}")
 
                 self._access_token = token
-                now = datetime.now()
-                self._token_expiry = (now + timedelta(days=1)).replace(
-                    hour=6, minute=0, second=0, microsecond=0
-                )
+                self._token_expiry = _next_expiry_ist()
                 self._status = STATUS_OK
                 self._failure_count = 0
                 self._failure_reason = ""
@@ -350,7 +396,7 @@ class GrowwClient:
                 await self._redis_load()
 
             if not self._access_token or (
-                self._token_expiry and datetime.now() >= self._token_expiry
+                self._token_expiry and _now_ist() >= self._token_expiry
             ):
                 # After a failed refresh, wait out the cooldown instead of
                 # hammering the token endpoint — repeated hits keep its shared,
@@ -373,7 +419,7 @@ class GrowwClient:
     # ── Status + control ──────────────────────────────────────────────────────
 
     def get_status(self) -> dict:
-        now = datetime.now()
+        now = _now_ist()
         remaining = None
         if self._token_expiry and self._status == STATUS_OK:
             remaining = max(0, int((self._token_expiry - now).total_seconds()))
@@ -654,8 +700,7 @@ def init_groww_client(
 
 # ── Token keeper ──────────────────────────────────────────────────────────────
 
-IST = timezone(timedelta(hours=5, minutes=30))
-# Groww tokens die at 06:00, so every session starts needing a new one. Keep one
+# Groww tokens die at 06:00 IST, so every session starts needing a new one. Keep one
 # in hand across the whole trading window rather than minting on the first
 # candle fetch, where a failure costs live ticks and silently drops the day onto
 # the Yahoo fallback.
@@ -684,7 +729,27 @@ def _token_is_fresh(client: "GrowwClient") -> bool:
     """True when the cached token will still be valid a safe margin from now."""
     if not client._access_token or not client._token_expiry:
         return False
-    return datetime.now() < client._token_expiry - _REFRESH_MARGIN
+    return _now_ist() < client._token_expiry - _REFRESH_MARGIN
+
+
+async def _shared_token_present() -> bool:
+    """Whether a token still exists in Redis, the shared source of truth.
+
+    Expiry arithmetic only catches a token dying on schedule. A token can also
+    die early — revoked, invalidated server-side, or rejected for a reason we
+    cannot see from here — and then the in-process copy looks perfectly fresh
+    while every consumer gets 'Authentication failed'. groww-feed-service, which
+    is the first to actually find out, deletes the key; this is how the keeper
+    notices and re-mints instead of guarding a corpse until its nominal expiry.
+
+    Errors return True (assume present): a Redis blip must not trigger a token
+    re-mint storm.
+    """
+    try:
+        from app.utils.redis_client import cache_get
+        return bool(await cache_get(_REDIS_TOKEN_KEY))
+    except Exception:
+        return True
 
 
 async def token_keeper_loop() -> None:
@@ -727,8 +792,21 @@ async def token_keeper_loop() -> None:
                 await client._redis_load()
 
             if _token_is_fresh(client):
-                await asyncio.sleep(_KEEPER_INTERVAL)
-                continue
+                # ...but "fresh" is only an expiry calculation. If the shared
+                # token is gone, someone found it rejected before its nominal
+                # expiry, and the in-process copy is worth exactly nothing.
+                if await _shared_token_present():
+                    await asyncio.sleep(_KEEPER_INTERVAL)
+                    continue
+                logger.warning(
+                    "Groww token disappeared from Redis before its expiry (%s) — "
+                    "treating the in-process copy as dead and re-minting",
+                    client._token_expiry,
+                    extra={"log_type": "groww_token", "event": "keeper_token_revoked"},
+                )
+                async with client._lock:
+                    client._access_token = None
+                    client._token_expiry = None
 
             try:
                 await client._token()

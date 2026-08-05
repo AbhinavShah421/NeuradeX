@@ -121,6 +121,40 @@ def _get_token() -> str | None:
         return None
 
 
+def _looks_like_auth_failure(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return ("token" in msg and ("expire" in msg or "invalid" in msg)) or "authentication failed" in msg
+
+
+def _report_token_dead(attempted: str) -> None:
+    """Delete the shared token so the backend's keeper re-mints it.
+
+    We are the first component to learn a token is dead — the backend only
+    computes an expiry, it never hears Groww reject anything. Before this, a
+    token that died ahead of its nominal expiry left us crash-looping on
+    'Authentication failed' while the keeper sat on a copy it believed was
+    fresh, with nothing to reconcile the two (2026-08-05: an expiry recorded in
+    the wrong timezone did exactly that for the first two hours of the session).
+
+    Deleting the key is the signal; the keeper treats a missing token as dead
+    regardless of what its own arithmetic says. Compare-and-delete so we only
+    ever remove the token we actually tried — a fresh one minted moments ago
+    must survive.
+    """
+    try:
+        with _r.pipeline() as pipe:
+            pipe.watch(TOKEN_KEY)
+            if pipe.get(TOKEN_KEY) != attempted:
+                pipe.unwatch()
+                return
+            pipe.multi()
+            pipe.delete(TOKEN_KEY)
+            pipe.execute()
+        log.warning("groww rejected the shared token — cleared it so the backend re-mints")
+    except Exception as exc:
+        log.debug("token clear skipped: %s", exc)
+
+
 def _init(token: str) -> bool:
     global _api, _feed, _token, _subscribed, _tok2sym, _init_count
     try:
@@ -138,6 +172,8 @@ def _init(token: str) -> bool:
     except Exception as exc:
         log.warning("groww feed init failed: %s", exc)
         _api = _feed = None
+        if _looks_like_auth_failure(exc):
+            _report_token_dead(token)
         return False
 
 
