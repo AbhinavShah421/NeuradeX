@@ -481,7 +481,7 @@ _AUTO_INTERVAL_KEY  = "scanner:auto_scan_interval"    # runtime override for the
 _LAST_SCAN_END_KEY  = "scanner:last_scan_end_ts"      # epoch of the last completed sweep — schedule survives restarts
 FETCH_DELAY    = float(os.getenv("SCAN_FETCH_DELAY", "0.30"))    # base per-symbol delay (+jitter) — gentle on Yahoo
 # Full-universe (NSE ~1800) background scan controls
-SCAN_CHECKPOINT_EVERY = int(os.getenv("SCAN_CHECKPOINT_EVERY", "120"))  # write partial watchlist every N stocks
+SCAN_CHECKPOINT_EVERY = int(os.getenv("SCAN_CHECKPOINT_EVERY", "120"))  # log sweep progress every N stocks
 RATE_LIMIT_BACKOFF    = float(os.getenv("SCAN_RATE_LIMIT_BACKOFF", "5.0"))  # sleep on a Yahoo 429
 STALE_RUN_SECS        = int(os.getenv("SCAN_STALE_RUN_SECS", "2400"))   # a 'running' flag older than this is stale
 # Symbols fetched concurrently. The sweep was serial — 2080 symbols each
@@ -1102,8 +1102,8 @@ async def scan_once(phase: str = "intraday") -> dict:
             return {}
         _state.update({"running": True, "run_started": time.time(), "scanning": True})
 
-    # Preserve the last *completed* ranked board as the diff baseline before the
-    # progressive checkpoints below start overwriting the live board.
+    # Preserve the last *completed* ranked board as the diff baseline before this
+    # sweep replaces it at the end.
     try:
         rc0 = await _get_redis()
         prev_board = await rc0.get(_RANKED_KEY)
@@ -1125,22 +1125,6 @@ async def scan_once(phase: str = "intraday") -> dict:
     scanned = 0
     _grade_rank = {"A": 0, "B": 1, "C": 2, "D": 3}
 
-    def _progress_payload(scanning: bool) -> dict:
-        """Rank what we have so far so the UI updates live during a long sweep."""
-        wl = _top_watchlist(candidates, _grade_rank, wl_max)
-        dl = sorted(delivery_candidates, key=lambda r: (_grade_rank.get(r.get("grade", "D"), 3),
-                    -r.get("delivery_score", 0.0)))[:DELIVERY_TOP_N]
-        for d in dl:
-            d["reasoning"] = d.get("delivery_reasoning") or d.get("reasoning")
-        gc = {g: sum(1 for w in wl if w.get("grade") == g) for g in ("A", "B", "C", "D")}
-        return {
-            "updated_at": _ist_now().isoformat(), "phase": phase, "scanned": scanned,
-            "universe": total, "candidates": len(candidates), "market_regime": _state["market_regime"],
-            "calibration": {"accuracy": calib.get("accuracy"), "samples": calib.get("samples", 0)},
-            "grade_counts": gc, "high_conviction": gc["A"] + gc["B"],
-            "scanning": scanning, "items": wl, "delivery": dl,
-        }
-
     async with httpx.AsyncClient(follow_redirects=True) as client:
         regime, regime_detail = await _market_regime(client)
         _state["market_regime"] = {1: "bullish", -1: "bearish", 0: "neutral"}[regime]
@@ -1153,21 +1137,27 @@ async def scan_once(phase: str = "intraday") -> dict:
         queue: asyncio.Queue = asyncio.Queue()
         for item in universe.items():
             queue.put_nowait(item)
-        checkpoint_lock = asyncio.Lock()
+        def _log_progress() -> None:
+            """Report sweep progress. Deliberately does NOT publish the board.
 
-        async def _checkpoint() -> None:
-            """Write the partial board so the dashboard fills during the sweep."""
-            try:
-                rc = await _get_redis()
-                await rc.set(_WATCHLIST_KEY, json.dumps(_progress_payload(True)), ex=86400)
-                rk = sorted(candidates, key=_rank_key)[:RANKED_MAX]
-                await rc.set(_RANKED_KEY, json.dumps({
-                    "updated_at": _ist_now().isoformat(), "scanned": scanned, "universe": total,
-                    "candidates": len(candidates), "market_regime": _state["market_regime"],
-                    "items": [{"rank": i + 1, **c} for i, c in enumerate(rk)],
-                }), ex=86400)
-            except Exception:
-                pass
+            This used to write a partial watchlist and ranked board to the live
+            Redis keys every SCAN_CHECKPOINT_EVERY symbols so the dashboard
+            filled in during a sweep. On the ~2,079-symbol universe that is ~17
+            republishes per sweep, each one ranking whatever subset had happened
+            to finish — and because workers complete out of order, that subset is
+            arbitrary. Suggestions visibly churned mid-scan and, worse, a partial
+            board is ranked before the news-catalyst boost and the committed-tier
+            tagging have run at all, so those intermediate boards were not merely
+            incomplete but scored by different rules than the final one.
+
+            The last COMPLETED board now stays published untouched until the new
+            one atomically replaces it at the end of the sweep. A sweep that dies
+            partway publishes nothing, which is the point: stale-but-coherent
+            beats fresh-but-arbitrary when these are trade suggestions.
+
+            Live progress (scanning / scanned / universe) is unaffected — the UI
+            reads that from /status, which is driven by _state, not these keys.
+            """
             logger.info("scan(%s) progress: %d/%d scanned, %d intraday-fit, %d delivery-fit",
                         phase, scanned, total, len(candidates), len(delivery_candidates))
 
@@ -1213,10 +1203,7 @@ async def scan_once(phase: str = "intraday") -> dict:
                     scanned += 1
                     _state["scanned"] = scanned
                     if scanned % SCAN_CHECKPOINT_EVERY == 0:
-                        # One writer at a time, or concurrent workers crossing the
-                        # boundary together would race on the same Redis keys.
-                        async with checkpoint_lock:
-                            await _checkpoint()
+                        _log_progress()
 
                     await asyncio.sleep(FETCH_DELAY + random.uniform(0.0, FETCH_DELAY))
                 except Exception as exc:
