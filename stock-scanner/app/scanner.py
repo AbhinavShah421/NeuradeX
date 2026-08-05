@@ -896,7 +896,18 @@ NSE_EQUITY_LIST_URLS = [u for u in (
     "https://archives.nseindia.com/content/equities/EQUITY_L.csv",
 ) if u]
 _UNIVERSE_CACHE_KEY  = "ai_engine:scan_universe"
-_universe_cache: dict = {"date": None, "universe": None}
+_universe_cache: dict = {"date": None, "universe": None, "expires": 0.0}
+# How long a DEGRADED universe (a fallback source, because the preferred one was
+# unreachable) may be reused before the preferred source is retried.
+#
+# Why this exists — 2026-08-05: a transient DNS failure at 03:08 startup
+# ("No address associated with hostname") made both NSE archive hosts
+# unresolvable for a few seconds. The directory fallback returned 306 symbols and
+# was cached with the full 24h TTL, so the scanner swept 306 of the ~2,079 NSE
+# stocks for the entire trading day — DNS had recovered minutes later, but
+# nothing ever re-asked. The bundled fallback was already protected from caching
+# for exactly this reason; the directory fallback was not.
+DEGRADED_UNIVERSE_TTL = int(os.getenv("SCAN_DEGRADED_UNIVERSE_TTL", "600"))
 
 
 async def _fetch_nse_equity_universe() -> dict[str, str]:
@@ -945,22 +956,29 @@ async def _fetch_directory_universe() -> dict[str, str]:
 
 async def _load_universe() -> dict[str, str]:
     today = _ist_now().strftime("%Y-%m-%d")
-    if _universe_cache["universe"] and _universe_cache["date"] == today:
+    if (_universe_cache["universe"] and _universe_cache["date"] == today
+            and time.time() < _universe_cache.get("expires", 0.0)):
         return _universe_cache["universe"]
 
     # Redis day-cache (avoids re-hitting NSE every sweep; survives restarts).
+    # A degraded entry carries a short TTL, so its own expiry is what forces the
+    # retry — inherit the remaining TTL rather than assuming a full day.
     try:
         rc = await _get_redis()
-        raw = await rc.get(f"{_UNIVERSE_CACHE_KEY}:{today}")
+        key = f"{_UNIVERSE_CACHE_KEY}:{today}"
+        raw = await rc.get(key)
         if raw:
             uni = json.loads(raw)
             if uni:
-                _universe_cache.update({"date": today, "universe": uni})
+                ttl = await rc.ttl(key)
+                _universe_cache.update({"date": today, "universe": uni,
+                                        "expires": time.time() + (ttl if ttl and ttl > 0 else 60)})
                 return uni
     except Exception:
         pass
 
     uni: dict[str, str] = {}
+    degraded = False
     if UNIVERSE_SOURCE == "nse":
         try:
             uni = await _fetch_nse_equity_universe()
@@ -970,7 +988,11 @@ async def _load_universe() -> dict[str, str]:
     if not uni and UNIVERSE_SOURCE in ("nse", "directory"):
         try:
             uni = await _fetch_directory_universe()
-            logger.info("scan universe: backend directory → %d symbols", len(uni))
+            # Only a *fallback* when nse was the preferred source; if the operator
+            # asked for the directory outright, this is the intended universe.
+            degraded = UNIVERSE_SOURCE == "nse"
+            logger.info("scan universe: backend directory → %d symbols%s", len(uni),
+                        " (degraded — will retry NSE shortly)" if degraded else "")
         except Exception as exc:
             logger.warning("directory universe fetch failed (%s); using bundled list", exc)
     if not uni:
@@ -979,12 +1001,15 @@ async def _load_universe() -> dict[str, str]:
         logger.info("scan universe: bundled fallback → %d symbols (not cached)", len(UNIVERSE))
         return dict(UNIVERSE)
 
+    # A degraded universe is cached only briefly. Pinning it for the day means one
+    # momentary blip costs a whole session of coverage (see DEGRADED_UNIVERSE_TTL).
+    ttl = DEGRADED_UNIVERSE_TTL if degraded else 86400
     try:
         rc = await _get_redis()
-        await rc.set(f"{_UNIVERSE_CACHE_KEY}:{today}", json.dumps(uni), ex=86400)
+        await rc.set(f"{_UNIVERSE_CACHE_KEY}:{today}", json.dumps(uni), ex=ttl)
     except Exception:
         pass
-    _universe_cache.update({"date": today, "universe": uni})
+    _universe_cache.update({"date": today, "universe": uni, "expires": time.time() + ttl})
     return uni
 
 
