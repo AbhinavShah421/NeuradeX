@@ -608,6 +608,7 @@ services:
       context: ./stock-scanner
       dockerfile: Dockerfile
     container_name: stock-prediction-stock-scanner
+    restart: unless-stopped
     environment:
       REDIS_HOST: redis
       REDIS_PORT: "6379"
