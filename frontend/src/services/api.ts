@@ -79,6 +79,7 @@ class ApiService {
   async getGrowwStatus(): Promise<ApiResponse<{
     status: string; tokenExpiry: string | null; timeRemainingSeconds: number | null;
     failureCount: number; failureReason: string; lastAttempt: string | null; hasToken: boolean;
+    keyType: 'approval' | 'totp'; unattended: boolean;
   }>> {
     const response = await this.api.get('/api/auth/groww/status');
     return response.data;
@@ -89,8 +90,14 @@ class ApiService {
     return response.data;
   }
 
-  async updateGrowwCredentials(apiKey: string, apiSecret: string): Promise<ApiResponse<{ success: boolean; expires: string | null; error?: string }>> {
-    const response = await this.api.put('/api/auth/groww/credentials', { api_key: apiKey, api_secret: apiSecret });
+  async updateGrowwCredentials(
+    apiKey: string,
+    apiSecret: string,
+    keyType: 'approval' | 'totp' = 'approval',
+  ): Promise<ApiResponse<{ success: boolean; expires: string | null; error?: string }>> {
+    const response = await this.api.put('/api/auth/groww/credentials', {
+      api_key: apiKey, api_secret: apiSecret, key_type: keyType,
+    });
     return response.data;
   }
 

@@ -54,6 +54,23 @@ MAX_INIT_FAILS = 3
 # STALE_EXIT_SECS, the socket is dead regardless of what get_ltp() claims, so
 # exit and let Docker restart us (a fresh process mints a fresh socket token).
 STALE_EXIT_SECS = float(os.getenv("FEED_STALE_EXIT_SECS", "180"))
+# RSS ceiling. MAX_INIT_FAILS only bounds *consecutive* failures; it does nothing
+# about the slow case, where each successful re-init also leaves a NatsClient and
+# its reconnect thread behind. Measured 2026-08-04: 20 inits in one process life
+# took RSS from ~25MB to ~99MB — about 5MB each, none of it reclaimable — so the
+# 256MB container cap is roughly two days away at that rate. That is the same
+# path that ended in "maximum recursion depth exceeded" on 14-16 July.
+#
+# Docker kills the container at the cap without warning, mid-session. Exiting
+# ourselves a little short of it means the restart happens on our terms: cheap
+# (a fresh process re-subscribes in seconds) and, unlike an OOM kill, logged.
+# Measured against cgroup anon (see _rss_mb). A fresh process with 340 symbols
+# subscribed sits at ~156MB of the 256MB container limit, so the usable leak
+# headroom is only ~100MB. 215MB restarts us with ~40MB to spare while still
+# allowing roughly 40 leaked inits — a couple of days at the observed rate.
+# A restart here costs seconds and re-subscribes; an OOM kill costs the session.
+MEM_EXIT_MB = float(os.getenv("FEED_MEM_EXIT_MB", "215"))
+MEM_CHECK_SECS = 30.0
 
 _r = redis.from_url(REDIS_URL, decode_responses=True)
 
@@ -65,6 +82,35 @@ _subscribed: set[str] = set()
 _logged_shape = False
 _last_px: dict[str, float] = {}   # token -> last published price (watchdog)
 _last_change = time.time()        # last time ANY published price changed
+_init_count = 0                   # GrowwFeed constructions this process — one leak each
+
+
+def _rss_mb() -> float:
+    """Memory as the CONTAINER accounts it, in MB. 0.0 if unreadable, which
+    leaves the watchdog inert rather than restart-looping on a bad reading.
+
+    Specifically cgroup `anon` — the non-reclaimable part, which is what an OOM
+    kill actually turns on. Two metrics were tried and rejected: VmRSS counts
+    shared library mappings and spikes past 180MB merely from subscribing 340
+    symbols, and memory.current folds in ~20MB of page cache the kernel would
+    evict long before killing anything. Both read high enough on a healthy
+    process to make a sane ceiling fire immediately.
+    """
+    try:                                    # cgroup v2: anon only
+        with open("/sys/fs/cgroup/memory.stat") as fh:
+            for line in fh:
+                if line.startswith("anon "):
+                    return int(line.split()[1]) / (1024.0 * 1024.0)
+    except Exception:
+        pass
+    try:                                    # cgroup v1 fallback
+        with open("/sys/fs/cgroup/memory/memory.stat") as fh:
+            for line in fh:
+                if line.startswith("rss "):
+                    return int(line.split()[1]) / (1024.0 * 1024.0)
+    except Exception:
+        pass
+    return 0.0
 
 
 def _get_token() -> str | None:
@@ -75,11 +121,48 @@ def _get_token() -> str | None:
         return None
 
 
+def _looks_like_auth_failure(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return ("token" in msg and ("expire" in msg or "invalid" in msg)) or "authentication failed" in msg
+
+
+def _report_token_dead(attempted: str) -> None:
+    """Delete the shared token so the backend's keeper re-mints it.
+
+    We are the first component to learn a token is dead — the backend only
+    computes an expiry, it never hears Groww reject anything. Before this, a
+    token that died ahead of its nominal expiry left us crash-looping on
+    'Authentication failed' while the keeper sat on a copy it believed was
+    fresh, with nothing to reconcile the two (2026-08-05: an expiry recorded in
+    the wrong timezone did exactly that for the first two hours of the session).
+
+    Deleting the key is the signal; the keeper treats a missing token as dead
+    regardless of what its own arithmetic says. Compare-and-delete so we only
+    ever remove the token we actually tried — a fresh one minted moments ago
+    must survive.
+    """
+    try:
+        with _r.pipeline() as pipe:
+            pipe.watch(TOKEN_KEY)
+            if pipe.get(TOKEN_KEY) != attempted:
+                pipe.unwatch()
+                return
+            pipe.multi()
+            pipe.delete(TOKEN_KEY)
+            pipe.execute()
+        log.warning("groww rejected the shared token — cleared it so the backend re-mints")
+    except Exception as exc:
+        log.debug("token clear skipped: %s", exc)
+
+
 def _init(token: str) -> bool:
-    global _api, _feed, _token, _subscribed, _tok2sym
+    global _api, _feed, _token, _subscribed, _tok2sym, _init_count
     try:
         from growwapi import GrowwAPI, GrowwFeed
         _api = GrowwAPI(token)
+        # Each construction strands a NatsClient in the SDK's class-level cache
+        # with no way to release it, so count them: this is the leak's rate.
+        _init_count += 1
         _feed = GrowwFeed(_api)
         _token = token
         _subscribed = set()
@@ -89,6 +172,8 @@ def _init(token: str) -> bool:
     except Exception as exc:
         log.warning("groww feed init failed: %s", exc)
         _api = _feed = None
+        if _looks_like_auth_failure(exc):
+            _report_token_dead(token)
         return False
 
 
@@ -186,6 +271,7 @@ def _market_hours_ist() -> bool:
 def main() -> None:
     log.info("groww-feed-service starting; redis=%s", REDIS_URL)
     last_resync = 0.0
+    last_mem_check = 0.0
     init_fails = 0
     while True:
         try:
@@ -214,6 +300,18 @@ def main() -> None:
                     _subscribe(new)
 
             _publish_ticks()
+
+            # Leaked-client watchdog (see MEM_EXIT_MB comment). Checked on a
+            # timer rather than every poll — reading /proc each second to watch
+            # a leak that moves in 5MB steps is pure overhead.
+            if now - last_mem_check >= MEM_CHECK_SECS:
+                last_mem_check = now
+                rss = _rss_mb()
+                if rss >= MEM_EXIT_MB:
+                    log.warning("RSS %.0fMB >= %.0fMB ceiling after %d feed inits — leaked "
+                                "NatsClients cannot be freed in-process, exiting for a clean "
+                                "restart before Docker OOM-kills us", rss, MEM_EXIT_MB, _init_count)
+                    sys.exit(3)
 
             # Staleness watchdog (see STALE_EXIT_SECS comment).
             if (_subscribed and _market_hours_ist()

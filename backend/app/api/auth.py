@@ -16,7 +16,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database.postgres import get_db
 from app.models.user import User
-from app.utils.groww_client import get_groww_client, init_groww_client
+from app.utils.groww_client import (
+    KEY_TYPE_APPROVAL,
+    KEY_TYPE_TOTP,
+    get_groww_client,
+    init_groww_client,
+)
 from app.utils.elk_logger import get_logger
 from app.utils.redis_client import get_redis
 from app.utils.otp_service import (
@@ -446,6 +451,9 @@ async def groww_refresh(user: dict = Depends(get_current_user)):
 class GrowwCredentialsRequest(BaseModel):
     api_key: str
     api_secret: str
+    # "approval" (default, needs a daily manual tap in the Groww app) or "totp"
+    # (api_secret carries the base32 seed and refreshes unattended).
+    key_type: str = "approval"
 
 
 @router.put("/groww/credentials")
@@ -458,21 +466,36 @@ async def groww_update_credentials(
     if not req.api_key.strip() or not req.api_secret.strip():
         raise HTTPException(400, "api_key and api_secret are required")
 
+    key_type = (req.key_type or "approval").strip().lower()
+    if key_type not in (KEY_TYPE_APPROVAL, KEY_TYPE_TOTP):
+        raise HTTPException(400, f"key_type must be '{KEY_TYPE_APPROVAL}' or '{KEY_TYPE_TOTP}'")
+
+    secret = req.api_secret.strip()
+    if key_type == KEY_TYPE_TOTP:
+        # Fail here with a clear message rather than letting every refresh for
+        # the rest of the day come back as an opaque 403.
+        import pyotp
+        try:
+            pyotp.TOTP(secret.replace(" ", "")).now()
+        except Exception:
+            raise HTTPException(400, "api_secret is not a valid base32 TOTP seed")
+
     user_id = user.get("sub")
     if user_id:
         result = await db.execute(select(User).where(User.id == int(user_id)))
         db_user = result.scalar_one_or_none()
         if db_user:
             db_user.broker_api_key = req.api_key.strip()
-            db_user.broker_api_secret = req.api_secret.strip()
+            db_user.broker_api_secret = secret
+            db_user.broker_key_type = key_type
             await db.commit()
 
     # Re-init or update the singleton client
     client = get_groww_client()
     if client:
-        refresh_result = await client.update_credentials(req.api_key.strip(), req.api_secret.strip())
+        refresh_result = await client.update_credentials(req.api_key.strip(), secret, key_type)
     else:
-        new_client = init_groww_client(req.api_key.strip(), req.api_secret.strip())
+        new_client = init_groww_client(req.api_key.strip(), secret, key_type)
         refresh_result = await new_client.force_refresh()
 
     if refresh_result["success"]:
@@ -481,9 +504,12 @@ async def groww_update_credentials(
             "message": "Credentials updated and token refreshed",
             "data": refresh_result,
         }
-    # Credentials saved to DB even if token refresh fails (TOTP might need approval)
+    # Credentials are saved either way — an approval key legitimately cannot
+    # mint a token until someone approves the session in the Groww app.
+    hint = (" — approve the session in the Groww app, or switch to a TOTP key "
+            "to refresh unattended") if key_type == KEY_TYPE_APPROVAL else ""
     return {
         "status": "partial",
-        "message": "Credentials saved but token refresh failed — Groww TOTP session may need approval",
+        "message": f"Credentials saved but token refresh failed{hint}",
         "data": refresh_result,
     }

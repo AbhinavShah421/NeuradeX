@@ -40,6 +40,10 @@ _YAHOO = "https://query1.finance.yahoo.com/v8/finance/chart/"
 _UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Accept": "application/json"}
 _WATCHLIST_KEY   = "ai_engine:watchlist"
 _RANKED_KEY      = "ai_engine:ranked"                    # full ranked board for the Predictions page
+# Day movers across the WHOLE universe. Deliberately not derived from the ranked
+# board: that only holds intraday-fit setups, and the gates that build it dock a
+# name for being overbought or extended — which is what a real gainer looks like.
+_MOVERS_KEY      = "ai_engine:movers"
 _RANKED_PREV_KEY = "ai_engine:ranked:prev"               # last completed board — for scan-to-scan diff
 _CANDIDATES_KEY  = "ai_engine:scan_candidates"           # candidate pool for the sentiment-service
 _SENTIMENT_KEY   = "ai_engine:sentiment:{}"              # per-symbol news signal (sentiment-service)
@@ -423,6 +427,24 @@ async def _watchlist_max() -> int:
     return WATCHLIST_MAX
 
 
+_GRADE_RANK = {"A": 0, "B": 1, "C": 2, "D": 3}
+
+
+def _rank_key(r: dict) -> tuple:
+    """Sort key for the ranked board.
+
+    Symbol is the final tiebreaker on purpose. The sweep fetches concurrently,
+    so candidates land in completion order rather than universe order; without
+    a deterministic last key, two scans over identical data could order equal
+    scores differently and show phantom movement on the "what changed since the
+    last scan" panel.
+    """
+    return (r.get("action") != "BUY",
+            _GRADE_RANK.get(r.get("grade", "D"), 3),
+            -r.get("rank_score", r.get("signal_score", 0.0)),
+            r.get("symbol", ""))
+
+
 def _top_watchlist(cands: list[dict], grade_rank: dict, wl_max: int = WATCHLIST_MAX) -> list[dict]:
     """Most-convicted intraday picks, capped at `wl_max`.
 
@@ -435,7 +457,8 @@ def _top_watchlist(cands: list[dict], grade_rank: dict, wl_max: int = WATCHLIST_
                     not r.get("committed", False),
                     -int(r.get("independent_signals") or 0),
                     grade_rank.get(r.get("grade", "D"), 3),
-                    -r.get("rank_score", r.get("signal_score", 0.0))))
+                    -r.get("rank_score", r.get("signal_score", 0.0)),
+                    r.get("symbol", "")))   # deterministic under concurrent fetch
     hi = [c for c in ranked if c.get("action") == "BUY" and c.get("grade") in ("A", "B")]
     return (hi or ranked)[:max(1, wl_max)]
 
@@ -448,14 +471,28 @@ DELIVERY_MIN_MOM     = float(os.getenv("SCAN_DELIVERY_MIN_MOM", "0.0"))       # 
 DELIVERY_TOP_N       = int(os.getenv("SCAN_DELIVERY_TOP_N", "10"))
 RANKED_MAX           = int(os.getenv("SCAN_RANKED_MAX", "250"))   # full ranked board size
 CANDIDATE_POOL_N = int(os.getenv("SCAN_CANDIDATE_POOL", "30"))   # names the sentiment-service covers
-SCAN_INTERVAL  = int(os.getenv("SCAN_INTERVAL", str(60 * 60)))   # default gap between auto sweeps (runtime-overridable)
+# Gap between auto sweeps (runtime-overridable via Redis). A sweep took 21 min
+# serially, so an hour's gap was the only sane setting; at ~2.6 min concurrent
+# the board can be minutes fresh instead of half an hour stale. 5 min keeps the
+# duty cycle near half and, now that sweeps are confined to the trading window,
+# costs ~80 passes a day rather than 288.
+SCAN_INTERVAL  = int(os.getenv("SCAN_INTERVAL", str(5 * 60)))
 _AUTO_INTERVAL_KEY  = "scanner:auto_scan_interval"    # runtime override for the auto-scan gap (seconds)
 _LAST_SCAN_END_KEY  = "scanner:last_scan_end_ts"      # epoch of the last completed sweep — schedule survives restarts
 FETCH_DELAY    = float(os.getenv("SCAN_FETCH_DELAY", "0.30"))    # base per-symbol delay (+jitter) — gentle on Yahoo
 # Full-universe (NSE ~1800) background scan controls
-SCAN_CHECKPOINT_EVERY = int(os.getenv("SCAN_CHECKPOINT_EVERY", "120"))  # write partial watchlist every N stocks
+SCAN_CHECKPOINT_EVERY = int(os.getenv("SCAN_CHECKPOINT_EVERY", "120"))  # log sweep progress every N stocks
 RATE_LIMIT_BACKOFF    = float(os.getenv("SCAN_RATE_LIMIT_BACKOFF", "5.0"))  # sleep on a Yahoo 429
 STALE_RUN_SECS        = int(os.getenv("SCAN_STALE_RUN_SECS", "2400"))   # a 'running' flag older than this is stale
+# Symbols fetched concurrently. The sweep was serial — 2080 symbols each
+# followed by a ~0.45s average sleep put ~16 of every 21 minutes into sleeping,
+# and at a 30-minute auto interval the scanner spent most of its life scanning.
+# The delay stays (Yahoo throttles), it just applies per worker instead of
+# globally, so throughput scales with this while the per-worker rate does not.
+SCAN_CONCURRENCY = max(1, int(os.getenv("SCAN_CONCURRENCY", "8")))
+# On a 429 every worker parks until this passes, rather than each backing off
+# alone and collectively keeping Yahoo's penalty window from ever resetting.
+_throttle_until = 0.0
 
 # Trading-day schedule (IST, minutes past midnight)
 MARKET_OPEN_MIN  = int(os.getenv("SCAN_MARKET_OPEN_MIN", str(9 * 60 + 15)))    # 09:15
@@ -598,6 +635,15 @@ def _analyze(candles: list[dict], regime: int = 0, calib: dict | None = None,
     long_trend = (price > sma100 and sma50 >= sma100) if sma100 is not None else None
     _, _, macd_hist = _macd(closes)
     gap_pct = (opens[-1] - closes[-2]) / closes[-2] * 100 if len(closes) >= 2 and closes[-2] else 0.0
+    # Move so far today. Mid-session the last daily bar is the forming one, so
+    # closes[-1] is the live price and this is the running day change — the same
+    # number a top-gainers screen shows. Only gap_pct existed before, which sees
+    # the overnight jump and nothing after it: a stock that opened flat and then
+    # ran 9% was invisible to every ranking here.
+    change_pct = (closes[-1] - closes[-2]) / closes[-2] * 100 if len(closes) >= 2 and closes[-2] else 0.0
+    # Distance travelled since the open — separates "gapped and stalled" from
+    # "grinding up all session".
+    intraday_pct = (closes[-1] - opens[-1]) / opens[-1] * 100 if opens[-1] else 0.0
     hi20 = max(highs[-20:]); lo20 = min(lows[-20:])
     dist_from_high = (hi20 - price) / price * 100 if price else 0.0   # room to the upside
     dist_from_low  = (price - lo20) / price * 100 if price else 0.0
@@ -770,6 +816,8 @@ def _analyze(candles: list[dict], regime: int = 0, calib: dict | None = None,
             "sma_trend": "up" if sma_trend > 0 else "down",
             "macd_hist": round(macd_hist, 3),
             "gap_pct": round(gap_pct, 2),
+            "change_pct": round(change_pct, 2),
+            "intraday_pct": round(intraday_pct, 2),
             "dist_from_high_pct": round(dist_from_high, 2),
             "dist_from_low_pct": round(dist_from_low, 2),
             "market_regime": regime_txt,
@@ -792,7 +840,13 @@ async def _fetch_chart(client: httpx.AsyncClient, ysym: str, days: int = 140) ->
                                  params={"period1": p1, "period2": p2, "interval": "1d", "includePrePost": "false"},
                                  headers=_UA, timeout=12.0)
             if r.status_code in (429, 999) or r.status_code >= 500:
-                await asyncio.sleep(RATE_LIMIT_BACKOFF * (attempt + 1) + random.uniform(0, 1.0))
+                # Park every worker, not just this one: with SCAN_CONCURRENCY in
+                # flight, the others would keep hammering a throttled endpoint
+                # and hold the penalty window open.
+                global _throttle_until
+                back = RATE_LIMIT_BACKOFF * (attempt + 1) + random.uniform(0, 1.0)
+                _throttle_until = max(_throttle_until, time.time() + back)
+                await asyncio.sleep(back)
                 continue
             r.raise_for_status()
             res = (r.json().get("chart", {}).get("result") or [None])[0]
@@ -842,7 +896,18 @@ NSE_EQUITY_LIST_URLS = [u for u in (
     "https://archives.nseindia.com/content/equities/EQUITY_L.csv",
 ) if u]
 _UNIVERSE_CACHE_KEY  = "ai_engine:scan_universe"
-_universe_cache: dict = {"date": None, "universe": None}
+_universe_cache: dict = {"date": None, "universe": None, "expires": 0.0}
+# How long a DEGRADED universe (a fallback source, because the preferred one was
+# unreachable) may be reused before the preferred source is retried.
+#
+# Why this exists — 2026-08-05: a transient DNS failure at 03:08 startup
+# ("No address associated with hostname") made both NSE archive hosts
+# unresolvable for a few seconds. The directory fallback returned 306 symbols and
+# was cached with the full 24h TTL, so the scanner swept 306 of the ~2,079 NSE
+# stocks for the entire trading day — DNS had recovered minutes later, but
+# nothing ever re-asked. The bundled fallback was already protected from caching
+# for exactly this reason; the directory fallback was not.
+DEGRADED_UNIVERSE_TTL = int(os.getenv("SCAN_DEGRADED_UNIVERSE_TTL", "600"))
 
 
 async def _fetch_nse_equity_universe() -> dict[str, str]:
@@ -891,22 +956,29 @@ async def _fetch_directory_universe() -> dict[str, str]:
 
 async def _load_universe() -> dict[str, str]:
     today = _ist_now().strftime("%Y-%m-%d")
-    if _universe_cache["universe"] and _universe_cache["date"] == today:
+    if (_universe_cache["universe"] and _universe_cache["date"] == today
+            and time.time() < _universe_cache.get("expires", 0.0)):
         return _universe_cache["universe"]
 
     # Redis day-cache (avoids re-hitting NSE every sweep; survives restarts).
+    # A degraded entry carries a short TTL, so its own expiry is what forces the
+    # retry — inherit the remaining TTL rather than assuming a full day.
     try:
         rc = await _get_redis()
-        raw = await rc.get(f"{_UNIVERSE_CACHE_KEY}:{today}")
+        key = f"{_UNIVERSE_CACHE_KEY}:{today}"
+        raw = await rc.get(key)
         if raw:
             uni = json.loads(raw)
             if uni:
-                _universe_cache.update({"date": today, "universe": uni})
+                ttl = await rc.ttl(key)
+                _universe_cache.update({"date": today, "universe": uni,
+                                        "expires": time.time() + (ttl if ttl and ttl > 0 else 60)})
                 return uni
     except Exception:
         pass
 
     uni: dict[str, str] = {}
+    degraded = False
     if UNIVERSE_SOURCE == "nse":
         try:
             uni = await _fetch_nse_equity_universe()
@@ -916,7 +988,11 @@ async def _load_universe() -> dict[str, str]:
     if not uni and UNIVERSE_SOURCE in ("nse", "directory"):
         try:
             uni = await _fetch_directory_universe()
-            logger.info("scan universe: backend directory → %d symbols", len(uni))
+            # Only a *fallback* when nse was the preferred source; if the operator
+            # asked for the directory outright, this is the intended universe.
+            degraded = UNIVERSE_SOURCE == "nse"
+            logger.info("scan universe: backend directory → %d symbols%s", len(uni),
+                        " (degraded — will retry NSE shortly)" if degraded else "")
         except Exception as exc:
             logger.warning("directory universe fetch failed (%s); using bundled list", exc)
     if not uni:
@@ -925,12 +1001,15 @@ async def _load_universe() -> dict[str, str]:
         logger.info("scan universe: bundled fallback → %d symbols (not cached)", len(UNIVERSE))
         return dict(UNIVERSE)
 
+    # A degraded universe is cached only briefly. Pinning it for the day means one
+    # momentary blip costs a whole session of coverage (see DEGRADED_UNIVERSE_TTL).
+    ttl = DEGRADED_UNIVERSE_TTL if degraded else 86400
     try:
         rc = await _get_redis()
-        await rc.set(f"{_UNIVERSE_CACHE_KEY}:{today}", json.dumps(uni), ex=86400)
+        await rc.set(f"{_UNIVERSE_CACHE_KEY}:{today}", json.dumps(uni), ex=ttl)
     except Exception:
         pass
-    _universe_cache.update({"date": today, "universe": uni})
+    _universe_cache.update({"date": today, "universe": uni, "expires": time.time() + ttl})
     return uni
 
 
@@ -1023,8 +1102,8 @@ async def scan_once(phase: str = "intraday") -> dict:
             return {}
         _state.update({"running": True, "run_started": time.time(), "scanning": True})
 
-    # Preserve the last *completed* ranked board as the diff baseline before the
-    # progressive checkpoints below start overwriting the live board.
+    # Preserve the last *completed* ranked board as the diff baseline before this
+    # sweep replaces it at the end.
     try:
         rc0 = await _get_redis()
         prev_board = await rc0.get(_RANKED_KEY)
@@ -1042,64 +1121,119 @@ async def scan_once(phase: str = "intraday") -> dict:
     _state["universe"] = total
     candidates: list[dict] = []
     delivery_candidates: list[dict] = []
+    movers: list[dict] = []          # every analysed symbol, for the gainers board
     scanned = 0
     _grade_rank = {"A": 0, "B": 1, "C": 2, "D": 3}
-
-    def _progress_payload(scanning: bool) -> dict:
-        """Rank what we have so far so the UI updates live during a long sweep."""
-        wl = _top_watchlist(candidates, _grade_rank, wl_max)
-        dl = sorted(delivery_candidates, key=lambda r: (_grade_rank.get(r.get("grade", "D"), 3),
-                    -r.get("delivery_score", 0.0)))[:DELIVERY_TOP_N]
-        for d in dl:
-            d["reasoning"] = d.get("delivery_reasoning") or d.get("reasoning")
-        gc = {g: sum(1 for w in wl if w.get("grade") == g) for g in ("A", "B", "C", "D")}
-        return {
-            "updated_at": _ist_now().isoformat(), "phase": phase, "scanned": scanned,
-            "universe": total, "candidates": len(candidates), "market_regime": _state["market_regime"],
-            "calibration": {"accuracy": calib.get("accuracy"), "samples": calib.get("samples", 0)},
-            "grade_counts": gc, "high_conviction": gc["A"] + gc["B"],
-            "scanning": scanning, "items": wl, "delivery": dl,
-        }
 
     async with httpx.AsyncClient(follow_redirects=True) as client:
         regime, regime_detail = await _market_regime(client)
         _state["market_regime"] = {1: "bullish", -1: "bearish", 0: "neutral"}[regime]
         if regime_detail:
             _state["regime_detail"] = regime_detail
-        for sym, name in universe.items():
-            candles = await _fetch_daily(client, sym)
-            scanned += 1
-            res = _analyze(candles, regime=regime, calib=calib, fcal=fcal)
-            if res:
-                base = {"symbol": sym, "name": name, "source": "scanner", **res}
-                if res["intraday_fit"]:
-                    candidates.append(base)
-                if res.get("delivery_fit"):
-                    # independent copy — the intraday list gets mutated by the
-                    # news-boost loop below; delivery should not be affected.
-                    delivery_candidates.append(dict(base))
-            _state["scanned"] = scanned
-            # Progressive checkpoint: write the partial watchlist so the dashboard
-            # shows the scan climbing through the universe and surfaces picks while
-            # the background sweep is still running.
-            if scanned % SCAN_CHECKPOINT_EVERY == 0:
+        # Symbols are independent, so fan them out across a fixed pool of
+        # workers. Every worker keeps the original per-symbol delay, so the
+        # rate any single one puts on Yahoo is unchanged — only the number of
+        # them in flight goes up.
+        queue: asyncio.Queue = asyncio.Queue()
+        for item in universe.items():
+            queue.put_nowait(item)
+        def _log_progress() -> None:
+            """Report sweep progress. Deliberately does NOT publish the board.
+
+            This used to write a partial watchlist and ranked board to the live
+            Redis keys every SCAN_CHECKPOINT_EVERY symbols so the dashboard
+            filled in during a sweep. On the ~2,079-symbol universe that is ~17
+            republishes per sweep, each one ranking whatever subset had happened
+            to finish — and because workers complete out of order, that subset is
+            arbitrary. Suggestions visibly churned mid-scan and, worse, a partial
+            board is ranked before the news-catalyst boost and the committed-tier
+            tagging have run at all, so those intermediate boards were not merely
+            incomplete but scored by different rules than the final one.
+
+            The last COMPLETED board now stays published untouched until the new
+            one atomically replaces it at the end of the sweep. A sweep that dies
+            partway publishes nothing, which is the point: stale-but-coherent
+            beats fresh-but-arbitrary when these are trade suggestions.
+
+            Live progress (scanning / scanned / universe) is unaffected — the UI
+            reads that from /status, which is driven by _state, not these keys.
+            """
+            logger.info("scan(%s) progress: %d/%d scanned, %d intraday-fit, %d delivery-fit",
+                        phase, scanned, total, len(candidates), len(delivery_candidates))
+
+        async def _worker() -> None:
+            nonlocal scanned
+            while True:
                 try:
-                    rc = await _get_redis()
-                    await rc.set(_WATCHLIST_KEY, json.dumps(_progress_payload(True)), ex=86400)
-                    # Partial ranked board so the Predictions page fills during the sweep.
-                    rk = sorted(candidates, key=lambda r: (r["action"] != "BUY",
-                                _grade_rank.get(r.get("grade", "D"), 3),
-                                -r.get("rank_score", r.get("signal_score", 0.0))))[:RANKED_MAX]
-                    await rc.set(_RANKED_KEY, json.dumps({
-                        "updated_at": _ist_now().isoformat(), "scanned": scanned, "universe": total,
-                        "candidates": len(candidates), "market_regime": _state["market_regime"],
-                        "items": [{"rank": i + 1, **c} for i, c in enumerate(rk)],
-                    }), ex=86400)
-                except Exception:
-                    pass
-                logger.info("scan(%s) progress: %d/%d scanned, %d intraday-fit, %d delivery-fit",
-                            phase, scanned, total, len(candidates), len(delivery_candidates))
-            await asyncio.sleep(FETCH_DELAY + random.uniform(0.0, FETCH_DELAY))
+                    sym, name = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+                try:
+                    # Honour a throttle any worker tripped before spending a request.
+                    wait = _throttle_until - time.time()
+                    if wait > 0:
+                        await asyncio.sleep(wait)
+
+                    candles = await _fetch_daily(client, sym)
+                    res = _analyze(candles, regime=regime, calib=calib, fcal=fcal)
+                    if res:
+                        base = {"symbol": sym, "name": name, "source": "scanner", **res}
+                        if res["intraday_fit"]:
+                            candidates.append(base)
+                        if res.get("delivery_fit"):
+                            # independent copy — the intraday list gets mutated by
+                            # the news-boost loop below; delivery should not be.
+                            delivery_candidates.append(dict(base))
+                        # Recorded for every symbol, fit or not — the gainers board
+                        # must see names the setup gates reject.
+                        m = res.get("metrics") or {}
+                        if (m.get("avg_volume") or 0) >= MIN_AVG_VOLUME and res.get("price", 0) >= MIN_PRICE:
+                            movers.append({
+                                "symbol": sym, "name": name, "price": res.get("price"),
+                                "change_pct": m.get("change_pct"), "intraday_pct": m.get("intraday_pct"),
+                                "gap_pct": m.get("gap_pct"), "rel_volume": m.get("rel_volume"),
+                                "rsi": m.get("rsi"), "atr_pct": m.get("atr_pct"),
+                                # Carried so a mover can be read against what the
+                                # setup scoring thought — they routinely disagree.
+                                "grade": res.get("grade"), "action": res.get("action"),
+                                "signal_score": res.get("signal_score"),
+                                "intraday_fit": res.get("intraday_fit"),
+                            })
+
+                    scanned += 1
+                    _state["scanned"] = scanned
+                    if scanned % SCAN_CHECKPOINT_EVERY == 0:
+                        _log_progress()
+
+                    await asyncio.sleep(FETCH_DELAY + random.uniform(0.0, FETCH_DELAY))
+                except Exception as exc:
+                    # One bad symbol must not take the sweep down with it.
+                    scanned += 1
+                    _state["scanned"] = scanned
+                    logger.debug("scan worker: %s failed: %s", sym, exc)
+                finally:
+                    queue.task_done()
+
+        t0 = time.time()
+        await asyncio.gather(*(_worker() for _ in range(SCAN_CONCURRENCY)))
+        logger.info("scan(%s) swept %d symbols in %.1f min at concurrency %d",
+                    phase, scanned, (time.time() - t0) / 60.0, SCAN_CONCURRENCY)
+
+    # Day movers across the whole universe, biggest first.
+    try:
+        movers.sort(key=lambda x: (-(x.get("change_pct") or 0.0), x.get("symbol") or ""))
+        rc = await _get_redis()
+        await rc.set(_MOVERS_KEY, json.dumps({
+            "updated_at": _ist_now().isoformat(), "scanned": scanned, "universe": total,
+            "items": movers[:RANKED_MAX],
+        }), ex=86400)
+        if movers:
+            top = movers[0]
+            logger.info("scan(%s) top mover: %s %+.2f%% (grade %s, intraday_fit=%s)",
+                        phase, top["symbol"], top.get("change_pct") or 0.0,
+                        top.get("grade"), top.get("intraday_fit"))
+    except Exception as exc:
+        logger.debug("movers board write failed: %s", exc)
 
     # ── News-catalyst boost ───────────────────────────────────────────────────
     # Pull the LLM news signal (written by the sentiment-service) for each
@@ -1131,8 +1265,7 @@ async def scan_once(phase: str = "intraday") -> dict:
             c["grade"] = _grade_from_winprob(c["win_probability"], c.get("action", "HOLD"), c.get("intraday_fit", False))
 
     # Rank: BUY calls first, then by grade (A→D), then by composite rank score.
-    _grade_rank = {"A": 0, "B": 1, "C": 2, "D": 3}
-    candidates.sort(key=lambda r: (r["action"] != "BUY", _grade_rank.get(r.get("grade", "D"), 3), -r["rank_score"]))
+    candidates.sort(key=_rank_key)
     # High-conviction tier: tag every candidate the system would *commit* to, given
     # the current adaptive bar. These are the only picks measured against the 90%
     # target — everything else is "watch, don't trade".
@@ -1846,6 +1979,32 @@ async def evaluate_agrades(date_str: str | None = None, learn: bool = True) -> d
     return {"status": "ok", **{k: v for k, v in evaluation.items() if k != "results"}}
 
 
+async def ranked_by_change(limit: int = 25, min_change: float = 0.0) -> list[dict]:
+    """Today's movers out of the last sweep, biggest running day change first.
+
+    The sweep already fetches every symbol's daily series, and mid-session its
+    last bar is the forming one — so change_pct is live to the last scan rather
+    than a separate data source. Liquidity floors are the scanner's own, so this
+    cannot surface names that are only "gaining" because nothing trades in them.
+    """
+    try:
+        r = await _get_redis()
+        raw = await r.get(_MOVERS_KEY)
+        if not raw:
+            return []
+        items = (json.loads(raw) or {}).get("items") or []
+    except Exception as exc:
+        logger.debug("gainers read failed: %s", exc)
+        return []
+
+    # Already sorted and liquidity-filtered when the sweep wrote it; a board
+    # written before this upgrade has no change_pct, so drop those rather than
+    # let a missing value read as 0% and rank above real decliners.
+    out = [it for it in items
+           if it.get("change_pct") is not None and it["change_pct"] >= min_change]
+    return out[:max(1, limit)]
+
+
 async def get_agrade_eval() -> dict:
     try:
         r = await _get_redis()
@@ -2060,13 +2219,23 @@ async def scanner_loop() -> None:
     gap (default 1h) after the previous one COMPLETED, rather than back to
     back. Manual scans and the pre-open scan reset the schedule too (they all
     stamp last_scan_end), so an auto sweep never piles onto a fresh manual one.
-    Checks once a minute; paused entirely when auto-scan is off."""
+    Checks once a minute; paused entirely when auto-scan is off.
+
+    Only sweeps inside the trading window. The loop used to run around the
+    clock, so most sweeps re-read yesterday's closes overnight and at weekends —
+    pointless work that, at a short interval, is also the fastest way to get the
+    IP throttled by the data provider the intraday fallback depends on."""
     await asyncio.sleep(5)
     while True:
         try:
             interval = await get_auto_scan_interval()
             _state["auto_scan_interval"] = interval
-            if await get_auto_scan():
+            now = _ist_now()
+            minutes = now.hour * 60 + now.minute
+            in_window = (now.weekday() < 5
+                         and PREMARKET_MIN <= minutes <= POSTMARKET_MIN)
+            _state["auto_scan_window"] = in_window
+            if await get_auto_scan() and in_window:
                 due = (_state.get("last_scan_end") or 0.0) + interval
                 if time.time() >= due and not _state.get("running"):
                     logger.info("auto-scan due (gap %ds) — starting sweep", interval)
@@ -2247,16 +2416,34 @@ async def _agrade_candidates() -> list[dict]:
         if not raw:
             return []
         wl = json.loads(raw)
-        if wl.get("scanning") or not _payload_fresh(wl):
+        if not _payload_fresh(wl):
             return []
+        # A mid-flight sweep used to return nothing at all. That was tolerable at
+        # an hourly cadence; at a 5-minute gap with a ~2.6-minute sweep it blanks
+        # the watcher roughly half the time — and the blanked cycles are exactly
+        # when a fresh board is landing. The partial board is still real scored
+        # data, and the re-score gate revalidates before any promotion, so use
+        # what is there rather than skipping the cycle.
         raw_rk = await r.get(_RANKED_KEY)
         items = (json.loads(raw_rk).get("items") or []) if raw_rk else []
         if not items:
             items = wl.get("items") or []
         cands = [it for it in items
                  if it.get("symbol") and it.get("grade") == "A" and it.get("action") == "BUY"]
-        cands.sort(key=lambda it: float(it.get("win_probability") or 0), reverse=True)
-        return cands[:AGRADE_WATCH_MAX_SYMBOLS]
+        # Ranking purely by win_probability meant the day's actual movers rarely
+        # made the cap: on 2026-08-04 MOREPENLAB was A-grade, ranked #2, and up
+        # 20% by midday, yet never entered the watch set. Take the strongest
+        # movers first, then fill the rest by win_probability — a name already
+        # running is the one where a promotion still has somewhere to go.
+        half = max(1, AGRADE_WATCH_MAX_SYMBOLS // 2)
+        by_move = sorted(cands, key=lambda it: -float(
+            (it.get("metrics") or {}).get("change_pct") or 0.0))
+        picked = {it["symbol"]: it for it in by_move[:half]}
+        for it in sorted(cands, key=lambda i: float(i.get("win_probability") or 0), reverse=True):
+            if len(picked) >= AGRADE_WATCH_MAX_SYMBOLS:
+                break
+            picked.setdefault(it["symbol"], it)
+        return list(picked.values())
     except Exception as exc:
         logger.debug("agrade candidates read failed: %s", exc)
         return []

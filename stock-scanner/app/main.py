@@ -16,7 +16,7 @@ from .scanner import (
     get_state, get_latest_eval, warm_state, get_auto_scan, set_auto_scan,
     get_auto_scan_interval, set_auto_scan_interval, next_scan_at,
     agrade_watch_loop, agrade_status, agrade_force_promote,
-    evaluate_agrades, get_agrade_eval,
+    evaluate_agrades, get_agrade_eval, ranked_by_change,
 )
 from .universe import UNIVERSE
 
@@ -95,6 +95,19 @@ async def regime_detail():
     st = get_state()
     detail = st.get("regime_detail") or {"regime": st.get("market_regime", "neutral")}
     return {"status": "success", "data": detail}
+
+
+@app.get("/gainers")
+async def gainers(limit: int = 25, min_change: float = 0.0):
+    """Today's movers from the last sweep, ranked by the running day change.
+
+    Deliberately separate from the ranked board: that one scores *setups* and
+    docks a name for being overbought or near its 20-day high, which is most of
+    what a genuine gainer looks like. Ranking on the same list would fight
+    itself, so this reads the same scan output through a different lens.
+    """
+    rows = await ranked_by_change(limit=limit, min_change=min_change)
+    return {"status": "success", "count": len(rows), "data": rows}
 
 
 @app.post("/scan")
