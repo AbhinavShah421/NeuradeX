@@ -847,6 +847,21 @@ def _intraday_indicators(candles: list[dict], idx: int) -> dict:
 # disaster stop can fire. Part of the A/B-winning "wide_hold60" exit policy.
 _EXIT_GRACE_MIN = 10
 
+# The grace was added to stop 1-min noise wicking out the STOP — but it also
+# made the take-profit and the profit-lock trail unreachable for the first
+# _EXIT_GRACE_MIN minutes, so a position that spikes fast cannot be booked and
+# round-trips waiting for grace to expire. INDOBORAX 2026-08-11: entered 10:42,
+# closed +2.69% at 10:48 and +3.27% at 10:49 (both over the 2.5% target, both
+# inside grace), decayed to +2.10% by the time grace expired at 10:52 and exited
+# there — Rs683 given back on a Rs1,547 trade, more than that whole day's net
+# P&L. With this flag ON the UPSIDE exits (target + trail_lock) may fire during
+# grace; the stop and the rsi noise-cut stay suspended, so the noise protection
+# the grace was built for is untouched.
+# Mirrors the `grace_upside` knob in agents/counterfactual.py — the two must
+# stay in step or the CF labels stop describing what live actually does.
+# Set NEURADEX_GRACE_UPSIDE=1 to enable.
+_GRACE_UPSIDE = os.getenv("NEURADEX_GRACE_UPSIDE", "").lower() in ("1", "true", "yes")
+
 
 def _tech_signal(ind: dict, position: str, candle: dict, entry_price: float, aggressive: bool = False,
                  held_minutes: int | None = None) -> int:
@@ -923,11 +938,14 @@ def _tech_signal_ex(ind: dict, position: str, candle: dict, entry_price: float,
         take = max(2.5, 1.8 * atr_pct)         # let winners run, scaled to volatility
 
         # Entry grace: 1-min noise wicks out normal stops in the first minutes —
-        # during the grace window only a disaster stop (2×) can fire.
-        if held_minutes is not None and held_minutes < _EXIT_GRACE_MIN:
-            return (-1, "disaster_stop") if gain_pct <= 2 * stop else (0, "grace")
+        # during the grace window only a disaster stop (2×) can fire. With
+        # _GRACE_UPSIDE the target/trail below stay live in grace (see the flag).
+        in_grace = held_minutes is not None and held_minutes < _EXIT_GRACE_MIN
+        if in_grace:
+            if gain_pct <= 2 * stop:           return -1, "disaster_stop"
+            if not _GRACE_UPSIDE:              return 0, "grace"
 
-        if gain_pct <= stop:                   return -1, "stop"     # volatility-scaled stop loss
+        if gain_pct <= stop and not in_grace:  return -1, "stop"     # volatility-scaled stop loss
         if gain_pct >= take:                   return -1, "target"   # take profit (runs further than before)
         # Profit-lock: once up ≥0.8%, exit if price loses the 5-bar MA (trail) —
         # protects gains without bailing on every momentum wiggle.
@@ -947,7 +965,9 @@ def _tech_signal_ex(ind: dict, position: str, candle: dict, entry_price: float,
         # (sub-30-min exits: 15% win). Removing them alone was worth ~+7.6pts
         # on identical entries in the exit A/B.
         # Overbought, but only when momentum has already turned down.
-        if rsi > 75 and mom5 < 0:              return -1, "rsi_exit"
+        # Stays suspended in grace even under _GRACE_UPSIDE — it is a noise-cut,
+        # not a profit-booking rule (matches counterfactual's grace_upside).
+        if rsi > 75 and mom5 < 0 and not in_grace:  return -1, "rsi_exit"
 
     return 0, "no_trigger"
 

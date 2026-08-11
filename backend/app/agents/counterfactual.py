@@ -218,6 +218,19 @@ EXIT_VARIANTS: dict[str, dict] = {
     # the confidence ceiling, which was disabled on a CF result (conf>0.90:
     # 8/8 wins) that live trading contradicts (8/19, -Rs1347). Let the A/B rule.
     "hold_review30_run": {**LIVE_POLICY, "hold_cap": 30},
+    # Live policy, but the 10-min entry grace no longer blocks the UPSIDE exits
+    # (target + profit-lock trail); only the stop and the noise-cuts stay
+    # suspended. Isolates exactly one variable against wide_hold60_lock08_run.
+    # Motivated by INDOBORAX 2026-08-11 — see the grace_upside comment in
+    # _simulate_policy. Candidate — adopt only if the A/B proves it.
+    "grace_upside_run": {**LIVE_POLICY, "grace_upside": True},
+    # Same idea, only the profit-lock trail wakes up in grace (flat target still
+    # waits for grace to expire) — books a fading spike without capping a runner.
+    "grace_trail_run": {**LIVE_POLICY, "grace_upside": "trail"},
+    # Same idea, but hitting the target in grace arms a give-back trail instead
+    # of selling flat at 2.5%: keeps the spike-booking without truncating the
+    # +5-9% movers that the flat-target mode gives away.
+    "grace_hwm_run": {**LIVE_POLICY, "grace_upside": "hwm"},
 }
 
 
@@ -247,6 +260,7 @@ def _simulate_policy(bars: list[dict], inds: list[dict], entry_idx: int,
     grace_min = int(policy.get("grace_min", 0))
     trail     = policy.get("trail")
     hwm       = entry
+    armed     = False          # grace_upside="hwm": target hit in grace, riding the give-back trail
 
     exit_price: Optional[float] = None
     last_i = entry_idx
@@ -281,15 +295,45 @@ def _simulate_policy(bars: list[dict], inds: list[dict], entry_idx: int,
             exit_price = sell_fill(price)
             break
 
-        if held < grace_min:
+        in_grace = held < grace_min
+        if in_grace:
             # Grace period: only a disaster stop (2×) can fire — everything else
             # waits for the position to establish (1-min noise wicks out normal
             # stops in the first minutes).
             if gain <= 2 * stop:
                 exit_price = sell_fill(price)
                 break
-            continue
-        if gain <= stop or gain >= take:
+            # grace_upside (2026-08-11): the grace exists to stop 1-min noise
+            # wicking out the STOP — it should not also block BOOKING a fast
+            # spike. Without the knob the target/trail are unreachable for the
+            # first grace_min minutes. Motivating case: INDOBORAX 2026-08-11
+            # entered 10:42, closed +2.69% at 10:48 and +3.27% at 10:49 (both
+            # over the 2.5% target, both held < 10 min so both swallowed by
+            # grace), then decayed to +2.10% by the time grace expired at 10:52
+            # and exited there — Rs683 of a Rs1,547 trade, more than the whole
+            # day's net P&L. With the knob, target + trail may fire in grace;
+            # the stop and the fast_cut/rsi noise-cuts stay suspended.
+            #
+            # Modes (the flat-target mode costs as much as it earns — it caps the
+            # monsters, see the 2026-08-11 A/B in the memory note):
+            #   True/"both" — target + trail both live in grace
+            #   "trail"     — only the profit-lock trail; flat target still waits
+            #   "hwm"       — hitting the target in grace ARMS a give-back trail
+            #                 instead of selling flat, so a spike is booked near
+            #                 its high but a runner is never truncated at 2.5%
+            if not policy.get("grace_upside"):
+                continue
+        gu = policy.get("grace_upside")
+        # In "hwm" mode the target never sells flat while in grace; it arms a
+        # trail off the high-water mark and the give-back closes the position.
+        if in_grace and gu == "hwm":
+            if gain >= take:
+                armed = True
+            if armed and price < hwm * (1 - atr_pct / 100):
+                exit_price = sell_fill(price)
+                break
+        take_hit = gain >= take and not (in_grace and gu in ("trail", "hwm"))
+        if (gain <= stop and not in_grace) or take_hit:
             exit_price = sell_fill(price)
             break
         if trail == "sma5":
@@ -304,11 +348,12 @@ def _simulate_policy(bars: list[dict], inds: list[dict], entry_idx: int,
             if gain >= policy["lock_gain"] and price < hwm * (1 - atr_pct / 100):
                 exit_price = sell_fill(price)
                 break
-        if policy.get("fast_cut") and gain < 0.5:
+        if policy.get("fast_cut") and gain < 0.5 and not in_grace:
             if (sma5 < sma20 and mom5 < -0.15) or mom5 < -0.30:
                 exit_price = sell_fill(price)
                 break
-        if policy.get("rsi_exit") and ind.get("rsi", 50.0) > 75 and mom5 < 0:
+        if (policy.get("rsi_exit") and not in_grace
+                and ind.get("rsi", 50.0) > 75 and mom5 < 0):
             exit_price = sell_fill(price)
             break
     if exit_price is None:                      # ran off the end of the day's bars
