@@ -132,35 +132,6 @@ async def _store_trade_record(pool: asyncpg.Pool, payload: dict) -> None:
     )
 
 
-async def _store_rl_experience(pool: asyncpg.Pool, payload: dict) -> None:
-    """Store experience tuple for RL agent replay buffer."""
-    state = payload.get("state", {})
-    next_state = payload.get("next_state", {})
-    if not state:
-        return
-    action_map = {"BUY": 1, "SELL": 2, "HOLD": 0}
-    action = action_map.get(payload.get("action", "HOLD"), 0)
-    pnl = float(payload.get("pnl_pct", 0)) if payload.get("pnl_pct") is not None else 0.0
-    # Match the Sharpe-blended reward from TradingEnv.step()
-    # Without rolling history we fall back to a penalised PnL
-    reward = 0.6 * pnl + 0.4 * pnl - 0.001   # simplified: still equal weights, minus cost
-
-    await pool.execute(
-        "INSERT INTO rl_experiences (symbol, state, action, reward, next_state, done) VALUES ($1,$2,$3,$4,$5,$6)",
-        payload.get("symbol", ""),
-        json.dumps(state),
-        action,
-        reward,
-        json.dumps(next_state),
-        payload.get("outcome") not in (None, "OPEN"),
-    )
-
-    # Prune replay buffer to last 10k experiences
-    await pool.execute(
-        "DELETE FROM rl_experiences WHERE id NOT IN (SELECT id FROM rl_experiences ORDER BY created_at DESC LIMIT 10000)"
-    )
-
-
 async def _maybe_trigger_retrain(pool: asyncpg.Pool, publisher_channel: aio_pika.Channel) -> None:
     global _trade_count_since_retrain
     _trade_count_since_retrain += 1
@@ -207,9 +178,6 @@ async def _consumer_loop() -> None:
 
                                 # Store trade record
                                 await _store_trade_record(_pool, payload)
-
-                                # Store RL experience
-                                await _store_rl_experience(_pool, payload)
 
                                 # Update ensemble weights if trade is closed
                                 if pnl_pct is not None and action in ("BUY", "SELL"):

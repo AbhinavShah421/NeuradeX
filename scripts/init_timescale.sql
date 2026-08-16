@@ -112,16 +112,7 @@ CREATE TABLE IF NOT EXISTS session_decisions (
 CREATE INDEX IF NOT EXISTS idx_session_decisions_session
     ON session_decisions (session_id, candle_time);
 
--- RL agent experience replay buffer (recent 10k tuples)
-CREATE TABLE IF NOT EXISTS rl_experiences (
-    id          BIGSERIAL PRIMARY KEY,
-    symbol      TEXT            NOT NULL,
-    state       JSONB           NOT NULL,
-    action      INTEGER         NOT NULL,   -- 0=HOLD, 1=BUY, 2=SELL
-    reward      DOUBLE PRECISION NOT NULL,
-    next_state  JSONB           NOT NULL,
-    done        BOOLEAN         NOT NULL DEFAULT FALSE,
-    created_at  TIMESTAMPTZ     NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_rl_exp_created ON rl_experiences (created_at DESC);
+-- rl_experiences (RL replay buffer) was dropped 2026-08-16: no producer ever
+-- sent the `state` field it required (trade-executor's TradeOutcome DTO never
+-- carried one) and no consumer read it — model-trainer trains PPO from OHLCV
+-- directly. Zero rows were ever written.

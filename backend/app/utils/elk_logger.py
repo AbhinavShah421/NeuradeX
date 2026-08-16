@@ -33,6 +33,9 @@ _INDEX_PREFIX = "neuradex-logs"
 _FLUSH_INTERVAL = 2.0      # seconds between forced flushes
 _BATCH_SIZE = 50           # flush when batch reaches this size
 _QUEUE_MAX = 5000          # drop logs if queue exceeds this (avoids memory blow-up)
+# Both the API backend and session-runner run this image; SERVICE_NAME (set in
+# docker-compose) keeps them distinguishable in Kibana.
+_SERVICE_NAME = os.getenv("SERVICE_NAME", "neuradeX-backend")
 
 
 def _es_url() -> str:
@@ -49,6 +52,8 @@ class _ElasticsearchHandler(logging.Handler):
         super().__init__()
         self._queue: queue.Queue = queue.Queue(maxsize=_QUEUE_MAX)
         self._stop = threading.Event()
+        self._revive_lock = threading.Lock()
+        self._closed_for_good = False
         self._thread = threading.Thread(target=self._worker, name="es-log-worker", daemon=True)
         self._thread.start()
 
@@ -60,8 +65,26 @@ class _ElasticsearchHandler(logging.Handler):
             self._queue.put_nowait(doc)
         except queue.Full:
             pass  # silently drop — never block the caller
+        # Self-heal: a logging reconfig (dictConfig etc.) may close() this
+        # handler while it stays attached — the worker exits cleanly and every
+        # later record is dropped on a full queue with no trace. If records
+        # still arrive, we are evidently not shutting down: revive the worker.
+        if not self._thread.is_alive() and not self._closed_for_good:
+            with self._revive_lock:
+                if not self._thread.is_alive():
+                    self._stop.clear()
+                    self._thread = threading.Thread(
+                        target=self._worker, name="es-log-worker", daemon=True)
+                    self._thread.start()
+                    import sys
+                    print(f"elk_logger[{_SERVICE_NAME}]: es-log-worker was dead — revived",
+                          file=sys.stderr)
 
     def close(self) -> None:
+        # Interpreter shutdown must win over the revive logic; a mid-run
+        # close() from a logging reconfig must not.
+        import sys
+        self._closed_for_good = sys.is_finalizing()
         self._stop.set()
         self._thread.join(timeout=5)
         super().close()
@@ -74,7 +97,7 @@ class _ElasticsearchHandler(logging.Handler):
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
-            "service": "neuradeX-backend",
+            "service": _SERVICE_NAME,
             "request_id": request_id_var.get(""),
         }
 
@@ -118,7 +141,13 @@ class _ElasticsearchHandler(logging.Handler):
         if batch:
             self._flush(batch)
 
+    _last_err_report = 0.0
+    _ERR_REPORT_EVERY = 300.0  # rate-limit failure reports to stderr
+
     def _flush(self, batch: list[dict]) -> None:
+        # Failures must be *visible*: a silent `except: pass` here cost weeks
+        # of missing logs (see shared/python/elk_logger.py). stdout still has
+        # every record, so report the shipping failure to stderr and move on.
         try:
             index = f"{_INDEX_PREFIX}-{datetime.now().strftime('%Y.%m.%d')}"
             body_lines = []
@@ -127,14 +156,32 @@ class _ElasticsearchHandler(logging.Handler):
                 body_lines.append(json.dumps(doc, default=str))
             body = "\n".join(body_lines) + "\n"
 
-            _requests.post(
+            resp = _requests.post(
                 f"{_es_url()}/_bulk",
                 data=body,
                 headers={"Content-Type": "application/x-ndjson"},
                 timeout=5,
             )
-        except Exception:
-            pass  # Elasticsearch down — logs already printed to stdout, just skip ES
+            err = None
+            if resp.status_code >= 300:
+                err = f"HTTP {resp.status_code}: {resp.text[:200]}"
+            else:
+                payload = resp.json()
+                if payload.get("errors"):
+                    first = next((it["index"].get("error") for it in payload.get("items", [])
+                                  if it.get("index", {}).get("error")), None)
+                    err = f"bulk item errors, first: {first}"
+            if err:
+                self._report_err(err)
+        except Exception as exc:
+            self._report_err(f"{type(exc).__name__}: {exc}")
+
+    def _report_err(self, msg: str) -> None:
+        import sys
+        now = time.monotonic()
+        if now - self._last_err_report >= self._ERR_REPORT_EVERY:
+            _ElasticsearchHandler._last_err_report = now
+            print(f"elk_logger[{_SERVICE_NAME}]: ES shipping failed — {msg}", file=sys.stderr)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────

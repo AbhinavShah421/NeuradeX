@@ -178,6 +178,29 @@ services:
           memory: 768M
           cpus: '0.3'
 
+  # phpMyAdmin-style DB browser for Postgres/TimescaleDB (also speaks MongoDB
+  # via server type dropdown). http://localhost:8080 — server: postgres,
+  # user: stock_user, password: stock_password, db: stock_prediction_db.
+  adminer:
+    image: adminer:latest
+    container_name: stock-prediction-adminer
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+      ADMINER_DESIGN: dracula
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - stock-prediction-network
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.2'
+
   mlflow:
     image: ghcr.io/mlflow/mlflow:v2.10.0
     container_name: stock-prediction-mlflow
@@ -301,6 +324,9 @@ services:
       LLM_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
       NEWS_MIN_CONFIDENCE: "0.55"
       NEWS_MIN_SCORE: "0.3"
+      # Separate service name in Kibana — until 2026-08-16 session-runner and
+      # the API backend both shipped as "neuradeX-backend", indistinguishable.
+      SERVICE_NAME: session-runner
       BACKEND_ROLE: "runner"    # session runner + ML sweeps only, no HTTP load
       CANDLE_STORE_DIR: /data/candles
       # Set to 0 only while running a validation batch (re-running a fixed
@@ -624,6 +650,10 @@ services:
       SCAN_MIN_ATR_PCT: "1.2"
       SCAN_TOP_N: "15"
       SCAN_PREMARKET_MIN: "540"
+      # Rolling auto-sweep opens at 08:00 so a machine started before the open
+      # has a live board immediately instead of a blank one until 09:00. The
+      # pre-open snapshot above stays at 09:00 — grading scores that snapshot.
+      SCAN_AUTOSCAN_FROM_MIN: "480"
       SCAN_MARKET_OPEN_MIN: "555"
       SCAN_MARKET_CLOSE_MIN: "930"
       SCAN_POSTMARKET_MIN: "940"
