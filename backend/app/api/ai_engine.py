@@ -203,6 +203,18 @@ async def loss_learning_lessons():
     return await service.loss_learning_lessons()
 
 
+@router.get("/llm-review/scorecard")
+async def llm_review_scorecard(days: int = 90):
+    """Whether the shadow LLM entry reviewer has earned a vote.
+
+    Scores three things separately: whether its verdicts separate losing trades
+    from winning ones, whether its confidence tracks realised P&L, and whether
+    the retrieved precedents track realised P&L on their own.
+    """
+    from app.services.llm_entry_review import review_scorecard
+    return {"status": "success", "data": await review_scorecard(days)}
+
+
 # ── Scanner post-market signal score (learning feedback) ──────────────────────
 
 @router.post("/scan-feedback")

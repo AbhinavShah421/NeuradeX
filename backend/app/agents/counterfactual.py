@@ -231,6 +231,41 @@ EXIT_VARIANTS: dict[str, dict] = {
     # of selling flat at 2.5%: keeps the spike-booking without truncating the
     # +5-9% movers that the flat-target mode gives away.
     "grace_hwm_run": {**LIVE_POLICY, "grace_upside": "hwm"},
+    # ── Reachable-target / earlier-lock family (added 2026-08-12) ────────────
+    # Forensic motivation: the "target" branch has fired ZERO times in the whole
+    # recorded history — every trade_records row carrying market_context.
+    # exit_reason, both sources, all days. take_floor 2.5 is simply above what
+    # the scanned universe moves intraday: on 2026-08-12 all 9 paper trades
+    # traded above entry, best MFE +1.37%, median ~+0.49%, and every one exited
+    # via a non-profit branch (5× hold_review_stagnant, 2× drop_pattern, 2×
+    # ensemble) after the move had decayed — avg give-back from peak 0.84 pts.
+    # Live PAPER exit mix over 45 days: hold_review_stagnant 23 (30.4% win,
+    # -0.264%), trail_lock 8 (+1.085%), drop_pattern 5 (-0.722%), stop 2
+    # (-1.855%), target 0.
+    #
+    # This is NOT the ground the earlier exit A/Bs covered: wide_stop, hold60,
+    # tight_stop_run and the grace_* family all vary stop width, runway or the
+    # grace window. None of them moved take_floor, so the target branch never
+    # executed in ANY of them and its threshold has never actually been under
+    # test. The two levers below are the untested ones.
+    #
+    # Lever 1 — a target the universe can reach. take = max(floor, mult×ATR%)
+    # with atr_pct bounded to [0.5, 2.5], so floor 2.5 pins the target at
+    # 2.5-4.5%; floor 1.2 puts it at 1.2-4.5% and only binds on the low-vol
+    # names that currently have no reachable target at all.
+    "take_reach12_run": {**LIVE_POLICY, "take_floor": 1.2},
+    # Same floor, but the ATR leg scaled down too (1.2-2.5% band): tests whether
+    # the target should track volatility DOWN as well as up, instead of the
+    # mult only ever pushing it further out of reach.
+    "take_reach12_atr10_run": {**LIVE_POLICY, "take_floor": 1.2, "take_atr_mult": 1.0},
+    # Lever 2 — arm the profit-lock earlier. trail_lock is the only branch that
+    # actually books a gain, but it arms at +0.8% and fired on just 8 of 91
+    # trades. (Its 100% win rate is selection bias — it can only arm on a trade
+    # already up 0.8% — so the ARMING RATE is the signal, not the rate.) On
+    # 2026-08-12 four trades peaked between +0.49% and +0.68% and never armed.
+    "lock05_run": {**LIVE_POLICY, "lock_gain": 0.5},
+    # Both levers, to separate "either helps" from "they only work together".
+    "reach12_lock05_run": {**LIVE_POLICY, "take_floor": 1.2, "lock_gain": 0.5},
 }
 
 

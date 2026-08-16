@@ -1158,7 +1158,10 @@ async def set_autopilot(req: AutopilotRequest):
     # Write the flag directly (robust), and notify the service so it reacts now.
     try:
         from app.utils.redis_client import cache_set
-        await cache_set(flag, "1" if req.enabled else "0", expire=86400 * 30)
+        # No expiry — the flag is only written when the toggle is touched, so a
+        # TTL here means "autopilot switches itself off if you don't visit the
+        # page for a month", which is exactly how a live session went dark.
+        await cache_set(flag, "1" if req.enabled else "0", expire=None)
     except Exception as exc:
         logger.warning("autopilot flag write failed: %s", exc)
     try:

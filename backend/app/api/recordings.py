@@ -22,6 +22,7 @@ IST time, so no background state machine is needed.
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -45,6 +46,15 @@ _CLOSE_MIN   = 15 * 60 + 30                   # 15:30 IST
 
 _WATCHLIST_KEY      = "ai_engine:watchlist"                 # written by stock-scanner
 _AUTO_AGRADE_PREFIX = "recordings:auto_agrade_created:"      # date -> "1", once-per-day dedupe
+
+# Daily A-grade auto-recording, off since 2026-08-07. It armed capture for the
+# morning's top-10 A-grades only, while sessions trade a much wider set — 149 of
+# 484 trades over the preceding 40 days (31%) landed on symbols nobody was
+# recording, so they carry no ticks, no counterfactual label and no post-mortem.
+# Rather than keep auto-arming a list that does not match what gets traded,
+# capture is now driven solely by recordings you create explicitly.
+# Set RECORDINGS_AUTO_AGRADE=1 to restore the old behaviour.
+_AUTO_AGRADE_ENABLED = os.getenv("RECORDINGS_AUTO_AGRADE", "0") != "0"
 
 
 # ── Time / target-day helpers ────────────────────────────────────────────────
@@ -249,8 +259,14 @@ async def sync_daily_agrade_recording() -> Optional[dict]:
     yesterday's watchlist is ignored rather than producing a wrong-day or
     empty recording. Safe to call frequently (e.g. from a 5-min maintenance
     loop); returns the created recording, or None if skipped/already done.
+
+    Disabled by default since 2026-08-07 — see `_AUTO_AGRADE_ENABLED`. Returns
+    None immediately unless RECORDINGS_AUTO_AGRADE is set.
     """
     from app.utils.redis_client import cache_get, get_redis
+
+    if not _AUTO_AGRADE_ENABLED:
+        return None
 
     now = _now_ist()
     if now.weekday() >= 5:
@@ -517,7 +533,8 @@ async def backtest_recording(rec_id: str, req: BacktestRecordingRequest,
 async def trigger_agrade_sync(user: dict = Depends(get_current_user)):
     """Manually run the daily A-grade auto-recording check right now, instead of
     waiting for the next 5-min maintenance tick. No-ops (returns created=false)
-    if today's already been handled or the latest scan has no A-grade picks yet."""
+    if the feature is disabled (the default — see `_AUTO_AGRADE_ENABLED`), if
+    today's already been handled, or if the latest scan has no A-grade picks yet."""
     rec = await sync_daily_agrade_recording()
     if rec:
         return {"status": "success", "data": {"created": True, "recording": _view(rec, _now_ist())}}

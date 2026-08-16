@@ -7,7 +7,12 @@ the new contract:
   • a textbook setup enters,
   • ONE marginal shortfall (RSI 56, or thin net consensus) still enters,
   • TWO shortfalls together do not,
-  • the risk stops (falling knife, RSI<45, trusted dissent) stay HARD blocks.
+  • the risk stops (trusted dissent, ensemble veto, warm-up) stay HARD blocks.
+
+Direction was INVERTED on 2026-08-10 against 256,805 CF-labelled decisions:
+the gate now blocks chasing strength (price above VWAP with SMA5 > SMA20) and
+admits the setup it used to call a falling knife. `WEAK_IND` is therefore the
+clean-tape fixture and `STRENGTH_IND` the blocked one.
 
 Everything external (ensemble, indicators, timing signal, throttle, gate mode)
 is monkeypatched so _step runs as a pure scenario machine.
@@ -43,8 +48,18 @@ def _session() -> dict:
     }
 
 
-UPTREND_IND = {"rsi": 63.0, "vwap": 100.0, "sma5": 100.4, "sma20": 100.1,
-               "mom5": 0.1, "atr": 0.2}
+# The favoured tape after the 2026-08-10 direction inversion: price BELOW VWAP,
+# SMA5 < SMA20, RSI < 45. Scores the same 25 trend + 25 RSI points that
+# STRENGTH_IND used to score under the old rules, so every test that just wants
+# "a clean tape" keeps its original arithmetic.
+WEAK_IND = {"rsi": 40.0, "vwap": 101.5, "sma5": 99.5, "sma20": 100.5,
+            "mom5": -0.1, "atr": 0.2}
+
+# What the gate used to require and now hard-blocks: price above VWAP with
+# SMA5 > SMA20. Measured worst cell (22.6% win vs 28.6% for everything else)
+# across 256,805 CF-labelled decisions, day-level paired t = +3.49.
+STRENGTH_IND = {"rsi": 63.0, "vwap": 100.0, "sma5": 100.4, "sma20": 100.1,
+                "mom5": 0.1, "atr": 0.2}
 
 BUY3 = [  # 3 BUY incl. a reliable voter (gbm), no SELL → consensus 30 + co-sign 10
     {"agent_name": "gbm", "action": "BUY", "confidence": 0.64},
@@ -93,19 +108,29 @@ def _run(monkeypatch, agents, ind, ens_action="HOLD", conf=0.60, veto="", bars=3
 
 def test_textbook_setup_enters(monkeypatch):
     # 30 + 10 + 25 + 25 + 5 = 95 ≥ 78
-    s = _run(monkeypatch, BUY3, UPTREND_IND)
+    s = _run(monkeypatch, BUY3, WEAK_IND)
     assert s["position"]["status"] == "LONG"
     assert s["last_decision"]["executed"] is True
     assert "Entry [score" in s["last_decision"]["reason"]
 
 
-def test_rsi_is_not_a_shortfall(monkeypatch):
-    # RSI was neutralised 2026-07-28: on 52,794 CF-labeled decisions it showed a
-    # 2.1-point hit-rate spread across its whole range with no ordering, so it
-    # costs nothing at any level. 30+10+25+25+5 = 95 ≥ 78 regardless of RSI.
+def test_rsi_is_never_a_block(monkeypatch):
+    # RSI was neutralised 2026-07-28, then partly restored 2026-08-10 as a
+    # 5-point tilt: <45 while below VWAP is worth +5 (measured +0.0394, t=2.22
+    # inside that stratum only). It is a tilt, never a veto — 95 with the tilt,
+    # 90 without, and both clear gentle's 78.
     for rsi in (40.0, 56.0, 63.0, 78.0):
-        s = _run(monkeypatch, BUY3, dict(UPTREND_IND, rsi=rsi))
+        s = _run(monkeypatch, BUY3, dict(WEAK_IND, rsi=rsi))
         assert s["position"]["status"] == "LONG", f"RSI {rsi} should not block"
+
+
+def test_rsi_tilt_only_applies_below_vwap(monkeypatch):
+    # Above VWAP the same RSI carries no measured edge (t = -0.33), so it must
+    # not be paid for there. Above-VWAP-only is a single shortfall: it keeps
+    # the 12 SMA points but loses both the 13 VWAP points and the 5 RSI tilt.
+    ind = dict(WEAK_IND, rsi=40.0, vwap=100.0)   # price above VWAP, SMA5<SMA20
+    s = _run(monkeypatch, BUY3, ind)
+    assert "no oversold-below-VWAP edge" in s["last_decision"]["reason"]
 
 
 def test_one_shortfall_thin_net_still_enters(monkeypatch):
@@ -113,35 +138,63 @@ def test_one_shortfall_thin_net_still_enters(monkeypatch):
     # net=1 in a 25%-win class): 15+10+25+25+5 = 80 ≥ 78. Alone on a perfect
     # tape it still enters; the old gate's "panel dissent" rule blocked it
     # outright.
-    s = _run(monkeypatch, THIN_NET, UPTREND_IND)
+    s = _run(monkeypatch, THIN_NET, WEAK_IND)
     assert s["position"]["status"] == "LONG"
 
 
 def test_two_shortfalls_block(monkeypatch):
-    # Quality debt still compounds — but RSI is no longer one of the debts it can
-    # be built from (see test_rsi_is_not_a_shortfall). Thin net AND a broken SMA
-    # leg: 15 + 10 + 13(vwap only) + 25 + 5 = 68 < 78.
-    ind = dict(UPTREND_IND, sma5=99.5, sma20=100.5)   # price still above VWAP
+    # Quality debt still compounds. Thin net (15) AND price above VWAP, which
+    # now costs the 13 trend points and the 5 RSI tilt with it:
+    # 15 + 10 + 12(sma leg only) + 20 + 5 = 62 < 78.
+    ind = dict(WEAK_IND, vwap=100.0)   # price above VWAP, SMA5 still < SMA20
     s = _run(monkeypatch, THIN_NET, ind)
     assert s["position"]["status"] == "NONE"
-    assert "entry score 68 < 78" in s["last_decision"]["reason"]
+    assert "entry score 62 < 78" in s["last_decision"]["reason"]
 
 
-# ── The risk stops stay hard ─────────────────────────────────────────────────
+# ── Direction filter: inverted 2026-08-10 ────────────────────────────────────
 
-def test_falling_knife_is_hard_block(monkeypatch):
-    # Both trend legs down blocks no matter how strong the panel is.
-    ind = dict(UPTREND_IND, vwap=101.5, sma5=99.5, sma20=100.5)
-    s = _run(monkeypatch, BUY3, ind)
+def test_chasing_strength_is_hard_block(monkeypatch):
+    # Price above VWAP with SMA5 > SMA20 — what the gate used to REQUIRE — is
+    # the measured worst cell (22.6% win vs 28.6% for the rest, paired
+    # t = +3.49 over 23 days). It now blocks no matter how strong the panel is.
+    s = _run(monkeypatch, BUY3, STRENGTH_IND)
     assert s["position"]["status"] == "NONE"
-    assert "falling knife" in s["last_decision"]["reason"]
+    assert "chasing strength" in s["last_decision"]["reason"]
+
+
+def test_falling_knife_now_enters(monkeypatch):
+    # The exact setup the old gate hard-blocked as a "falling knife" is the one
+    # that measured best (+0.1168 pts, t = +3.00, positive on 18/23 days).
+    s = _run(monkeypatch, BUY3, WEAK_IND)
+    assert s["position"]["status"] == "LONG"
+    assert "falling knife" not in s["last_decision"]["reason"]
+
+
+def test_one_trend_leg_each_way_still_enters(monkeypatch):
+    # Only one leg pointing the favoured way is a single shortfall, not a block:
+    # below VWAP but SMA5 > SMA20 → 30 + 10 + 13 + 25 + 5 = 83 ≥ 78.
+    ind = dict(WEAK_IND, sma5=100.5, sma20=99.5)
+    s = _run(monkeypatch, BUY3, ind)
+    assert s["position"]["status"] == "LONG"
+
+
+def test_legacy_trend_filter_restores_old_behaviour(monkeypatch):
+    # One env var must put the pre-inversion gate back, because this changes
+    # live entry direction and has to be reversible in a single step.
+    monkeypatch.setattr(svc, "_TREND_FILTER_LEGACY", True)
+    s = _run(monkeypatch, BUY3, STRENGTH_IND)
+    assert s["position"]["status"] == "LONG", "legacy mode should buy strength again"
+    s2 = _run(monkeypatch, BUY3, WEAK_IND)
+    assert s2["position"]["status"] == "NONE"
+    assert "falling knife" in s2["last_decision"]["reason"]
 
 
 def test_rsi_below_45_no_longer_blocks(monkeypatch):
     # Was a hard veto ("failing bounce", justified on 8 CF samples). At n=11,177
     # entry-eligible decisions the <45 band hit 32.1% — the second-best band of
     # five — so vetoing it was discarding an average-or-better population.
-    ind = dict(UPTREND_IND, rsi=40.0)
+    ind = dict(WEAK_IND, rsi=40.0)
     s = _run(monkeypatch, BUY3, ind)
     assert s["position"]["status"] == "LONG"
     assert "failing bounce" not in s["last_decision"]["reason"]
@@ -150,7 +203,7 @@ def test_rsi_below_45_no_longer_blocks(monkeypatch):
 def test_trusted_dissent_is_hard_block(monkeypatch):
     # A non-structural reliable agent SELLing at ≥0.75 blocks even a 95-scorer.
     agents = BUY3 + [{"agent_name": "rl", "action": "SELL", "confidence": 0.80}]
-    s = _run(monkeypatch, agents, UPTREND_IND)
+    s = _run(monkeypatch, agents, WEAK_IND)
     assert s["position"]["status"] == "NONE"
     assert "trusted-expert dissent" in s["last_decision"]["reason"]
 
@@ -166,7 +219,7 @@ def test_structural_sellers_dont_count_as_dissent(monkeypatch):
          "indicators": {}},
         {"agent_name": "meanrev", "action": "SELL", "confidence": 0.92},
     ]
-    s = _run(monkeypatch, agents, UPTREND_IND)
+    s = _run(monkeypatch, agents, WEAK_IND)
     assert s["position"]["status"] == "LONG"
 
 
@@ -175,13 +228,13 @@ def test_confident_day_structure_sell_still_vetoes(monkeypatch):
     # own dedicated veto (SELL ≥ 0.62: top of range, poor R/R) must still block.
     agents = BUY3 + [{"agent_name": "day_structure", "action": "SELL",
                       "confidence": 0.88, "indicators": {}}]
-    s = _run(monkeypatch, agents, UPTREND_IND)
+    s = _run(monkeypatch, agents, WEAK_IND)
     assert s["position"]["status"] == "NONE"
     assert "day-structure veto" in s["last_decision"]["reason"]
 
 
 def test_ensemble_veto_is_hard_block(monkeypatch):
-    s = _run(monkeypatch, BUY3, UPTREND_IND, veto="anomaly veto: test")
+    s = _run(monkeypatch, BUY3, WEAK_IND, veto="anomaly veto: test")
     assert s["position"]["status"] == "NONE"
     assert "ensemble veto honored" in s["last_decision"]["reason"]
 
@@ -190,7 +243,7 @@ def test_warmup_blocks_early_entries(monkeypatch):
     # Below _WARMUP_BARS the indicator helpers return neutral placeholders
     # (RSI exactly 50.0) — a textbook-looking setup on 15 bars must NOT enter
     # (2026-07-15: two first-15-min entries fired on default indicators).
-    s = _run(monkeypatch, BUY3, UPTREND_IND, bars=15)
+    s = _run(monkeypatch, BUY3, WEAK_IND, bars=15)
     assert s["position"]["status"] == "NONE"
     assert "indicator warm-up" in s["last_decision"]["reason"]
 
@@ -204,7 +257,7 @@ def test_memory_cold_start_vote_not_counted(monkeypatch):
          "indicators": {"n_BUY": 1}},
         {"agent_name": "technical", "action": "HOLD", "confidence": 0.50},
     ]
-    s = _run(monkeypatch, agents, UPTREND_IND)
+    s = _run(monkeypatch, agents, WEAK_IND)
     assert s["position"]["status"] == "NONE"
     assert "memory BUY not counted" in s["last_decision"]["reason"]
 
@@ -220,7 +273,7 @@ def test_day_structure_buy_not_counted_as_consensus(monkeypatch):
          "indicators": {}},
         {"agent_name": "technical", "action": "HOLD", "confidence": 0.50},
     ]
-    s = _run(monkeypatch, agents, UPTREND_IND)
+    s = _run(monkeypatch, agents, WEAK_IND)
     assert s["position"]["status"] == "NONE"
     assert "insufficient BUY consensus" in s["last_decision"]["reason"]
 
@@ -233,7 +286,7 @@ def test_memory_vote_with_real_precedent_counts(monkeypatch):
          "indicators": {"n_BUY": 12, "wr_BUY": 0.62}},
         {"agent_name": "technical", "action": "HOLD", "confidence": 0.50},
     ]
-    s = _run(monkeypatch, agents, UPTREND_IND)
+    s = _run(monkeypatch, agents, WEAK_IND)
     assert s["position"]["status"] == "LONG"
 
 
@@ -277,6 +330,6 @@ def test_anti_predictive_sells_no_longer_block_entry(monkeypatch):
         {"agent_name": "regime", "action": "SELL", "confidence": 0.60},
         {"agent_name": "momentum", "action": "SELL", "confidence": 0.60},
     ]
-    s = _run(monkeypatch, agents, UPTREND_IND)
+    s = _run(monkeypatch, agents, WEAK_IND)
     assert s["position"]["status"] == "LONG"
     assert "thin net consensus" not in s["last_decision"]["reason"]

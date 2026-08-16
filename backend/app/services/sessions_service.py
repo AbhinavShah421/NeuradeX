@@ -576,6 +576,11 @@ _LATE_ENTRY_CUTOFF_MIN = 13 * 60   # 13:00 IST — no new entries after this in
                                         # noon; 13:00-hour still wins 30.4%.
 _MARKET_CLOSE_MINUTES = 15 * 60 + 30   # 15:30 IST NSE close — after this, today's
                                        # session is finished and backtestable.
+# Escape hatch for the 2026-08-10 direction-filter inversion (see "Direction
+# filter (Lever 1)"). One env var restores the pre-inversion behaviour without
+# a code change, because this alters live entry direction and needs to be
+# reversible in one step if the live population diverges from the CF estimate.
+_TREND_FILTER_LEGACY = os.getenv("NEURADEX_TREND_FILTER", "").lower() == "legacy"
 
 
 def _timing_block_reason(ind: dict, candle: dict) -> str:
@@ -823,28 +828,62 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         throttle = await _symbol_throttle_reason(symbol)
         if throttle:
             blocked.append(throttle)
-        # ── Direction filter (Lever 1) ────────────────────────────────────────
-        # We are long-only. Post-trade analysis showed 78% of losers were longs
-        # opened counter-trend (price below VWAP / SMA5<SMA20) — falling knives.
-        # Only enter with the stock's own trend, and never long a bearish market.
+        # ── Direction filter (Lever 1) — INVERTED 2026-08-10 ──────────────────
+        # This filter used to require the stock's own uptrend (price >= VWAP,
+        # SMA5 >= SMA20) and hard-block the "falling knife" where both legs
+        # fail. Measured on 256,805 counterfactual-labelled decisions across 26
+        # trading days, day-level paired (the correct unit — intraday bars
+        # within a day are highly correlated, and pooling lets two huge days
+        # manufacture significance), every leg of it was backwards:
+        #
+        #     price > VWAP        gap -0.3284  t -3.00   positive on  4/21 days
+        #     SMA5 > SMA20        gap -0.0825  t -4.08   positive on  2/25 days
+        #     falling knife       gap +0.1168  t +3.00   positive on 18/23 days
+        #
+        # i.e. the gate paid 25 points for the conditions that lose and hard-
+        # blocked the one that wins. Comparing the population each variant would
+        # actually admit (>=2 BUY votes), the old rule was the worst of every
+        # option tested — 22.59% win / -0.1978% — while blocking both legs UP
+        # gives 28.63% / -0.1174% (paired gap +0.0790, t +3.49, 20/23 days).
+        # This corroborates two independent earlier findings: the 2026-07-30
+        # audit's inverted-trend-filter result (+0.110 pts/day, t=2.50) and the
+        # 2026-08-06 positional study's "buying strength loses".
+        #
+        # Set NEURADEX_TREND_FILTER=legacy to restore the old behaviour.
         price_now = candle.get("close", 0.0)
-        vwap_ok = price_now >= ind.get("vwap", price_now)
-        sma_ok  = ind.get("sma5", 0) >= ind.get("sma20", 0)
-        # Trend points (max 25): both legs failing is the falling knife — still
-        # a hard block; one leg a hair off (price grazing VWAP on a pullback,
-        # or a fresh cross not yet reflected in SMA5) just costs points.
-        if not (vwap_ok or sma_ok):
-            hard_block = True
-            blocked.append("counter-trend (price below VWAP and SMA5<SMA20) — falling knife, long only with the trend")
+        below_vwap = price_now < ind.get("vwap", price_now)
+        sma_down   = ind.get("sma5", 0) < ind.get("sma20", 0)
+        if _TREND_FILTER_LEGACY:
+            vwap_ok = not below_vwap
+            sma_ok  = ind.get("sma5", 0) >= ind.get("sma20", 0)
+            if not (vwap_ok or sma_ok):
+                hard_block = True
+                blocked.append("counter-trend (price below VWAP and SMA5<SMA20) — falling knife, long only with the trend")
+            else:
+                if vwap_ok:
+                    score += 13
+                else:
+                    blocked.append("price below VWAP (-13)")
+                if sma_ok:
+                    score += 12
+                else:
+                    blocked.append("SMA5<SMA20 (-12)")
         else:
-            if vwap_ok:
-                score += 13
+            # Trend points (max 25) now go to weakness, and the both-legs-up
+            # cell — the measured worst — is the hard block.
+            if not (below_vwap or sma_down):
+                hard_block = True
+                blocked.append("price above VWAP and SMA5>SMA20 — chasing strength "
+                               "(measured worst cell: 22.6% win vs 28.6% for the rest)")
             else:
-                blocked.append("price below VWAP (-13)")
-            if sma_ok:
-                score += 12
-            else:
-                blocked.append("SMA5<SMA20 (-12)")
+                if below_vwap:
+                    score += 13
+                else:
+                    blocked.append("price above VWAP (-13)")
+                if sma_down:
+                    score += 12
+                else:
+                    blocked.append("SMA5>SMA20 (-12)")
         # NOTE: no hard broad-market veto. The per-stock uptrend filter above is
         # the real direction gate — a stock in an intraday uptrend is a valid long
         # even on a red market day, and a blanket "market is bearish" block just
@@ -876,7 +915,22 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         # effect: strictly more entries, no loss of entry quality — which also
         # relieves the sample-size problem that blocks validating anything else.
         # rsi_now is still surfaced in the reason string for diagnostics.
-        score += 25
+        #
+        # 2026-08-10, 256,805 CF-labelled decisions: RSI does carry signal, but
+        # only INSIDE the below-VWAP stratum, and only in the direction opposite
+        # to the original ladder:
+        #     price BELOW vwap:  RSI<45 minus RSI>=45  gap +0.0394  t +2.22 (19/23 days)
+        #     price ABOVE vwap:  same comparison       gap -0.0134  t -0.33 (9/15 days)
+        # So it is mostly the same effect as the direction filter above, not an
+        # independent one — stacking a full RSI ladder on top would double-count
+        # a single "weakness beats strength" phenomenon. Only the conditional
+        # part is expressed, and only with 5 of the 25 points, matching its
+        # modest effect size. Total stays 25 so score_min keeps its meaning.
+        score += 20
+        if rsi_now < 45 and below_vwap:
+            score += 5
+        else:
+            blocked.append("no oversold-below-VWAP edge (RSI>=45 or price above VWAP) (-5)")
         # The confidence band only describes a BUY decision. When the ensemble's
         # winning action is HOLD (gentle/loose entering on BUY support), its
         # confidence is the HOLD confidence — irrelevant to the BUY, so skip it.
@@ -1142,7 +1196,12 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         # from normal intraday chop (3 candles was too sensitive; 6 is the threshold).
         # Profit booking was removed: the ATR-scaled take-profit in _tech_signal
         # (+2.5% min) now manages exits so winners can run instead of being capped at 0.6%.
-        if pos_status == "LONG" and action == "HOLD":
+        # Held-time guard: the window slice must not reach back past the entry,
+        # or candles the entry decision already saw fire the exit — HFCL
+        # 2026-08-14 entered 09:45 and was dumped 09:46 on 6 lower closes that
+        # all predate the position.
+        if (pos_status == "LONG" and action == "HOLD"
+                and held_minutes is not None and held_minutes >= _PAPER_DROP_CANDLES):
             if len(window) >= _PAPER_DROP_CANDLES + 1:
                 recent_closes = [c["close"] for c in window[-(_PAPER_DROP_CANDLES + 1):]]
                 if all(recent_closes[i] > recent_closes[i + 1] for i in range(_PAPER_DROP_CANDLES)):
@@ -1183,7 +1242,8 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
                 try:
                     from app.services.llm_entry_review import shadow_review_entry
                     shadow_review_entry(symbol, candle, agents or [], ind,
-                                        gate.get("label", "?"), s)
+                                        gate.get("label", "?"), s,
+                                        fingerprint=fp, regime=regime)
                 except Exception:
                     logger.debug("shadow review hook failed", exc_info=True)
             s["trades"].append({

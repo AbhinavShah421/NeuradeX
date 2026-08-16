@@ -64,7 +64,7 @@ BT_DAYS_BACK  = int(os.getenv("AUTOPILOT_BACKTEST_MAX_DAYS_BACK", "90"))  # how 
 _BT_UNIVERSE_DEFAULT = (
     "SBIN,HDFCBANK,ICICIBANK,KOTAKBANK,AXISBANK,"
     "RELIANCE,TCS,INFY,WIPRO,BAJFINANCE,"
-    "TATAMOTORS,MARUTI,SUNPHARMA,TITAN,ITC,"
+    "TMPV,MARUTI,SUNPHARMA,TITAN,ITC,"
     "HINDUNILVR,NESTLEIND,ULTRACEMCO,ADANIENT,"
     "FEDERALBNK,PNB,IDBI,INDUSINDBK,"
     "SUZLON,IREDA,JKTYRE,ZEEL"
@@ -210,7 +210,11 @@ async def _flag(key: str) -> bool:
 async def set_mode(mode: str, enabled: bool) -> None:
     key = BACKTEST_FLAG if mode == "backtest" else PAPER_FLAG
     r = await _get_redis()
-    await r.set(key, "1" if enabled else "0", ex=86400 * 30)
+    # No expiry. This flag used to carry a 30-day TTL, which is only re-stamped
+    # when someone touches the toggle — so leaving autopilot on and simply not
+    # visiting the page turned it off a month later, silently and mid-session.
+    # "On" has to mean on until it is switched off.
+    await r.set(key, "1" if enabled else "0")
 
 
 async def _paper_timing() -> str:
@@ -225,7 +229,9 @@ async def _paper_timing() -> str:
 async def set_paper_timing(mode: str) -> None:
     try:
         r = await _get_redis()
-        await r.set(PAPER_TIMING, "aggressive" if mode == "aggressive" else "normal", ex=86400 * 30)
+        # No expiry — same reasoning as set_mode: a setting nobody touches for a
+        # month must not quietly revert to the default.
+        await r.set(PAPER_TIMING, "aggressive" if mode == "aggressive" else "normal")
     except Exception as exc:
         logger.warning("set_paper_timing failed: %s", exc)
 

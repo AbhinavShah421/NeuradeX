@@ -752,6 +752,33 @@ async def _shared_token_present() -> bool:
         return True
 
 
+async def _load_creds_from_db() -> Optional["GrowwClient"]:
+    """Re-read the broker credentials from Postgres and build the client.
+
+    Startup loads them exactly once and swallows a failure with a warning. That
+    is one attempt against a database that, on a host reboot, may not be
+    accepting connections yet — compose's depends_on ordering is only honoured
+    by `compose up`, not by the daemon restarting `restart: unless-stopped`
+    containers in parallel. Losing that one attempt used to cost the whole
+    session: no client, so the keeper idles, so no token, so no live feed, all
+    day, with nothing to recover it.
+    """
+    try:
+        from sqlalchemy import text
+        from app.database.postgres import AsyncSessionLocal
+        async with AsyncSessionLocal() as db:
+            row = await db.execute(
+                text("SELECT broker_api_key, broker_api_secret, COALESCE(broker_key_type, 'approval') "
+                     "FROM users WHERE broker_api_key IS NOT NULL AND broker_api_key != '' LIMIT 1")
+            )
+            creds = row.fetchone()
+        if creds and creds[0] and creds[1]:
+            return init_groww_client(creds[0], creds[1], creds[2])
+    except Exception as exc:
+        logger.debug("Groww credential reload failed: %s", exc)
+    return None
+
+
 async def token_keeper_loop() -> None:
     """Hold a valid Groww token for the whole trading window, unattended.
 
@@ -775,6 +802,10 @@ async def token_keeper_loop() -> None:
                 continue
 
             client = get_groww_client()
+            if client is None:
+                # Startup's single credential read may simply have lost a race
+                # with Postgres. Try again before writing the session off.
+                client = await _load_creds_from_db()
             if client is None:
                 if not warned_no_creds:
                     logger.warning(

@@ -499,6 +499,12 @@ MARKET_OPEN_MIN  = int(os.getenv("SCAN_MARKET_OPEN_MIN", str(9 * 60 + 15)))    #
 MARKET_CLOSE_MIN = int(os.getenv("SCAN_MARKET_CLOSE_MIN", str(15 * 60 + 30)))  # 15:30
 PREMARKET_MIN    = int(os.getenv("SCAN_PREMARKET_MIN", str(9 * 60)))           # 09:00 pre-open scan
 POSTMARKET_MIN   = int(os.getenv("SCAN_POSTMARKET_MIN", str(15 * 60 + 40)))    # 15:40 grade
+# When the rolling auto-sweep may start, kept separate from PREMARKET_MIN so the
+# board can be populated early on a machine booted before the open without also
+# dragging the dated pre-open snapshot earlier. That snapshot is what post-close
+# grading scores, so moving it would silently rebase the whole accuracy series
+# onto older data and make today incomparable with every day before it.
+AUTOSCAN_FROM_MIN = int(os.getenv("SCAN_AUTOSCAN_FROM_MIN", str(PREMARKET_MIN)))
 # Sessions stop opening positions at 13:00 IST (sessions_service's
 # _LATE_ENTRY_CUTOFF_MIN), so a symbol promoted after this can no longer be
 # traded today — scanning aggressively past it buys nothing.
@@ -2221,7 +2227,9 @@ async def scanner_loop() -> None:
     stamp last_scan_end), so an auto sweep never piles onto a fresh manual one.
     Checks once a minute; paused entirely when auto-scan is off.
 
-    Only sweeps inside the trading window. The loop used to run around the
+    Only sweeps inside the auto-scan window (SCAN_AUTOSCAN_FROM_MIN, which may
+    open before the pre-open scan so a machine booted early still has a
+    populated board). The loop used to run around the
     clock, so most sweeps re-read yesterday's closes overnight and at weekends —
     pointless work that, at a short interval, is also the fastest way to get the
     IP throttled by the data provider the intraday fallback depends on."""
@@ -2233,7 +2241,7 @@ async def scanner_loop() -> None:
             now = _ist_now()
             minutes = now.hour * 60 + now.minute
             in_window = (now.weekday() < 5
-                         and PREMARKET_MIN <= minutes <= POSTMARKET_MIN)
+                         and AUTOSCAN_FROM_MIN <= minutes <= POSTMARKET_MIN)
             _state["auto_scan_window"] = in_window
             if await get_auto_scan() and in_window:
                 due = (_state.get("last_scan_end") or 0.0) + interval
@@ -2280,8 +2288,28 @@ async def schedule_loop() -> None:
         await asyncio.sleep(60)
 
 
-async def warm_state() -> None:
-    """Load last eval + calibration into state on boot so the UI has them."""
+async def warm_state(attempts: int = 12, delay: float = 5.0) -> None:
+    """Load last eval + calibration into state on boot so the UI has them.
+
+    Retries, because this is a one-shot read with no second chance. compose
+    declares depends_on redis/service_healthy, but that ordering is only
+    honoured by `compose up` — when the Docker daemon restarts the stack on
+    host boot (restart: unless-stopped) every container starts in parallel, and
+    a single attempt loses the race with Redis. The old code swallowed that at
+    debug level, so the scanner came up with a blank eval, no calibration and
+    last_scan_end=0 and nothing ever refilled them."""
+    for attempt in range(1, attempts + 1):
+        if await _warm_state_once():
+            if attempt > 1:
+                logger.info("warm_state succeeded on attempt %d", attempt)
+            return
+        if attempt < attempts:
+            await asyncio.sleep(delay)
+    logger.warning("warm_state gave up after %d attempts — starting with empty state", attempts)
+
+
+async def _warm_state_once() -> bool:
+    """One warm attempt. False means Redis was unreachable, so retry."""
     try:
         r = await _get_redis()
         ev = await r.get(_EVAL_KEY)
@@ -2305,8 +2333,10 @@ async def warm_state() -> None:
                 upd = json.loads(wl).get("updated_at")
                 if upd:
                     _state["last_scan_end"] = datetime.fromisoformat(upd).timestamp()
+        return True
     except Exception as exc:
-        logger.debug("warm_state skipped: %s", exc)
+        logger.info("warm_state attempt failed (Redis not ready?): %s", exc)
+        return False
 
 
 async def get_latest_eval() -> dict | None:

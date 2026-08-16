@@ -56,6 +56,21 @@ SIM_FLOORS       = (0.65, 0.55, 0.45)
 # Confidence multiplier applied at each floor (1.0 = full, lower = penalised)
 FLOOR_PENALTY    = {0.65: 1.00, 0.55: 0.90, 0.45: 0.78}
 
+# Evidence-quality weighting (2026-07-09). Two systematic biases were poisoning
+# the win-rate stats:
+#  • Era: outcomes recorded before the 2026-07-03 exit overhaul came from the
+#    broken tight-stop exits — the exit A/B measured 20.5% (old policy) vs 46.5%
+#    (current) win on IDENTICAL entries.
+#  • Source: CF phantoms and PAPER cases are real outcomes under the live
+#    policy; REPLAY cases include piles of test-run artifacts from
+#    intentionally-broken code generations (verified: 50 symbol-local REPLAY
+#    neighbors graded a real +0.8% winner "18%").
+# Similarity is still real for all cases, so low-quality evidence is DISCOUNTED,
+# not dropped; weights compound (old-era REPLAY = 0.12x). Module-level because
+# both query() and retrieve_cases() must price evidence identically.
+OLD_ERA_WEIGHT   = 0.3
+SOURCE_WEIGHT    = {"CF": 1.0, "PAPER": 1.0, "LIVE": 1.0, "REPLAY": 0.4, "BACKTEST": 0.5}
+
 GATE_WIN_RATE    = 0.55     # v2: raised from 0.50 — 50% is random noise
 STRONG_WIN_RATE  = 0.65     # above this we boost confidence
 MAX_CONF         = 0.80     # hard cap — memory is evidence, not certainty
@@ -232,28 +247,25 @@ class PatternMemory:
                 self._meta = []
 
     # ── retrieval ─────────────────────────────────────────────────────────────
-    async def query(
+    async def _select_neighbours(
         self, fingerprint: list[float], symbol: Optional[str] = None,
         regime: Optional[str] = None, k: int = DEFAULT_K,
         exclude_sources: Optional[set] = None,
-    ) -> dict:
-        """Return per-action statistics from the k nearest historical cases.
+    ) -> tuple[list[tuple[int, float]], Optional[float], bool]:
+        """Shared k-NN selection: source/symbol/regime filtering, then the
+        progressive similarity floor.
 
-        v2: progressive similarity floor with confidence penalty; hard minimum
-        similarity (ABS_SIM_MIN) — never returns unrelated cases.
-
-        Result: {
-          sample_count, per_action: {BUY:{n,win_rate,avg_pnl,evidence}, ...},
-          best_action, best_evidence, symbol_local, actual_floor
-        }
+        Returns (chosen [(meta_index, similarity)], actual_floor, symbol_local);
+        an empty list means no genuinely similar precedent exists. Factored out
+        of query() so retrieve_cases() ranks candidates by exactly the same
+        rules — two copies of this would drift, and then the cases shown to a
+        reader would stop being the cases the gate actually scored.
         """
         await self._refresh()
-        empty = {"sample_count": 0, "per_action": {}, "best_action": "HOLD",
-                 "best_evidence": 0.0, "symbol_local": False, "actual_floor": None}
         if self._mat is None or self._mat.shape[0] == 0 or not fingerprint:
-            return empty
+            return [], None, False
         if len(fingerprint) != FINGERPRINT_DIM:
-            return empty
+            return [], None, False
 
         q = np.asarray(fingerprint, dtype=np.float32)
         nq = np.linalg.norm(q) or 1e-9
@@ -285,9 +297,6 @@ class PatternMemory:
 
         # ── Progressive floor: try tighter first, relax only if needed ────────
         # Hard floor (ABS_SIM_MIN) is never relaxed — ensures real similarity.
-        chosen: list[tuple[int, float]] = []
-        actual_floor: Optional[float] = None
-
         for floor in SIM_FLOORS:
             candidates = [
                 (idx[o], float(cand_sims[o]))
@@ -295,11 +304,66 @@ class PatternMemory:
                 if cand_sims[o] >= max(floor, ABS_SIM_MIN)
             ]
             if len(candidates) >= MIN_SAMPLES:
-                chosen = candidates
-                actual_floor = floor
-                break
+                return candidates, floor, symbol_local
 
         # No opinion when we can't find genuinely similar precedents
+        return [], None, symbol_local
+
+    async def retrieve_cases(
+        self, fingerprint: list[float], symbol: Optional[str] = None,
+        regime: Optional[str] = None, k: int = 12,
+        exclude_sources: Optional[set] = None,
+    ) -> list[dict]:
+        """The nearest precedents themselves, not their aggregate.
+
+        query() collapses the neighbourhood into per-action win rates, which is
+        what the memory agent votes on. A reader that reasons case by case needs
+        the cases: each one's similarity, what was done, what it returned, and
+        how much that evidence is worth. Returns [] when no precedent clears the
+        similarity floor — the caller must treat that as "no evidence", never as
+        "no risk".
+        """
+        chosen, floor, symbol_local = await self._select_neighbours(
+            fingerprint, symbol, regime, DEFAULT_K, exclude_sources)
+        out: list[dict] = []
+        for i, sim in chosen[:k]:
+            m = self._meta[i]
+            w = SOURCE_WEIGHT.get(m.get("source"), 0.4)
+            if m.get("old_era"):
+                w *= OLD_ERA_WEIGHT
+            out.append({
+                "symbol": m["symbol"],
+                "similarity": round(sim, 3),
+                "action": m["action"],
+                "pnl_pct": round(float(m["pnl_pct"]), 3),
+                "outcome": "WIN" if m["pnl_pct"] > 0 else "LOSS",
+                "regime": m["regime"],
+                "source": m["source"],
+                "evidence_weight": round(w, 2),
+                "symbol_local": symbol_local,
+                "floor": floor,
+            })
+        return out
+
+    async def query(
+        self, fingerprint: list[float], symbol: Optional[str] = None,
+        regime: Optional[str] = None, k: int = DEFAULT_K,
+        exclude_sources: Optional[set] = None,
+    ) -> dict:
+        """Return per-action statistics from the k nearest historical cases.
+
+        v2: progressive similarity floor with confidence penalty; hard minimum
+        similarity (ABS_SIM_MIN) — never returns unrelated cases.
+
+        Result: {
+          sample_count, per_action: {BUY:{n,win_rate,avg_pnl,evidence}, ...},
+          best_action, best_evidence, symbol_local, actual_floor
+        }
+        """
+        empty = {"sample_count": 0, "per_action": {}, "best_action": "HOLD",
+                 "best_evidence": 0.0, "symbol_local": False, "actual_floor": None}
+        chosen, actual_floor, symbol_local = await self._select_neighbours(
+            fingerprint, symbol, regime, k, exclude_sources)
         if not chosen or actual_floor is None:
             return empty
 
@@ -315,15 +379,13 @@ class PatternMemory:
         #    symbol-local REPLAY neighbors graded a real +0.8% winner "18%").
         # Similarity is still real for all cases, so low-quality evidence is
         # DISCOUNTED, not dropped; weights compound (old-era REPLAY = 0.12x).
-        _OLD_ERA_W = 0.3
-        _SOURCE_W  = {"CF": 1.0, "PAPER": 1.0, "LIVE": 1.0, "REPLAY": 0.4, "BACKTEST": 0.5}
         buckets: dict[str, list[tuple[float, float, float]]] = {"BUY": [], "SELL": [], "HOLD": []}
         for i, sim in chosen:
             m   = self._meta[i]
             act = m["action"] if m["action"] in buckets else "HOLD"
-            w   = _SOURCE_W.get(m.get("source"), 0.4)
+            w   = SOURCE_WEIGHT.get(m.get("source"), 0.4)
             if m.get("old_era"):
-                w *= _OLD_ERA_W
+                w *= OLD_ERA_WEIGHT
             buckets[act].append((sim, m["pnl_pct"], w))
 
         per_action: dict[str, dict] = {}

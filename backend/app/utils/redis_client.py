@@ -60,11 +60,15 @@ async def cache_get(key: str):
         return None
 
 
-async def cache_set(key: str, value: str, expire: int = 3600):
-    """Set value in cache"""
+async def cache_set(key: str, value: str, expire: int | None = 3600):
+    """Set value in cache. expire=None stores it without a TTL — for settings
+    that must survive however long nobody touches them (see set_autopilot)."""
     try:
         client = get_redis()
-        await client.setex(key, expire, value)
+        if expire is None:
+            await client.set(key, value)
+        else:
+            await client.setex(key, expire, value)
     except Exception as e:
         logger.warning(f"Cache set error: {str(e)}")
 
