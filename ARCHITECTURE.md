@@ -180,10 +180,7 @@
 │  ① Store trade record → PostgreSQL trade_records                                        │
 │      (symbol, action, fill_price, pnl, agent_signals JSONB, market_context JSONB)       │
 │                                                                                         │
-│  ② Store RL experience tuple → PostgreSQL rl_experiences                                │
-│      (state, action, reward, next_state, done) — capped at 10,000 rows                  │
-│                                                                                         │
-│  ③ Update agent weights → PostgreSQL agent_weights                                      │
+│  ② Update agent weights → PostgreSQL agent_weights                                      │
 │      Per agent:                                                                         │
 │        if agent_signal == outcome_direction:  w += 0.05 × (1 - w)  ← reward             │
 │        else:                                  w -= 0.05 × w         ← penalise          │
@@ -251,7 +248,7 @@
 │  │    (hypertable)     │   │    (indexed by      │   │  • ensemble:{s} │   │
 │  │  • agent_weights    │   │     symbol+date)    │   │                 │   │
 │  │  • trade_records    │   │                     │   │  TTL:           │   │
-│  │  • rl_experiences   │   │                     │   │  • tick: 60s    │   │
+│  │  • session_decisions│   │                     │   │  • tick: 60s    │   │
 │  └─────────────────────┘   └─────────────────────┘   │  • ensemble:300s│   │
 │                                                      └─────────────────┘   │
 │  ┌──────────────────────────────────────────────────────────────────────┐  │
@@ -292,6 +289,8 @@
 
 | Service | Port | Language | Role |
 |---|---|---|---|
+| backend | 8000 | Python | Auth, portfolio, sessions API, AI-engine API, recordings |
+| session-runner | — | Python | Same image as backend, `BACKEND_ROLE=runner` — live paper-trading sessions, ML sweeps, counterfactual labelling. No HTTP load |
 | market-data-service | 8001 | Python | Ingestion — Groww/Yahoo/NewsAPI → Redis + TimescaleDB + RabbitMQ |
 | technical-agent | 8002 | Python | XGBoost + 15-indicator rule engine → BUY/SELL/HOLD |
 | sentiment-agent | 8003 | Python | FinBERT on news articles → sentiment signal |
@@ -303,13 +302,21 @@
 | trade-executor | 8011 | Java (Spring Boot) | Paper or live Groww order placement |
 | feedback-service | 8012 | Python | Trade storage, adaptive weight updates, retrain trigger |
 | model-trainer | 8013 | Python | XGBoost + PPO training → MLflow registry |
-| backend (legacy) | 8000 | Python | Auth, portfolio, existing endpoints (transition period) |
-| frontend | 3000 | React / TypeScript | UI — Dashboard, Models, Orders, Agent Status |
+| stock-scanner | 8014 | Python | Morning pre-open scan + rolling auto-sweep of the NSE equity master; promotes A-grades into sessions |
+| autopilot-service | 8015 | Python | Unattended paper/backtest session orchestration (Redis flags, no TTL) |
+| groww-feed-service | — | Python | Isolated growwapi live-tick subscriber → Redis. Reads token from `groww:access_token` |
+| frontend | 3000 | React / TypeScript | UI — served via nginx at `/neuradex` |
+| nginx | 80 | — | Reverse proxy for frontend + API |
 | MLflow | 5000 | Python | Model registry + experiment tracking |
 | TimescaleDB | 5432 | PostgreSQL ext. | OHLCV time-series + agent weights + trade records |
 | MongoDB | 27017 | MongoDB | News articles (indexed by symbol + date) |
-| Redis | 6379 | Redis | Live tick cache + ensemble decision cache |
+| Redis | 6379 | Redis | Live tick cache + ensemble decision cache + shared Groww token |
 | RabbitMQ | 5672 | RabbitMQ | Message bus (8 exchanges, 17 queues) |
+| Elasticsearch | 9200 | — | Central log store (`neuradex-logs-YYYY.MM.DD` daily indices) |
+| Kibana | 5601 | — | Log search & dashboards over the daily indices |
+| Adminer | 8080 | — | phpMyAdmin-style DB browser (also proxied at `/neuradex/dev/db/`) — server `postgres`, user `stock_user`, db `stock_prediction_db` |
+| InfluxDB | 8086 | — | Metrics time-series |
+| Ollama | 11434 | — | Local LLM (llama3.1:8b) for the shadow entry reviewer |
 
 ---
 
@@ -353,16 +360,9 @@ executed_at    TIMESTAMPTZ
 closed_at      TIMESTAMPTZ
 ```
 
-### rl_experiences (PostgreSQL, capped at 10k)
-```sql
-id         SERIAL PRIMARY KEY
-state      JSONB    -- 10-dim observation vector
-action     INT      -- 0=HOLD 1=BUY 2=SELL
-reward     FLOAT
-next_state JSONB
-done       BOOLEAN
-created_at TIMESTAMPTZ
-```
+*(`rl_experiences` — the RL replay buffer — was dropped 2026-08-16: no
+producer ever sent the `state` field it required and no consumer read it;
+model-trainer trains PPO from OHLCV directly.)*
 
 ---
 
@@ -434,7 +434,6 @@ Published to `risk.validated` exchange:
   feedback-service receives trade.outcomes
        │
        ├──► INSERT into trade_records (PostgreSQL)
-       ├──► INSERT into rl_experiences (PostgreSQL, max 10k)
        │
        ├──► For each agent:
        │      outcome_direction = PNL > 0 ? BUY/SELL : opposite
@@ -512,7 +511,52 @@ Services must start in this sequence (handled by Docker healthchecks + `depends_
 14. frontend                — React app
 ```
 
+`depends_on` ordering is only honoured by `compose up`. When the Docker daemon
+restarts the stack on host boot (`restart: unless-stopped`), every container
+starts in parallel — services that read state exactly once at boot must retry
+(the scanner's `warm_state` and the Groww token keeper both do).
+
 ---
 
-*Architecture version: 2.0 — Phases 1–5 complete*
-*Last updated: 2026-05-24*
+## 11. Observability — Logging Pipeline
+
+Every Python service logs **structured JSON to stdout** and ships the same
+records to **Elasticsearch** in daily indices (`neuradex-logs-YYYY.MM.DD`),
+searchable in Kibana (:5601). Each document carries `service`, `level`,
+`logger`, `message`, `@timestamp`, plus any `extra={}` fields.
+
+```
+service code ── logging.* ──► root logger
+                                ├─► StreamHandler (JSON) ──► stdout (docker logs)
+                                └─► _ElasticsearchHandler ──► queue ──► daemon thread
+                                                              └─► POST /_bulk (batch 50, 2s flush)
+```
+
+- **Canonical handler**: `shared/python/elk_logger.py`, copied into each
+  microservice by `python scripts/sync_shared_python.py` (build contexts are
+  isolated — never edit the per-service copies). The backend/session-runner
+  variant lives at `backend/app/utils/elk_logger.py`.
+- **Service name**: `SERVICE_NAME` env var (set per service in
+  docker-compose). The backend image defaults to `neuradeX-backend`;
+  session-runner overrides it to `session-runner` so the two are separable
+  in Kibana.
+- **Self-healing (2026-08-16)**: libraries that reconfigure logging can
+  `close()` the ES handler while it stays attached to the root logger; the
+  worker thread then exits cleanly and every subsequent record is dropped
+  silently — ensemble-engine, rl-agent and technical-agent shipped ~zero
+  documents for weeks this way. The handler now revives a dead worker on the
+  next `emit()` and reports bulk failures (HTTP errors *and* per-item mapping
+  rejections) to stderr, rate-limited to one report per 5 minutes.
+- **Not shipped to ES (by design)**: `risk-engine` and `trade-executor`
+  (Java/Spring — plain text to stdout only) and `groww-feed-service`
+  (deliberately minimal image with a 256 MB cap; adding an ES-shipping
+  thread fights its restart-on-leak design). Use `docker logs` for these.
+- Quick health check — docs per service for a given day:
+  `GET :9200/neuradex-logs-YYYY.MM.DD/_search` with a `terms` agg on
+  `service.keyword`. A service that logs to stdout but shows zero ES docs
+  is wedged — check its stderr for `elk_logger[...]` reports.
+
+---
+
+*Architecture version: 2.1 — Phases 1–5 complete + scanner/autopilot/session-runner + ELK hardening*
+*Last updated: 2026-08-16*

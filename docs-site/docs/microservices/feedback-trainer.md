@@ -20,7 +20,7 @@ sidebar_position: 5
 
 | Queue | Exchange | Operations on each message |
 |---|---|---|
-| `trade.outcomes.feedback` | `trade.outcomes` | 1. Store in `trade_records` · 2. Store RL experience in `rl_experiences` · 3. Update `agent_weights` · 4. Maybe trigger retrain |
+| `trade.outcomes.feedback` | `trade.outcomes` | 1. Store in `trade_records` · 2. Update `agent_weights` · 3. Maybe trigger retrain |
 
 ## Retraining Trigger
 
@@ -37,7 +37,6 @@ publish(exchange="model.retrain", routing_key="retrain",
 | Table | Key Columns |
 |---|---|
 | `trade_records` | `trade_id, symbol, entry_price, exit_price, pnl_pct, pnl_abs, outcome, agent_signals, timestamp_open, timestamp_close, trade_source` |
-| `rl_experiences` | `symbol, state, action, reward, next_state, done` |
 | `agent_weights` | `agent, weight, updated_at` |
 
 ---
@@ -56,7 +55,7 @@ publish(exchange="model.retrain", routing_key="retrain",
 
 | Model | Data source | Schedule |
 |---|---|---|
-| RL trading policy | PostgreSQL `rl_experiences` (last `TRAIN_DAYS` = 365 days) | On-demand via message OR every `RETRAIN_SCHEDULE_HOURS` = 24h |
+| RL trading policy | PostgreSQL `ohlcv` (episodes via inline `TradingEnv`) | On-demand via message OR every `RETRAIN_SCHEDULE_HOURS` = 24h |
 | Technical / pattern models | PostgreSQL `ohlcv` | Same |
 
 ## MLflow

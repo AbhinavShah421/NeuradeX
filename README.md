@@ -143,65 +143,58 @@ docker-compose up postgres mongodb redis rabbitmq influxdb ollama -d
 ## 📁 Project Structure
 
 ```
-stock-prediction-ai/
-├── backend/
-│   ├── app/
-│   │   ├── main.py                 # FastAPI application
-│   │   ├── config.py               # Configuration settings
-│   │   ├── api/                    # API endpoints
-│   │   │   ├── stocks.py           # Stock routes
-│   │   │   ├── predictions.py      # Prediction routes
-│   │   │   └── portfolio.py        # Portfolio routes
-│   │   ├── ml_core/                # ML/AI models
-│   │   │   └── initializer.py      # Model initialization
-│   │   ├── database/               # Database connections
-│   │   │   ├── postgres.py         # PostgreSQL setup
-│   │   │   ├── mongodb.py          # MongoDB setup
-│   │   │   └── __init__.py
-│   │   ├── utils/                  # Utilities
-│   │   │   └── redis_client.py     # Redis wrapper
-│   │   ├── websocket/              # Real-time communication
-│   │   │   └── socket_manager.py   # Socket.IO setup
-│   │   └── services/               # Business logic
-│   ├── requirements.txt            # Python dependencies
-│   ├── .env                        # Environment variables
-│   └── Dockerfile                  # Docker image
-├── frontend/
-│   ├── src/
-│   │   ├── main.tsx                # React entry point
-│   │   ├── App.tsx                 # Main component
-│   │   ├── components/             # React components
-│   │   │   └── Layout.tsx          # Main layout
-│   │   ├── pages/                  # Page components
-│   │   │   ├── Dashboard.tsx       # Home page
-│   │   │   ├── StockDetail.tsx     # Stock detail page
-│   │   │   ├── Portfolio.tsx       # Portfolio page
-│   │   │   └── Predictions.tsx     # Predictions page
-│   │   ├── services/               # API & Socket services
-│   │   │   ├── api.ts              # API client
-│   │   │   └── socket.ts           # Socket.IO client
-│   │   ├── stores/                 # State management (Zustand)
-│   │   │   └── appStore.ts         # App state
-│   │   ├── types/                  # TypeScript types
-│   │   └── styles/                 # Styles (Tailwind)
-│   ├── index.html
-│   ├── package.json
-│   ├── vite.config.ts
-│   ├── tsconfig.json
-│   ├── tailwind.config.js
-│   └── Dockerfile
-├── docker/
-│   ├── Dockerfile.backend          # Backend Docker image
-│   └── Dockerfile.frontend         # Frontend Docker image
-├── config/
-│   └── nginx.conf                  # Nginx configuration
-├── scripts/
-│   ├── setup.sh                    # Setup script
-│   └── start.sh                    # Start script
-├── docker-compose.yml              # Docker Compose configuration
-├── .env.example                    # Example env variables
-└── README.md                       # This file
+NeuradeX/
+├── backend/               # FastAPI monolith — auth, sessions, AI engine, recordings
+│   └── app/               # bind-mounted into backend + session-runner (deploy = docker restart)
+├── frontend/              # React 18 + Vite SPA, served by nginx at /neuradex (see frontend/README.md)
+├── market-data-service/   # ingestion → Redis / TimescaleDB / RabbitMQ          :8001
+├── technical-agent/       # XGBoost + indicators                                 :8002
+├── sentiment-agent/       # FinBERT news scoring                                 :8003
+├── macro-agent/           # VIX / FX / crude / G-sec regimes                     :8004
+├── pattern-agent/         # candlestick patterns + HMM                           :8005
+├── rl-agent/              # PPO policy                                           :8006
+├── ensemble-engine/       # weighted agent voting                                :8007
+├── risk-engine/           # Java — ATR sizing, stops                             :8010
+├── trade-executor/        # Java — paper/live order placement                    :8011
+├── feedback-service/      # trade storage, weight updates                        :8012
+├── model-trainer/         # XGBoost + PPO training → MLflow                      :8013
+├── stock-scanner/         # NSE-wide morning scan + auto-sweep                   :8014
+├── autopilot-service/     # unattended paper/backtest orchestration              :8015
+├── groww-feed-service/    # isolated growwapi live-tick subscriber → Redis
+├── shared/python/         # canonical cross-service modules (elk_logger, …)
+│                          #   sync with: python scripts/sync_shared_python.py
+├── docs-site/             # Docusaurus documentation site
+├── docker/                # shared Dockerfiles
+├── config/                # nginx config
+├── scripts/               # start-neuradex.ps1, sync_shared_python.py, …
+└── docker-compose.yml
 ```
+
+Deep dives: [ARCHITECTURE.md](ARCHITECTURE.md) (data flow, schemas, logging
+pipeline) · [BACKEND_API.md](BACKEND_API.md) (every endpoint) ·
+[frontend/README.md](frontend/README.md) (SPA conventions and gotchas).
+
+> **Deploy note:** `backend/app` is bind-mounted into the `backend` and
+> `session-runner` containers — a `docker restart` picks up code changes. All
+> other services bake code into their images: `docker compose build <svc> &&
+> docker compose up -d <svc>` or the change silently does not deploy.
+
+## 🔍 Observability
+
+All Python services log structured JSON to stdout **and** ship the same
+records to Elasticsearch (daily `neuradex-logs-YYYY.MM.DD` indices; Kibana on
+:5601). Each doc carries a `service` field (`SERVICE_NAME` env). The Java
+services (risk-engine, trade-executor) and groww-feed-service log to stdout
+only — use `docker logs` for those. Details and failure modes:
+[ARCHITECTURE.md §11](ARCHITECTURE.md).
+
+**Database browser** — Adminer (phpMyAdmin-style) via the landing page card
+or [http://localhost/neuradex/dev/db/](http://localhost/neuradex/dev/db/)
+(direct port: [http://localhost:8080](http://localhost:8080)): System
+*PostgreSQL*, server `postgres`, user `stock_user`, password
+`stock_password`, database `stock_prediction_db`. Every table
+(trade_records, session_decisions, pattern_memory, …) is browsable and
+editable there.
 
 ## 🔧 Configuration
 

@@ -116,12 +116,14 @@
     .card-docs   { --accent: #3b82f6; }
     .card-logs   { --accent: #a855f7; }
     .card-mlflow { --accent: #06b6d4; }
+    .card-db     { --accent: #ec4899; }
 
     .badge-app    { background: rgba(34,197,94,0.15);  color: #22c55e; }
     .badge-api    { background: rgba(245,158,11,0.15); color: #f59e0b; }
     .badge-docs   { background: rgba(59,130,246,0.15); color: #3b82f6; }
     .badge-logs   { background: rgba(168,85,247,0.15); color: #a855f7; }
     .badge-mlflow { background: rgba(6,182,212,0.15);  color: #06b6d4; }
+    .badge-db     { background: rgba(236,72,153,0.15); color: #ec4899; }
 
     .footer {
       margin-top: 3rem;
@@ -180,6 +182,13 @@
       <div class="card-title">Kibana Logs</div>
       <div class="card-desc">Centralised log dashboards powered by Elasticsearch. Monitor all microservices, trace errors, and analyse trading activity.</div>
       <span class="badge badge-logs">Kibana · Elasticsearch 8</span>
+    </a>
+
+    <a href="/neuradex/dev/db/?pgsql=postgres&amp;username=stock_user&amp;db=stock_prediction_db" class="card card-db">
+      <div class="card-icon">🗄️</div>
+      <div class="card-title">Database Browser</div>
+      <div class="card-desc">phpMyAdmin-style browser for every table — trades, session decisions, pattern memory, users. Server <b>postgres</b>, user <b>stock_user</b>, db <b>stock_prediction_db</b>.</div>
+      <span class="badge badge-db">Adminer · PostgreSQL</span>
     </a>
 
   </div>

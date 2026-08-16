@@ -947,7 +947,7 @@ GET /health
 - [x] Add TimescaleDB extension to PostgreSQL (`timescale/timescaledb:latest-pg15`)
 - [x] Build `market-data-service` (port 8001): Groww + Yahoo Finance + NewsAPI → Redis + TimescaleDB + RabbitMQ
 - [x] Wire all 8 RabbitMQ exchanges + 17 queues (`rabbitmq_setup.py`)
-- [x] TimescaleDB hypertable `ohlcv` + `agent_weights` + `trade_records` + `rl_experiences`
+- [x] TimescaleDB hypertable `ohlcv` + `agent_weights` + `trade_records` (`rl_experiences` dropped 2026-08-16 — never wired)
 - [ ] **VERIFY:** `docker exec stock-prediction-postgres psql -U stock_user -d stock_prediction_db -c "SELECT count(*) FROM ohlcv WHERE symbol='RELIANCE';"`
 
 ### Phase 2 — Agent Services (ML + Real Inference) ✅ COMPLETE

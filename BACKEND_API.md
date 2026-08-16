@@ -58,7 +58,11 @@
 | `trade-executor` | **8011** | Java / Spring Boot | RabbitMQ |
 | `feedback-service` | **8012** | Python / FastAPI | PostgreSQL · Redis · RabbitMQ |
 | `model-trainer` | **8013** | Python / FastAPI | PostgreSQL · RabbitMQ · MLflow (5000) |
-| `frontend` | **3000** | React / Vite | HTTP → backend:8000 |
+| `stock-scanner` | **8014** | Python / FastAPI | Redis · Groww API · NSE equity master |
+| `autopilot-service` | **8015** | Python / FastAPI | Redis (paper/backtest flags, no TTL) |
+| `session-runner` | — | Python (backend image, `BACKEND_ROLE=runner`) | PostgreSQL · Redis · RabbitMQ · Elasticsearch |
+| `groww-feed-service` | — | Python (isolated growwapi image) | Redis (`groww:access_token`, tick stream) |
+| `frontend` | **3000** | React / Vite | Served by nginx at `/neuradex` |
 
 ---
 
@@ -324,6 +328,21 @@ asyncio.create_task(
 
 LLM-backed conversational analysis endpoint.  
 **MLflow proxy** routes are also registered from this file — forwarded to `mlflow:5000`.
+
+Notable operational endpoints:
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/ai-engine/llm-review/scorecard?days=90` | Whether the shadow LLM entry reviewer has earned a vote — scores verdict separation, confidence-vs-P&L tracking, and precedent quality independently |
+| `POST` | `/api/ai-engine/scan-feedback` | Scanner post-market signal score (learning feedback) |
+
+The **symbol universe** used by scans, sweeps and the chat agent is
+`KNOWN_STOCKS` in [`backend/app/api/agent.py`](backend/app/api/agent.py).
+NSE renames/delists tickers over time; a Groww historical-API **403 on a
+specific symbol means the ticker no longer exists**, not an auth problem.
+Validate against the official master
+(`https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv`) before
+adding symbols. Last full validation: 2026-08-16 (15 stale symbols fixed).
 
 **File:** [`backend/app/api/mlflow_proxy.py`](backend/app/api/mlflow_proxy.py) — Proxies `/api/mlflow/*` requests to the internal MLflow server.
 
@@ -629,7 +648,7 @@ Applies configurable risk gates:
 
 | Queue | Exchange | Handler operations |
 |---|---|---|
-| `trade.outcomes.feedback` | `trade.outcomes` | 1. Store trade in PostgreSQL `trade_records` · 2. Store RL experience in `rl_experiences` · 3. Update `agent_weights` · 4. Maybe trigger retrain |
+| `trade.outcomes.feedback` | `trade.outcomes` | 1. Store trade in PostgreSQL `trade_records` · 2. Update `agent_weights` · 3. Maybe trigger retrain |
 
 ### Retraining Trigger
 
@@ -646,7 +665,6 @@ publish(exchange="model.retrain", routing_key="retrain",
 | Table | Columns |
 |---|---|
 | `trade_records` | `trade_id, symbol, entry_price, exit_price, pnl_pct, pnl_abs, outcome, agent_signals, market_context, timestamp_open, timestamp_close, trade_source` |
-| `rl_experiences` | `symbol, state, action, reward, next_state, done` |
 | `agent_weights` | `agent, weight, updated_at` |
 
 ---
@@ -665,7 +683,7 @@ publish(exchange="model.retrain", routing_key="retrain",
 
 | Model | Data source | Schedule |
 |---|---|---|
-| RL trading policy | PostgreSQL `rl_experiences` (last `TRAIN_DAYS`=365 days) | On-demand via `model.retrain` message, or every `RETRAIN_SCHEDULE_HOURS`=24h |
+| RL trading policy | PostgreSQL `ohlcv` (episodes via inline `TradingEnv`) | On-demand via `model.retrain` message, or every `RETRAIN_SCHEDULE_HOURS`=24h |
 | Technical / pattern models | PostgreSQL `ohlcv` | Same |
 
 ### MLflow
@@ -738,7 +756,6 @@ All model artifacts and metrics are stored to MLflow at `http://mlflow:5000`.
 | `users` | `id, email, phone, password_hash, broker, broker_api_key, broker_api_secret, is_verified` | backend/auth.py | backend/auth.py |
 | `ohlcv` | `symbol, exchange, interval, time, open, high, low, close, volume` | market-data-service | backend/stocks.py, technical-agent, pattern-agent, rl-agent, model-trainer |
 | `trade_records` | `trade_id, symbol, entry_price, exit_price, pnl_pct, pnl_abs, outcome, agent_signals, market_context, timestamp_open, timestamp_close, trade_source` | feedback-service | backend/predictions.py, model-trainer |
-| `rl_experiences` | `symbol, state, action, reward, next_state, done` | feedback-service | model-trainer |
 | `agent_weights` | `agent, weight, updated_at` | feedback-service | ensemble-engine |
 
 ### MongoDB
@@ -774,11 +791,11 @@ All model artifacts and metrics are stored to MLflow at `http://mlflow:5000`.
 | **sentiment-agent** | `agent.signals` (sentiment) | `market.data.sentiment` | — | — | Read `news` | — |
 | **macro-agent** | `agent.signals` (macro) | `market.data.macro` | — | Read/Write `macro:*` | — | External macro APIs |
 | **pattern-agent** | `agent.signals` (pattern) | `market.data.pattern` | Read `ohlcv` | — | — | — |
-| **rl-agent** | `agent.signals` (rl) | `market.data.rl`, `trade.outcomes.rl` | Read `ohlcv`, `rl_experiences` | Read | — | — |
+| **rl-agent** | `agent.signals` (rl) | `market.data.rl`, `trade.outcomes.rl` | Read `ohlcv` | Read | — | — |
 | **ensemble-engine** | `ensemble.decision` | `agent.signals` (×5) | Read `agent_weights` | Write `ensemble:*` | — | — |
 | **risk-engine** | `risk.validated` | `ensemble.decision` | — | — | — | — |
 | **trade-executor** | `trade.outcomes` | `risk.validated` | — | — | — | Groww API |
-| **feedback-service** | `model.retrain` | `trade.outcomes.feedback` | Write `trade_records`, `rl_experiences`, `agent_weights` | — | — | — |
+| **feedback-service** | `model.retrain` | `trade.outcomes.feedback` | Write `trade_records`, `agent_weights` | — | — | — |
 | **model-trainer** | — | `model.retrain` | Read all | — | — | MLflow |
 | **backend** | — | — | Read/Write `users` | Read `tick:*`, `ensemble:*` | Read/Write `alerts`, `sentiment_scores` | Groww API, feedback-service |
 
