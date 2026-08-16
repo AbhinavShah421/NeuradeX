@@ -8,7 +8,8 @@ exchange: "NSE" | "BSE" | "BOTH"
 STOCKS: list[dict] = [
     # ── Automobile & Auto Components ──────────────────────────────────────────
     {"symbol": "MARUTI",        "name": "Maruti Suzuki India",             "sector": "Automobile",        "exchange": "BOTH"},
-    {"symbol": "TATAMOTORS",    "name": "Tata Motors",                     "sector": "Automobile",        "exchange": "BOTH"},
+    {"symbol": "TMCV",          "name": "Tata Motors (Commercial Vehicles)", "sector": "Automobile",      "exchange": "BOTH"},
+    {"symbol": "TMPV",          "name": "Tata Motors Passenger Vehicles",  "sector": "Automobile",        "exchange": "BOTH"},
     {"symbol": "M&M",           "name": "Mahindra & Mahindra",             "sector": "Automobile",        "exchange": "BOTH"},
     {"symbol": "BAJAJ-AUTO",    "name": "Bajaj Auto",                      "sector": "Automobile",        "exchange": "BOTH"},
     {"symbol": "HEROMOTOCO",    "name": "Hero MotoCorp",                   "sector": "Automobile",        "exchange": "BOTH"},
@@ -193,7 +194,6 @@ STOCKS: list[dict] = [
     {"symbol": "WIPRO",         "name": "Wipro",                           "sector": "Information Technology","exchange": "BOTH"},
     {"symbol": "HCLTECH",       "name": "HCL Technologies",                "sector": "Information Technology","exchange": "BOTH"},
     {"symbol": "TECHM",         "name": "Tech Mahindra",                   "sector": "Information Technology","exchange": "BOTH"},
-    {"symbol": "LTIM",          "name": "LTIMindtree",                     "sector": "Information Technology","exchange": "NSE"},
     {"symbol": "MPHASIS",       "name": "Mphasis",                         "sector": "Information Technology","exchange": "NSE"},
     {"symbol": "PERSISTENT",    "name": "Persistent Systems",              "sector": "Information Technology","exchange": "NSE"},
     {"symbol": "COFORGE",       "name": "Coforge",                         "sector": "Information Technology","exchange": "NSE"},
@@ -249,7 +249,6 @@ STOCKS: list[dict] = [
     {"symbol": "OIL",           "name": "Oil India",                       "sector": "Oil & Gas",         "exchange": "NSE"},
     {"symbol": "MGL",           "name": "Mahanagar Gas",                   "sector": "Oil & Gas",         "exchange": "NSE"},
     {"symbol": "IGL",           "name": "Indraprastha Gas",                "sector": "Oil & Gas",         "exchange": "NSE"},
-    {"symbol": "GUJGASLTD",     "name": "Gujarat Gas",                     "sector": "Oil & Gas",         "exchange": "NSE"},
     {"symbol": "CASTROLIND",    "name": "Castrol India",                   "sector": "Oil & Gas",         "exchange": "NSE"},
 
     # ── Power ─────────────────────────────────────────────────────────────────
@@ -286,7 +285,7 @@ STOCKS: list[dict] = [
     {"symbol": "VMART",         "name": "V-Mart Retail",                   "sector": "Retail",            "exchange": "NSE"},
     {"symbol": "SHOPERSTOP",    "name": "Shoppers Stop",                   "sector": "Retail",            "exchange": "NSE"},
     {"symbol": "NYKAA",         "name": "FSN E-Commerce Ventures (Nykaa)", "sector": "Retail",            "exchange": "NSE"},
-    {"symbol": "ZOMATO",        "name": "Zomato",                          "sector": "Retail",            "exchange": "NSE"},
+    {"symbol": "ETERNAL",       "name": "Eternal (Zomato)",                "sector": "Retail",            "exchange": "NSE"},
     {"symbol": "SWIGGY",        "name": "Bundl Technologies (Swiggy)",     "sector": "Retail",            "exchange": "NSE"},
     {"symbol": "JUBLFOOD",      "name": "Jubilant Foodworks",              "sector": "Retail",            "exchange": "NSE"},
     {"symbol": "DEVYANI",       "name": "Devyani International",           "sector": "Retail",            "exchange": "NSE"},
@@ -337,7 +336,6 @@ STOCKS: list[dict] = [
     {"symbol": "XPRO",          "name": "Xpro India",                      "sector": "Logistics",         "exchange": "NSE"},
     {"symbol": "IRCTC",         "name": "Indian Railway Catering and Tourism","sector": "Logistics",      "exchange": "NSE"},
     {"symbol": "INTERGLOBE",    "name": "InterGlobe Aviation (IndiGo)",    "sector": "Logistics",         "exchange": "NSE"},
-    {"symbol": "SPICEJET",      "name": "SpiceJet",                        "sector": "Logistics",         "exchange": "NSE"},
 
     # ── Defence & Aerospace ───────────────────────────────────────────────────
     {"symbol": "HAL",           "name": "Hindustan Aeronautics",           "sector": "Defence",           "exchange": "NSE"},

@@ -25,7 +25,7 @@ THEME_SEEDS: dict[str, dict] = {
     "ev_mobility": {
         "name": "EV & Mobility", "emoji": "🔋",
         "thesis": "The shift to electric vehicles — makers, battery & component suppliers, and charging.",
-        "symbols": ["TATAMOTORS", "M&M", "BAJAJ-AUTO", "TVSMOTOR", "HEROMOTOCO", "EICHERMOT",
+        "symbols": ["TMPV", "M&M", "BAJAJ-AUTO", "TVSMOTOR", "HEROMOTOCO", "EICHERMOT",
                      "EXIDEIND", "AMARAJABAT", "BOSCHLTD", "MOTHERSON", "SONACOMS", "UNOMINDA"],
     },
     "green_energy": {
@@ -43,8 +43,8 @@ THEME_SEEDS: dict[str, dict] = {
     "digital_ai": {
         "name": "Digital India & IT", "emoji": "💻",
         "thesis": "Software exports, digital platforms and the AI/data build-out.",
-        "symbols": ["TCS", "INFY", "HCLTECH", "WIPRO", "TECHM", "LTIM", "PERSISTENT",
-                     "COFORGE", "MPHASIS", "KPITTECH", "TATAELXSI", "ZOMATO", "PAYTM", "NYKAA"],
+        "symbols": ["TCS", "INFY", "HCLTECH", "WIPRO", "TECHM", "PERSISTENT",
+                     "COFORGE", "MPHASIS", "KPITTECH", "TATAELXSI", "ETERNAL", "PAYTM", "NYKAA"],
     },
     "banking_finance": {
         "name": "Banking & Financials", "emoji": "🏦",

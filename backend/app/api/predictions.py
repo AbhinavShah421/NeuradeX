@@ -270,7 +270,7 @@ async def custom_analysis(symbol: str):
 
 
 @router.get("/{symbol}/history")
-async def get_prediction_history(symbol: str = "AAPL", limit: int = 10):
+async def get_prediction_history(symbol: str = "RELIANCE", limit: int = 10):
     """Get prediction history for a stock"""
     try:
         from datetime import timedelta
