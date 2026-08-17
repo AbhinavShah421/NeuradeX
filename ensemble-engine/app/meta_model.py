@@ -9,7 +9,17 @@ logger = logging.getLogger(__name__)
 _meta_model = None
 _meta_loaded = False
 
-AGENT_NAMES = ["technical", "pattern", "sentiment", "rl", "macro"]
+# MUST stay identical to AGENT_NAMES in
+# model-trainer/app/trainers/meta_trainer.py — the trainer emits features in
+# this exact order and this module must rebuild them the same way. The two
+# cannot import from each other (separate services), so any change here needs
+# the same change there, and a model trained before the change must be
+# re-registered rather than loaded against the new layout.
+AGENT_NAMES = [
+    "technical", "pattern", "sentiment", "rl", "macro",
+    "momentum", "volatility", "memory", "meanrev", "regime",
+    "anomaly", "gbm", "day_structure",
+]
 _SIGNAL_ENCODE = {"BUY": 1.0, "SELL": -1.0, "HOLD": 0.0}
 
 
@@ -23,8 +33,16 @@ def load_meta_model(tracking_uri: str) -> bool:
         if not versions:
             versions = client.get_latest_versions("ensemble-meta-model", stages=["Staging"])
         if not versions:
-            # Try any version (None stage = just registered)
-            all_v = client.search_model_versions("name='ensemble-meta-model'")
+            # Any non-archived version (None stage = just registered).
+            # Archived MUST be filtered here: nothing was ever promoted to
+            # Production/Staging, so this fallback is the branch that always
+            # runs — and without the filter, archiving a bad model had no
+            # effect at all. That is how v67 (trained on constant features and
+            # scored on a reversed split) stayed live as a decision gate.
+            all_v = [
+                v for v in client.search_model_versions("name='ensemble-meta-model'")
+                if (v.current_stage or "None") != "Archived"
+            ]
             if all_v:
                 versions = [sorted(all_v, key=lambda v: int(v.version), reverse=True)[0]]
         if not versions:
@@ -40,17 +58,42 @@ def load_meta_model(tracking_uri: str) -> bool:
         return False
 
 
-def _build_meta_features(agent_votes: dict, ensemble_confidence: float) -> list[float]:
-    feats: list[float] = []
-    for agent in AGENT_NAMES:
-        vote = agent_votes.get(agent, {})
-        feats.append(_SIGNAL_ENCODE.get(vote.get("signal", "HOLD"), 0.0))
-        feats.append(float(vote.get("confidence", 0.5)))
+def _vote_signal(raw) -> Optional[str]:
+    """One agent's vote from either payload shape — nested {"signal": ...} as
+    the live collector produces, or a bare "BUY" string as trade_records stores.
+    Returns None when the agent is not on this panel."""
+    if isinstance(raw, str):
+        sig = raw.strip().upper()
+        return sig if sig in _SIGNAL_ENCODE else None
+    if isinstance(raw, dict):
+        sig = str(raw.get("signal", "")).strip().upper()
+        return sig if sig in _SIGNAL_ENCODE else None
+    return None
 
-    signals = [agent_votes.get(a, {}).get("signal", "HOLD") for a in AGENT_NAMES]
-    feats.append(float(signals.count("BUY")))
-    feats.append(float(signals.count("SELL")))
-    feats.append(float(signals.count("HOLD")))
+
+def _build_meta_features(agent_votes: dict, ensemble_confidence: float) -> list[float]:
+    """Mirrors _extract_features in meta_trainer.py exactly: per agent a signal
+    encoding and a PRESENCE flag, then the three vote counts and the ensemble
+    confidence. 13 * 2 + 3 + 1 = 30 features.
+
+    Presence replaced per-agent confidence because the trainer reads
+    trade_records, whose stored agent_signals is a flat {agent: "BUY"} map with
+    no confidence to recover — so the old confidence slot was a constant 0.5 on
+    the training side and a real number here, meaning the model was scored on
+    one distribution and served another. Presence also separates "voted HOLD"
+    from "not on this panel", which both encode to 0.0 in the signal slot."""
+    feats: list[float] = []
+    votes: list[str] = []
+    for agent in AGENT_NAMES:
+        sig = _vote_signal(agent_votes.get(agent))
+        feats.append(_SIGNAL_ENCODE.get(sig, 0.0) if sig else 0.0)
+        feats.append(1.0 if sig else 0.0)
+        if sig:
+            votes.append(sig)
+
+    feats.append(float(votes.count("BUY")))
+    feats.append(float(votes.count("SELL")))
+    feats.append(float(votes.count("HOLD")))
     feats.append(float(ensemble_confidence))
     return feats
 

@@ -19,7 +19,13 @@ def load_calibrator(tracking_uri: str) -> bool:
         if not versions:
             versions = client.get_latest_versions("confidence-calibrator", stages=["Staging"])
         if not versions:
-            all_v = client.search_model_versions("name='confidence-calibrator'")
+            # Any non-archived version. Same reasoning as meta_model.py: no
+            # version has ever been promoted, so this is the branch that always
+            # runs, and an unfiltered search makes archiving a no-op.
+            all_v = [
+                v for v in client.search_model_versions("name='confidence-calibrator'")
+                if (v.current_stage or "None") != "Archived"
+            ]
             if all_v:
                 versions = [sorted(all_v, key=lambda v: int(v.version), reverse=True)[0]]
         if not versions:

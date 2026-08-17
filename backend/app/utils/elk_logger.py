@@ -42,6 +42,24 @@ def _es_url() -> str:
     return os.getenv("ELASTICSEARCH_URL", "http://localhost:9200")
 
 
+# Standard LogRecord attributes. These must never be shipped: they are logging
+# internals, not caller context.
+#
+# The previous guard tested `key not in logging.LogRecord.__dict__`, which is the
+# CLASS dict (methods such as getMessage), not the per-record instance attribute
+# names set in LogRecord.__init__. So every one of these leaked into each
+# document — ~20 junk fields per log line. Worse, `args` holds the %-format
+# arguments and so has no stable type; Elasticsearch dynamically mapped it as
+# `long` from an early numeric value, after which every log line with string
+# args was REJECTED at index time and silently vanished from Kibana.
+_RESERVED = frozenset({
+    "args", "asctime", "created", "exc_info", "exc_text", "filename",
+    "funcName", "levelname", "levelno", "lineno", "message", "module",
+    "msecs", "msg", "name", "pathname", "process", "processName",
+    "relativeCreated", "stack_info", "thread", "threadName", "taskName",
+})
+
+
 class _ElasticsearchHandler(logging.Handler):
     """
     Non-blocking logging handler that bulk-indexes records to Elasticsearch.
@@ -103,7 +121,7 @@ class _ElasticsearchHandler(logging.Handler):
 
         # Attach any extra kwargs passed by the caller
         for key, val in record.__dict__.items():
-            if key not in logging.LogRecord.__dict__ and not key.startswith("_") and key not in doc:
+            if key not in _RESERVED and not key.startswith("_") and key not in doc:
                 doc[key] = val
 
         if record.exc_info:

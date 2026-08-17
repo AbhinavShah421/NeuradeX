@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from pydantic_settings import BaseSettings
 from pydantic import model_validator
 
-from app.weight_updater import compute_weight_updates, determine_outcome
+from app.weight_updater import compute_weight_updates, count_agent_hits, determine_outcome
 
 from app.elk_logger import setup_logging, get_logger
 setup_logging()
@@ -85,6 +85,23 @@ async def _save_weights(pool: asyncpg.Pool, weights: dict[str, float]) -> None:
         )
 
 
+async def _save_agent_hits(pool: asyncpg.Pool, hits: dict[str, bool]) -> None:
+    """Accumulate per-agent accuracy counters. Nothing ever wrote these columns,
+    so win_count/total_count read 0 for every agent regardless of the weight
+    loop's health — which made a dead loop indistinguishable from an idle one."""
+    for agent, correct in hits.items():
+        await pool.execute(
+            """
+            UPDATE agent_weights
+            SET total_count = total_count + 1,
+                win_count   = win_count + $1,
+                updated_at  = NOW()
+            WHERE agent = $2
+            """,
+            1 if correct else 0, agent,
+        )
+
+
 async def _store_trade_record(pool: asyncpg.Pool, payload: dict) -> None:
     # session_id may be passed as a top-level key or nested inside market_context
     ctx = payload.get("market_context") or {}
@@ -132,6 +149,51 @@ async def _store_trade_record(pool: asyncpg.Pool, payload: dict) -> None:
     )
 
 
+async def _apply_trade_outcome(pool: asyncpg.Pool, payload: dict) -> bool:
+    """Advance the learning loop for one CLOSED trade. Returns True if weights moved.
+
+    Shared by both ingest paths. It has to be shared: the RabbitMQ consumer had
+    this logic inline, but essentially every trade this system produces arrives
+    through POST /trades instead ("bypasses RabbitMQ"), which only stored the
+    row. That is why trade_records held 14,656 trades while agent_weights sat at
+    its 2026-05-30 seed values with every counter on zero — the loop was not
+    failing, it was never being invoked at all.
+    """
+    action = payload.get("action", "")
+    pnl_pct = payload.get("pnl_pct")
+    if pnl_pct is None or action not in ("BUY", "SELL"):
+        return False                      # still open, or not a directional leg
+
+    symbol = payload.get("symbol", "")
+    agent_signals = payload.get("agent_signals", {})
+    if isinstance(agent_signals, str):
+        try:
+            agent_signals = json.loads(agent_signals)
+        except Exception:
+            agent_signals = {}
+
+    outcome = determine_outcome(float(pnl_pct))
+    try:
+        current_weights = await _load_current_weights(pool)
+        new_weights = compute_weight_updates(
+            current_weights, agent_signals, outcome, action,
+            settings.WEIGHT_LEARNING_RATE,
+        )
+        await _save_weights(pool, new_weights)
+        await _save_agent_hits(pool, count_agent_hits(agent_signals, outcome, action))
+        logger.info(
+            "Weights updated for %s trade on %s (P&L: %.2f%%) → %s",
+            outcome, symbol, float(pnl_pct) * 100, new_weights,
+        )
+        return True
+    except Exception:
+        logger.exception(
+            "WEIGHT UPDATE FAILED for %s on %s — trade stored, "
+            "learning loop did NOT advance", action, symbol,
+        )
+        return False
+
+
 async def _maybe_trigger_retrain(pool: asyncpg.Pool, publisher_channel: aio_pika.Channel) -> None:
     global _trade_count_since_retrain
     _trade_count_since_retrain += 1
@@ -171,36 +233,20 @@ async def _consumer_loop() -> None:
                                     continue
                                 body = json.loads(message.body)
                                 payload = body.get("payload", body)
-                                symbol = payload.get("symbol", "")
-                                action = payload.get("action", "")
-                                pnl_pct = payload.get("pnl_pct")
-                                agent_signals = payload.get("agent_signals", {})
 
                                 # Store trade record
                                 await _store_trade_record(_pool, payload)
 
-                                # Update ensemble weights if trade is closed
-                                if pnl_pct is not None and action in ("BUY", "SELL"):
-                                    outcome = determine_outcome(float(pnl_pct))
-                                    current_weights = await _load_current_weights(_pool)
-                                    new_weights = compute_weight_updates(
-                                        current_weights,
-                                        agent_signals,
-                                        outcome,
-                                        action,
-                                        settings.WEIGHT_LEARNING_RATE,
-                                    )
-                                    await _save_weights(_pool, new_weights)
-                                    logger.info(
-                                        "Weights updated for %s trade on %s (P&L: %.2f%%) → %s",
-                                        outcome, symbol, float(pnl_pct) * 100, new_weights,
-                                    )
+                                # Advance the learning loop if the trade closed.
+                                # Shared with POST /trades so both ingest paths
+                                # behave identically.
+                                await _apply_trade_outcome(_pool, payload)
 
                                 # Trigger retraining if threshold reached
                                 await _maybe_trigger_retrain(_pool, channel)
 
-                            except Exception as exc:
-                                logger.error("Feedback message error: %s", exc)
+                            except Exception:
+                                logger.exception("Feedback message error — message dropped")
         except Exception as exc:
             logger.error("Feedback consumer lost: %s — retry 5s", exc)
             await asyncio.sleep(5)
@@ -286,19 +332,39 @@ async def get_weights():
     return {"weights": weights}
 
 
+# Trade sources whose outcomes are allowed to move live agent weights.
+# Operator-run replay/backtest sweeps must NOT: their outcomes depend on which
+# symbols and dates happened to be tested, and pooling them is precisely the
+# contamination that left ai_engine_agent_weights fitted to a frozen June replay
+# corpus (see backend/app/agents/learning.py _EXCLUDE_SIM_OUTCOMES). They are
+# still stored — only the weight update is skipped.
+_LEARNABLE_SOURCES = {"PAPER", "LIVE"}
+
+
 @app.post("/trades")
 async def post_trades(payload: list[dict]):
-    """Direct insert for backtest/paper trades — bypasses RabbitMQ."""
+    """Direct insert for backtest/paper trades — bypasses RabbitMQ.
+
+    Closed PAPER/LIVE trades also advance the weight loop here. This endpoint
+    is how essentially every trade in the system actually arrives, so when it
+    only stored rows, agent_weights never moved at all.
+    """
     if not _pool:
         return {"error": "not ready"}
     saved = 0
+    learned = 0
     for record in payload:
         try:
             await _store_trade_record(_pool, record)
             saved += 1
         except Exception as exc:
             logger.error("POST /trades insert error: %s", exc)
-    return {"saved": saved, "total": len(payload)}
+            continue
+        source = str(record.get("trade_source") or "LIVE").upper()
+        if source in _LEARNABLE_SOURCES:
+            if await _apply_trade_outcome(_pool, record):
+                learned += 1
+    return {"saved": saved, "total": len(payload), "learned": learned}
 
 
 @app.get("/trades")

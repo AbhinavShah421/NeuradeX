@@ -28,12 +28,49 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-AGENT_NAMES = ["technical", "pattern", "sentiment", "rl", "macro"]
+# Union of both ensemble panels. The backend session runner votes 12 agents
+# (no `macro`); the ensemble-engine votes 5 (including it). The old list held
+# only the ensemble-engine's five, so a session trade contributed nothing.
+AGENT_NAMES = [
+    "technical", "pattern", "sentiment", "rl", "macro",
+    "momentum", "volatility", "memory", "meanrev", "regime",
+    "anomaly", "gbm", "day_structure",
+]
 MIN_SAMPLES = 50
 META_MODEL_NAME = "ensemble-meta-model"
-MIN_ACCURACY = 0.52
+
+# AUC is the gate, because the ensemble-engine consumes this model's OUTPUT AS A
+# PROBABILITY (predict_win_probability) and thresholds it downstream — ranking
+# quality is what it needs, not argmax accuracy at 0.5.
+#
+# The old gate was raw accuracy >= 0.52, which is meaningless on a ~33/67
+# imbalanced label: always predicting LOSS scores 0.669, and that is exactly
+# what the last registered version scored. A constant predictor passed and was
+# then loaded as a live secondary gate. It would score AUC 0.5 here and be
+# rejected.
+#
+# Accuracy lift is logged but deliberately NOT gated on: a model with genuine
+# ranking skill (AUC 0.75) can still sit near the majority-class rate on
+# accuracy, and blocking it on that basis discards the signal the gate exists
+# to capture.
+MIN_AUC = 0.60
 
 _SIGNAL_ENCODE = {"BUY": 1, "SELL": -1, "HOLD": 0}
+
+
+def _agent_vote(raw) -> str | None:
+    """Read one agent's vote. Producers write a flat {"technical": "BUY"} map;
+    this module previously assumed a nested {"signal": ...} dict, so isinstance
+    sent every real row down the else-branch and emitted a constant feature
+    vector. Only `ensemble_confidence` varied, which is why the model could do
+    no better than the majority class."""
+    if isinstance(raw, str):
+        sig = raw.strip().upper()
+        return sig if sig in _SIGNAL_ENCODE else None
+    if isinstance(raw, dict):
+        sig = str(raw.get("signal", "")).strip().upper()
+        return sig if sig in _SIGNAL_ENCODE else None
+    return None
 
 
 def _extract_features(row: dict) -> list[float] | None:
@@ -44,16 +81,20 @@ def _extract_features(row: dict) -> list[float] | None:
         if not signals:
             return None
 
+        votes: list[str] = []
         feats: list[float] = []
         for agent in AGENT_NAMES:
-            sig = signals.get(agent, {})
-            if isinstance(sig, dict):
-                feats.append(float(_SIGNAL_ENCODE.get(sig.get("signal", "HOLD"), 0)))
-                feats.append(float(sig.get("confidence", 0.5)))
-            else:
-                feats.extend([0.0, 0.5])
+            vote = _agent_vote(signals.get(agent))
+            feats.append(float(_SIGNAL_ENCODE.get(vote, 0)) if vote else 0.0)
+            # Presence flag: distinguishes "voted HOLD" from "not on this panel",
+            # which both encode to 0 in the line above.
+            feats.append(1.0 if vote else 0.0)
+            if vote:
+                votes.append(vote)
 
-        votes = [signals.get(a, {}).get("signal", "HOLD") for a in AGENT_NAMES if isinstance(signals.get(a), dict)]
+        if not votes:
+            return None
+
         feats.append(float(votes.count("BUY")))
         feats.append(float(votes.count("SELL")))
         feats.append(float(votes.count("HOLD")))
@@ -67,13 +108,23 @@ def _extract_features(row: dict) -> list[float] | None:
 async def _load_trade_records(postgres_url: str) -> list[dict]:
     conn = await asyncpg.connect(postgres_url)
     try:
+        # Most recent 5000, returned OLDEST-FIRST. train_meta_model splits
+        # X[:80%] into train and X[80%:] into test, so a DESC ordering here
+        # trained the model on the newest trades and evaluated it on the
+        # oldest — fitting the future to predict the past, which inflates
+        # every reported metric. The inner LIMIT still selects recent history;
+        # the outer sort makes the split chronological.
         rows = await conn.fetch(
             """
             SELECT agent_signals, ensemble_confidence, outcome
-            FROM trade_records
-            WHERE outcome IN ('WIN', 'LOSS')
-            ORDER BY created_at DESC
-            LIMIT 5000
+            FROM (
+                SELECT agent_signals, ensemble_confidence, outcome, created_at
+                FROM trade_records
+                WHERE outcome IN ('WIN', 'LOSS')
+                ORDER BY created_at DESC
+                LIMIT 5000
+            ) recent
+            ORDER BY created_at ASC
             """
         )
         return [dict(r) for r in rows]
@@ -141,9 +192,21 @@ async def train_meta_model(postgres_url: str, mlflow_uri: str) -> bool:
     accuracy = float((y_pred == y_test).mean())
     win_rate = float(y_test.mean())
 
+    # The bar a constant predictor clears for free.
+    baseline = max(win_rate, 1.0 - win_rate)
+    lift = accuracy - baseline
+
+    try:
+        from sklearn.metrics import roc_auc_score
+        y_prob = model.predict_proba(X_test)[:, 1]
+        auc = float(roc_auc_score(y_test, y_prob)) if len(set(y_test.tolist())) > 1 else 0.5
+    except Exception:
+        auc = 0.5
+
     logger.info(
-        "Meta-model accuracy=%.4f  win_rate_in_test=%.4f  samples=%d",
-        accuracy, win_rate, n,
+        "Meta-model accuracy=%.4f  baseline=%.4f  lift=%+.4f  auc=%.4f  "
+        "win_rate_in_test=%.4f  samples=%d",
+        accuracy, baseline, lift, auc, win_rate, n,
     )
 
     mlflow.set_tracking_uri(mlflow_uri)
@@ -151,21 +214,28 @@ async def train_meta_model(postgres_url: str, mlflow_uri: str) -> bool:
 
     with mlflow.start_run(run_name=f"meta_{datetime.utcnow().strftime('%Y%m%d_%H%M')}"):
         mlflow.log_metric("accuracy", accuracy)
+        mlflow.log_metric("baseline", baseline)
+        mlflow.log_metric("lift", lift)
+        mlflow.log_metric("auc", auc)
         mlflow.log_metric("win_rate", win_rate)
         mlflow.log_metric("train_samples", len(X_train))
         mlflow.log_metric("test_samples", len(X_test))
 
-        if accuracy >= MIN_ACCURACY:
+        if auc >= MIN_AUC:
             mlflow.sklearn.log_model(
                 model,
                 artifact_path="model",
                 registered_model_name=META_MODEL_NAME,
             )
-            logger.info("Registered meta-model '%s' (accuracy=%.4f)", META_MODEL_NAME, accuracy)
+            logger.info(
+                "Registered meta-model '%s' (auc=%.4f, accuracy=%.4f vs baseline %.4f, lift=%+.4f)",
+                META_MODEL_NAME, auc, accuracy, baseline, lift,
+            )
             return True
         else:
             logger.warning(
-                "Meta-model accuracy %.4f < threshold %.4f — NOT registered",
-                accuracy, MIN_ACCURACY,
+                "Meta-model NOT registered — auc %.4f below threshold %.4f "
+                "(accuracy %.4f vs majority-class %.4f, lift %+.4f)",
+                auc, MIN_AUC, accuracy, baseline, lift,
             )
             return False

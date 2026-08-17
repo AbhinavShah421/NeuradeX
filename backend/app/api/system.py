@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import html
 import re
+import time
 from datetime import datetime
 
 import httpx
@@ -146,12 +147,23 @@ def _scan_severity(text: str) -> str:
     return "ok"
 
 
+# Only logs from the recent past count toward severity. Without a time bound,
+# `tail=200` on a QUIET service can reach back days: MLflow's gunicorn worker
+# timeouts from 2026-08-16 kept it flagged for a full day after the underlying
+# problem was fixed, and one-off psql syntax errors from an operator's ad-hoc
+# query pinned PostgreSQL to "error" indefinitely. A warning that cannot clear
+# itself trains you to ignore the panel.
+_SEVERITY_WINDOW_S = 6 * 3600
+
+
 async def _severity_for(client: httpx.AsyncClient, name: str, tail: int = 200) -> str:
-    """Fetch the last `tail` log lines and classify their worst severity."""
+    """Worst severity in the last `tail` lines, restricted to the recent window."""
     try:
+        since = int(time.time()) - _SEVERITY_WINDOW_S
         r = await client.get(
             f"/containers/{name}/logs",
-            params={"stdout": 1, "stderr": 1, "tail": tail, "timestamps": 0},
+            params={"stdout": 1, "stderr": 1, "tail": tail,
+                    "timestamps": 0, "since": since},
             timeout=6.0,
         )
         r.raise_for_status()

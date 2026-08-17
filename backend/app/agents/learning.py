@@ -19,10 +19,25 @@ _CF_RATE_WEIGHT     = 0.5  # counterfactual samples count at half a real outcome
 # past exit-policy bugs (e.g. the hold-cap parity bug that lost -1.5% on a batch
 # of large caps), so pooling them dragged agents' displayed BUY accuracy from
 # ~100% on real paper trades to ~34%, and — worse — degraded the live per-action
-# weights. Keeps paper/live real outcomes and manual-analysis predictions (no
-# session); systematic counterfactual labels are merged in separately at
+# weights. Systematic counterfactual labels are merged in separately at
 # _CF_RATE_WEIGHT. Mirrors the pattern-memory source weighting.
-_EXCLUDE_SIM_OUTCOMES = """
+#
+# The session_metadata join alone did not work (audited 2026-08-17). That table
+# only starts on _SESSION_META_EPOCH, and every prediction written before it
+# carries no session_id at all — so the NOT EXISTS matched nothing and passed
+# the entire pre-epoch replay corpus straight through. Of the 13,311 outcomes
+# this filter was admitting as "real", 13,210 (99.2%) were exactly the replay
+# bulk it exists to remove, leaving 98 genuine samples. Every learned weight was
+# therefore a fit to a frozen June replay dataset.
+#
+# Provenance before the epoch cannot be established retroactively, so those rows
+# are excluded wholesale. That is deliberately stricter than the original intent
+# (which kept session-less rows as "manual analysis"): a handful of genuine
+# manual predictions is not worth re-admitting 13k simulated ones.
+_SESSION_META_EPOCH = "2026-06-29"
+
+_EXCLUDE_SIM_OUTCOMES = f"""
+    AND p.created_at >= '{_SESSION_META_EPOCH}'
     AND NOT EXISTS (
         SELECT 1 FROM session_metadata sm
         WHERE sm.session_id = p.context::jsonb->>'session_id'
