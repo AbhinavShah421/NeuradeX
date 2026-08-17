@@ -422,10 +422,15 @@ async def _learning_loops() -> list[dict]:
         "nightly retrain",
         "Nightly GBM retrain at 03:00 IST, daily + intraday slots.",
     ))
+    # 96h, not 48h: labelling only runs on COMPLETED trading days, so the gap
+    # from Friday evening to Monday evening is legitimately ~72h with nothing
+    # wrong. A 48h limit raised a false "stale" every Monday — and a warning
+    # that fires on a healthy weekend teaches you to ignore the panel.
     out.append(_loop(
-        "counterfactual", "Counterfactual labelling", _age_hours(cf[0] if cf else None), 48,
-        "labels the decisions the gates declined",
-        "Off-hours sweep; feeds action-rates, RL and pattern memory.",
+        "counterfactual", "Counterfactual labelling", _age_hours(cf[0] if cf else None), 96,
+        "labels the decisions the gates declined (completed days only)",
+        "Off-hours sweep; feeds action-rates, RL and pattern memory. "
+        "Today's decisions are labelled once the day closes.",
     ))
     out.append(_loop(
         "pattern_memory", "Pattern memory bank", _age_hours(mem[0] if mem else None), 168,

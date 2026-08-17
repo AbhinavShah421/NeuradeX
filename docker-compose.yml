@@ -5,6 +5,7 @@ services:
   postgres:
     image: timescale/timescaledb:latest-pg15
     container_name: stock-prediction-postgres
+    restart: unless-stopped
     environment:
       POSTGRES_USER: stock_user
       POSTGRES_PASSWORD: stock_password
@@ -40,6 +41,7 @@ services:
   mongodb:
     image: mongo:6
     container_name: stock-prediction-mongodb
+    restart: unless-stopped
     environment:
       MONGO_INITDB_ROOT_USERNAME: stock_admin
       MONGO_INITDB_ROOT_PASSWORD: stock_password
@@ -64,6 +66,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: stock-prediction-redis
+    restart: unless-stopped
     ports:
       - "6379:6379"
     volumes:
@@ -84,6 +87,7 @@ services:
   rabbitmq:
     image: rabbitmq:3.12-management-alpine
     container_name: stock-prediction-rabbitmq
+    restart: unless-stopped
     environment:
       RABBITMQ_DEFAULT_USER: guest
       RABBITMQ_DEFAULT_PASS: guest
@@ -108,6 +112,7 @@ services:
   influxdb:
     image: influxdb:2-alpine
     container_name: stock-prediction-influxdb
+    restart: unless-stopped
     environment:
       DOCKER_INFLUXDB_INIT_MODE: setup
       DOCKER_INFLUXDB_INIT_USERNAME: stock_user
@@ -135,6 +140,7 @@ services:
   elasticsearch:
     image: elasticsearch:8.11.0
     container_name: stock-prediction-elasticsearch
+    restart: unless-stopped
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=false
@@ -187,6 +193,7 @@ services:
   kibana:
     image: kibana:8.11.0
     container_name: stock-prediction-kibana
+    restart: unless-stopped
     environment:
       - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
       - xpack.security.enabled=false
@@ -240,6 +247,7 @@ services:
   mlflow:
     image: ghcr.io/mlflow/mlflow:v2.10.0
     container_name: stock-prediction-mlflow
+    restart: unless-stopped
     ports:
       - "5000:5000"
     volumes:
@@ -277,6 +285,7 @@ services:
       context: ./backend
       dockerfile: ../docker/Dockerfile.backend
     container_name: stock-prediction-backend
+    restart: unless-stopped
     env_file:
       - ./backend/.env
     environment:
@@ -348,6 +357,7 @@ services:
       context: ./backend
       dockerfile: ../docker/Dockerfile.backend
     container_name: stock-prediction-session-runner
+    restart: unless-stopped
     env_file:
       - ./backend/.env
     environment:
@@ -401,6 +411,7 @@ services:
       context: ./market-data-service
       dockerfile: Dockerfile
     container_name: stock-prediction-market-data
+    restart: unless-stopped
     env_file:
       - ./backend/.env
     environment:
@@ -441,6 +452,7 @@ services:
       context: ./technical-agent
       dockerfile: Dockerfile
     container_name: stock-prediction-technical-agent
+    restart: unless-stopped
     env_file:
       - ./backend/.env
     environment:
@@ -515,6 +527,7 @@ services:
       context: ./macro-agent
       dockerfile: Dockerfile
     container_name: stock-prediction-macro-agent
+    restart: unless-stopped
     env_file:
       - ./backend/.env
     environment:
@@ -544,6 +557,7 @@ services:
       context: ./pattern-agent
       dockerfile: Dockerfile
     container_name: stock-prediction-pattern-agent
+    restart: unless-stopped
     env_file:
       - ./backend/.env
     environment:
@@ -573,6 +587,7 @@ services:
       context: ./rl-agent
       dockerfile: Dockerfile
     container_name: stock-prediction-rl-agent
+    restart: unless-stopped
     env_file:
       - ./backend/.env
     environment:
@@ -608,6 +623,7 @@ services:
       context: ./ensemble-engine
       dockerfile: Dockerfile
     container_name: stock-prediction-ensemble-engine
+    restart: unless-stopped
     env_file:
       - ./backend/.env
     environment:
@@ -641,6 +657,7 @@ services:
       context: ./feedback-service
       dockerfile: Dockerfile
     container_name: stock-prediction-feedback-service
+    restart: unless-stopped
     env_file:
       - ./backend/.env
     environment:
@@ -717,6 +734,7 @@ services:
       context: ./autopilot-service
       dockerfile: Dockerfile
     container_name: stock-prediction-autopilot
+    restart: unless-stopped
     environment:
       REDIS_HOST: redis
       REDIS_PORT: "6379"
@@ -824,6 +842,7 @@ services:
       context: ./sentiment-service
       dockerfile: Dockerfile
     container_name: stock-prediction-sentiment
+    restart: unless-stopped
     environment:
       REDIS_HOST: redis
       REDIS_PORT: "6379"
@@ -856,6 +875,7 @@ services:
       context: ./model-trainer
       dockerfile: Dockerfile
     container_name: stock-prediction-model-trainer
+    restart: unless-stopped
     env_file:
       - ./backend/.env
     environment:
@@ -898,6 +918,7 @@ services:
       context: ./risk-engine
       dockerfile: Dockerfile
     container_name: stock-prediction-risk-engine
+    restart: unless-stopped
     environment:
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_PORT: "5672"
@@ -929,6 +950,7 @@ services:
       context: ./trade-executor
       dockerfile: Dockerfile
     container_name: stock-prediction-trade-executor
+    restart: unless-stopped
     env_file:
       - ./backend/.env
     environment:
@@ -957,6 +979,7 @@ services:
       context: ./frontend
       dockerfile: ../docker/Dockerfile.frontend
     container_name: stock-prediction-frontend
+    restart: unless-stopped
     ports:
       - "3000:3000"
     environment:
@@ -977,6 +1000,7 @@ services:
       context: ./docs-site
       dockerfile: Dockerfile
     container_name: stock-prediction-docs
+    restart: unless-stopped
     ports:
       - "3001:3001"
     networks:
@@ -1010,6 +1034,7 @@ services:
   nginx:
     image: nginx:alpine
     container_name: stock-prediction-nginx
+    restart: unless-stopped
     ports:
       - "80:80"
       - "443:443"
