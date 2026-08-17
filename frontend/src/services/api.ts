@@ -17,32 +17,77 @@ function convertKeys(obj: unknown): unknown {
   return obj;
 }
 
+function attachAuth(instance: AxiosInstance): AxiosInstance {
+  instance.interceptors.request.use(config => {
+    try {
+      const raw = localStorage.getItem('neuradex-auth');
+      if (raw) {
+        const stored = JSON.parse(raw);
+        const token = stored?.state?.token;
+        if (token) config.headers['Authorization'] = `Bearer ${token}`;
+      }
+    } catch {}
+    return config;
+  });
+  return instance;
+}
+
 class ApiService {
   private api: AxiosInstance;
+  /** Same auth and base URL, but NO response transform. The app-wide instance
+   *  camelCases every key, which is right for components and wrong for the
+   *  System Map's request runner: a tool for inspecting what an endpoint
+   *  actually returns must not rewrite the payload on the way in. */
+  private rawApi: AxiosInstance;
 
   constructor() {
-    this.api = axios.create({
+    this.api = attachAuth(axios.create({
       baseURL: API_BASE_URL,
       headers: { 'Content-Type': 'application/json' },
-    });
-
-    // Attach JWT from localStorage on every request
-    this.api.interceptors.request.use(config => {
-      try {
-        const raw = localStorage.getItem('neuradex-auth');
-        if (raw) {
-          const stored = JSON.parse(raw);
-          const token = stored?.state?.token;
-          if (token) config.headers['Authorization'] = `Bearer ${token}`;
-        }
-      } catch {}
-      return config;
-    });
+    }));
 
     this.api.interceptors.response.use(response => {
       response.data = convertKeys(response.data);
       return response;
     });
+
+    this.rawApi = attachAuth(axios.create({
+      baseURL: API_BASE_URL,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+  }
+
+  /** Execute an arbitrary endpoint — the System Map's "try it" runner.
+   *  Returns the response verbatim (no key transform) and never throws on a
+   *  non-2xx: an error body is exactly what you are trying to see. */
+  async executeRequest(
+    method: string,
+    url: string,
+    opts: { params?: Record<string, any>; data?: any } = {},
+  ): Promise<{ status: number; statusText: string; durationMs: number; data: any; headers: any; error?: string }> {
+    const started = performance.now();
+    try {
+      const r = await this.rawApi.request({
+        method: method.toLowerCase() as any,
+        url,
+        params: opts.params,
+        data: opts.data,
+        validateStatus: () => true,
+        timeout: 60000,
+      });
+      return {
+        status: r.status, statusText: r.statusText,
+        durationMs: Math.round(performance.now() - started),
+        data: r.data, headers: r.headers,
+      };
+    } catch (e: any) {
+      // Network-level failure: no response at all (CORS, timeout, DNS).
+      return {
+        status: 0, statusText: 'no response',
+        durationMs: Math.round(performance.now() - started),
+        data: null, headers: {}, error: e?.message || 'request failed',
+      };
+    }
   }
 
   // Auth API
@@ -1113,6 +1158,101 @@ class ApiService {
   async candleCoverage(): Promise<ApiResponse<any>> {
     const response = await this.api.get('/api/system/candles/coverage', { timeout: 15000 });
     return response.data;
+  }
+
+  // ── Live architecture monitor (on-demand; see backend app/api/monitor.py) ───
+  // The snapshot sweep is expensive, so it only runs while a session is armed.
+  // startMonitor arms it, heartbeat keeps it alive while the page is open, and
+  // stopMonitor disarms on close; the server-side TTL covers a dead browser.
+  async startMonitor(): Promise<any> {
+    const response = await this.api.post('/api/monitor/session/start', null, { timeout: 10000 });
+    return response.data;
+  }
+
+  async heartbeatMonitor(): Promise<any> {
+    const response = await this.api.post('/api/monitor/session/heartbeat', null, { timeout: 10000 });
+    return response.data;
+  }
+
+  async stopMonitor(): Promise<any> {
+    const response = await this.api.post('/api/monitor/session/stop', null, { timeout: 10000 });
+    return response.data;
+  }
+
+  async getMonitorSnapshot(): Promise<any> {
+    const response = await this.api.get('/api/monitor/snapshot', { timeout: 45000 });
+    return response.data;
+  }
+
+  async getMonitorLogs(name: string, tail = 200): Promise<any> {
+    const response = await this.api.get(`/api/monitor/logs/${name}`, {
+      params: { tail }, timeout: 20000,
+    });
+    return response.data;
+  }
+
+  /** Code-level detail for one component: entry point, method-level flow with
+   *  live-resolved line numbers, queues/tables, gotchas and Kibana deep links. */
+  async getMonitorComponent(nodeId: string): Promise<any> {
+    const response = await this.api.get(`/api/monitor/component/${nodeId}`, { timeout: 20000 });
+    return response.data;
+  }
+
+  /** Frontend pages/components that call the API, derived by parsing the repo. */
+  async getMonitorPages(): Promise<any> {
+    const response = await this.api.get('/api/monitor/pages', { timeout: 20000 });
+    return response.data;
+  }
+
+  /** One page: every API call it makes, what triggers it, and the end-to-end
+   *  chain from call site → nginx → backend handler. */
+  async getMonitorPage(name: string): Promise<any> {
+    const response = await this.api.get(`/api/monitor/page/${name}`, { timeout: 20000 });
+    return response.data;
+  }
+
+  /** Real request→response exchanges for one API path, read straight from
+   *  Elasticsearch. Rendered in-page so request-level debugging does not depend
+   *  on Kibana booting over a tunnel. */
+  async getMonitorRequests(path: string, limit = 25): Promise<any> {
+    const response = await this.api.get('/api/monitor/requests', {
+      params: { path, limit }, timeout: 20000,
+    });
+    return response.data;
+  }
+
+  // ── Log store: size, retention window, manual purge ──────────────────────
+  async getLogStore(): Promise<any> {
+    const r = await this.api.get('/api/monitor/logs-store', { timeout: 20000 });
+    return r.data;
+  }
+
+  async setLogRetention(days: number): Promise<any> {
+    const r = await this.api.post('/api/monitor/logs-store/retention', null,
+      { params: { days }, timeout: 20000 });
+    return r.data;
+  }
+
+  /** Drop indices past the window. `dryRun` reports without deleting. */
+  async pruneLogs(dryRun = false): Promise<any> {
+    const r = await this.api.post('/api/monitor/logs-store/prune', null,
+      { params: { dry_run: dryRun }, timeout: 120000 });
+    return r.data;
+  }
+
+  /** Destructive: clears every dated index (today's kept unless keepToday=false). */
+  async purgeLogs(keepToday = true): Promise<any> {
+    const r = await this.api.post('/api/monitor/logs-store/purge', null,
+      { params: { keep_today: keepToday }, timeout: 120000 });
+    return r.data;
+  }
+
+  /** Absolute URL for the stop endpoint — `navigator.sendBeacon` takes a raw URL
+   *  and cannot go through the axios instance, so it needs the same base the
+   *  client is configured with (the app is served under /neuradex, so a bare
+   *  relative path would miss the API prefix). */
+  monitorStopUrl(): string {
+    return `${API_BASE_URL || ''}/api/monitor/session/stop`;
   }
 
   // ── Data recordings (dedicated dataset capture for a coming trading day) ─────

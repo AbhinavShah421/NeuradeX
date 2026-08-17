@@ -61,20 +61,42 @@ async def train_calibrator(postgres_url: str, mlflow_uri: str) -> bool:
         logger.warning("Calibration trainer: only %d samples — need %d, skipping", n, MIN_SAMPLES)
         return False
 
-    # Platt scaling: fit a logistic regression on raw confidence → win label
+    # Chronological holdout. Previously this fit on X and then scored Brier on
+    # THE SAME X, comparing it to a constant-mean baseline. A 2-parameter
+    # logistic regression minimising log-loss essentially always wins that
+    # comparison in-sample, so `brier < baseline_brier` was very nearly a
+    # tautology and the trainer registered a new version on every single run
+    # (71 of them) whether or not the confidence score carried any signal.
+    # Rows arrive ordered by created_at ASC, so this split is train-on-past /
+    # test-on-future, and both the model and the baseline are now scored on
+    # data neither of them saw.
+    split = int(n * 0.8)
+    X_train, X_test = X[:split], X[split:]
+    y_train, y_test = y[:split], y[split:]
+
+    if len(X_test) < 10 or len(set(y_test.tolist())) < 2:
+        logger.warning(
+            "Calibration trainer: holdout too small or single-class "
+            "(%d rows) — NOT registered", len(X_test),
+        )
+        return False
+
     calibrator = LogisticRegression(C=1.0, max_iter=1000, random_state=42)
-    calibrator.fit(X, y)
+    calibrator.fit(X_train, y_train)
 
-    calibrated_probs = calibrator.predict_proba(X)[:, 1]
-    brier = brier_score_loss(y, calibrated_probs)
-    logloss = log_loss(y, calibrated_probs)
+    calibrated_probs = calibrator.predict_proba(X_test)[:, 1]
+    brier = brier_score_loss(y_test, calibrated_probs)
+    logloss = log_loss(y_test, calibrated_probs, labels=[0, 1])
 
-    # Naive baseline: just predict the mean win rate everywhere
-    baseline_brier = brier_score_loss(y, np.full(n, y.mean()))
+    # Naive baseline: predict the TRAINING win rate on the holdout. Using the
+    # holdout's own mean would give the baseline information the model does
+    # not have, flattering the model by comparison.
+    baseline_brier = brier_score_loss(y_test, np.full(len(y_test), y_train.mean()))
 
     logger.info(
-        "Calibrator: Brier=%.4f (baseline=%.4f) LogLoss=%.4f samples=%d",
-        brier, baseline_brier, logloss, n,
+        "Calibrator: Brier=%.4f (baseline=%.4f) LogLoss=%.4f "
+        "train=%d test=%d",
+        brier, baseline_brier, logloss, len(X_train), len(X_test),
     )
 
     mlflow.set_tracking_uri(mlflow_uri)
@@ -85,6 +107,8 @@ async def train_calibrator(postgres_url: str, mlflow_uri: str) -> bool:
         mlflow.log_metric("baseline_brier", baseline_brier)
         mlflow.log_metric("log_loss", logloss)
         mlflow.log_metric("samples", n)
+        mlflow.log_metric("train_samples", len(X_train))
+        mlflow.log_metric("test_samples", len(X_test))
         mlflow.log_metric("win_rate", float(y.mean()))
 
         # Register if it beats the naive baseline

@@ -36,9 +36,18 @@ QUEUE_BINDINGS = [
     ("ensemble.decision",      "ensemble.decision", "decision"),
     ("risk.validated",         "risk.validated",    "validated"),
     ("trade.orders",           "trade.orders",      "order"),
-    # trade outcomes fanout → feedback + RL
+    # trade outcomes fanout → feedback
     ("trade.outcomes.feedback","trade.outcomes",    ""),
-    ("trade.outcomes.rl",      "trade.outcomes",    ""),
+    # `trade.outcomes.rl` was declared here and bound to the fanout, but no
+    # consumer was ever written for it — rl-agent subscribes to market.data.rl
+    # only and has no outcome-handling code at all. A bound queue with zero
+    # consumers is worse than no queue: it accepts every published message and
+    # silently discards it, while the topology reads as if RL were learning from
+    # trade results. It is also redundant — RL *does* learn from outcomes, via
+    # the backend Q-table (`ai_engine:rl_qtable`, updated in
+    # backend/app/agents/learning.py record_outcome). Removed 2026-08-17.
+    # If online RL learning is ever built into the microservice, re-add the
+    # binding together with the consumer, not before.
     # retraining + notifications
     ("model.retrain",          "model.retrain",     "retrain"),
     ("notifications.all",      "notifications",     ""),

@@ -21,6 +21,7 @@ import ModelRegistry from './pages/ModelRegistry';
 import Orders from './pages/Orders';
 import AgentDetail from './pages/AgentDetail';
 import Settings from './pages/Settings';
+import SystemMap from './pages/SystemMap';
 import './styles/globals.css';
 
 const App: React.FC = () => {
@@ -66,6 +67,7 @@ const App: React.FC = () => {
                   <Route path="/models" element={<ModelRegistry />} />
                   <Route path="/orders" element={<Orders />} />
                   <Route path="/settings" element={<Settings />} />
+                  <Route path="/system-map" element={<SystemMap />} />
                 </Routes>
               </Layout>
             </ProtectedRoute>

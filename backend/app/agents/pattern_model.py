@@ -594,3 +594,41 @@ async def gbm_autotrain_loop() -> None:
         except Exception as exc:
             logger.error("Scheduled GBM retrain error: %s", exc)
             await asyncio.sleep(3600)  # back off an hour on failure
+
+
+async def pattern_autotrain_loop() -> None:
+    """Background task: retrain the online pattern model nightly.
+
+    Previously the ONLY caller of train_pattern_model outside the manual
+    endpoint was the backtest autopilot, which fires it just once per completed
+    backtest day (autopilot-service `_train_pattern_model`). When that autopilot
+    was disabled and its queue stalled mid-batch on 2026-08-11, pattern training
+    silently stopped — the persisted state had already been frozen at
+    2026-07-09, five weeks before anyone noticed, because nothing surfaces a
+    trainer that simply never runs.
+
+    Training a model must not depend on an unrelated feature being switched on,
+    so this mirrors gbm_autotrain_loop: same rotating-universe design, same
+    back-off, its own hour so the two never contend."""
+    from app.config import settings
+    if not getattr(settings, "PATTERN_AUTOTRAIN_ENABLED", True):
+        logger.info("Pattern-model auto-retrain disabled via config")
+        return
+    while True:
+        try:
+            wait = _seconds_until_hour_ist(getattr(settings, "PATTERN_AUTOTRAIN_HOUR_IST", 1))
+            logger.info("Next pattern-model auto-retrain in %.0f min", wait / 60)
+            await asyncio.sleep(wait)
+            res = await train_pattern_model(
+                lookback_days=getattr(settings, "PATTERN_AUTOTRAIN_LOOKBACK_DAYS", 365),
+                horizon=3,
+                stride=1,
+                max_symbols=getattr(settings, "PATTERN_AUTOTRAIN_MAX_SYMBOLS", 400),
+                trigger="scheduled",
+            )
+            logger.info("Scheduled pattern-model retrain done: %s", res)
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.error("Scheduled pattern-model retrain error: %s", exc)
+            await asyncio.sleep(3600)  # back off an hour on failure

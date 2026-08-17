@@ -108,6 +108,27 @@ _MAX_TOKEN_COOLDOWN = 1800.0
 # and blocking for half an hour would strand us for the rest of the session.
 _TOTP_FORBIDDEN_COOLDOWN = 120.0
 
+# ── Revoked-token backstop ───────────────────────────────────────────────────
+# Groww can revoke a token server-side well before the expiry recorded at issue
+# time, after which every data call 403s while `groww:token_expiry` still reads
+# as valid. Module-level so all callers share ONE refresh budget: a universe
+# sweep runs hundreds of concurrent requests, and each must not independently
+# decide to re-authenticate.
+_FORCED_REFRESH_EVERY = 120.0      # seconds between 403-triggered refreshes
+_ENTITLEMENT_BACKOFF = 1800.0      # when even a fresh token is refused
+_last_forced_refresh = 0.0
+_forced_refresh_budget = _FORCED_REFRESH_EVERY
+
+
+def _token_refresh_worth_trying() -> bool:
+    return (time.monotonic() - _last_forced_refresh) > _forced_refresh_budget
+
+
+def _mark_token_refresh(backoff: float = _FORCED_REFRESH_EVERY) -> None:
+    global _last_forced_refresh, _forced_refresh_budget
+    _last_forced_refresh = time.monotonic()
+    _forced_refresh_budget = backoff
+
 STATUS_OK = "ok"
 STATUS_FAILED = "failed"
 STATUS_UNKNOWN = "unknown"
@@ -527,6 +548,56 @@ class GrowwClient:
                     resp = await client.get(
                         f"{BASE_URL}{path}", headers=self._headers(token), params=params
                     )
+
+                # Groww can revoke a token server-side (a login elsewhere, a
+                # session policy change) long before the expiry we recorded at
+                # issue time. It then answers 403 on every data call while
+                # `groww:token_expiry` still says the token is good for hours.
+                #
+                # Only 401 used to clear the token, so a revoked one was never
+                # replaced: one sweep produced 75 identical 403 ERRORs across the
+                # universe, candle capture silently stopped, and nothing
+                # self-healed until someone restarted the service.
+                #
+                # Clearing the in-memory token alone is NOT enough — _token()
+                # falls back to _redis_load(), which hands the same revoked token
+                # straight back, so the retry 403s identically. The Redis copy
+                # must be purged as well to force a real re-authentication.
+                #
+                # The timestamp guard is essential: without it a 300-symbol sweep
+                # would fire 300 concurrent token refreshes. If the FRESH token is
+                # also refused, the 403 is about entitlement or the symbol rather
+                # than the token, so let it raise.
+                elif resp.status_code == 403 and _token_refresh_worth_trying():
+                    _mark_token_refresh()
+                    logger.warning(
+                        "Groww 403 on %s — treating the cached token as revoked "
+                        "and re-authenticating once", path,
+                        extra={"log_type": "groww_token", "event": "forced_refresh"},
+                    )
+                    async with self._lock:
+                        self._access_token = None
+                        self._token_expiry = None
+                    await self._redis_clear()
+                    token = await self._token()
+                    await self._acquire()
+                    resp = await client.get(
+                        f"{BASE_URL}{path}", headers=self._headers(token), params=params
+                    )
+                    if resp.status_code == 403:
+                        # A BRAND NEW token was refused too. Auth is fine (the
+                        # token endpoint answered 200) — the account has lost
+                        # data-API entitlement, which no amount of re-auth fixes.
+                        # Back off hard so this degrades to one quiet probe every
+                        # half hour instead of a re-auth every two minutes.
+                        _mark_token_refresh(_ENTITLEMENT_BACKOFF)
+                        logger.error(
+                            "Groww still 403 on %s with a freshly issued token — "
+                            "this is an ACCOUNT/ENTITLEMENT problem, not an expired "
+                            "token. Check the Groww API subscription; backing off %.0f min.",
+                            path, _ENTITLEMENT_BACKOFF / 60,
+                            extra={"log_type": "groww_token", "event": "entitlement_denied"},
+                        )
                 status_code = resp.status_code
                 resp.raise_for_status()
                 return resp.json()

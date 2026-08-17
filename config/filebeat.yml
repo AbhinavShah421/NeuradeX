@@ -1,0 +1,100 @@
+# Filebeat — ships EVERY container's stdout/stderr to Elasticsearch.
+#
+# Why this exists: only 14 of 29 containers used the Python `elk_logger`, so the
+# other 15 (postgres, redis, rabbitmq, nginx, the Java risk-engine and
+# trade-executor, groww-feed, frontend, mlflow, kibana, ...) had NO searchable
+# logs at all. The System Map offered every node an "open logs in Kibana" button
+# that silently returned nothing for half of them.
+#
+# Reading Docker's json-log files covers every container regardless of language
+# or logging library, and needs no change to any service.
+#
+# Kept in a SEPARATE index from the app's structured logs (`neuradex-logs-*`):
+# those carry rich typed fields (request_id, duration_ms, status_code) and mixing
+# raw container text into them risks the same dynamic-mapping conflicts that
+# already broke the `args` field once. A Kibana data view spans both.
+
+filebeat.autodiscover:
+  providers:
+    - type: docker
+      hints.enabled: false
+      templates:
+        # Every project container EXCEPT filebeat itself. Shipping its own
+        # output creates a feedback loop: one indexing error is logged, that log
+        # line is harvested, and a bad config can bury the index in its own
+        # complaints (10,764 self-logs vs 94 from the backend on the first run).
+        - condition:
+            and:
+              - contains:
+                  docker.container.name: "stock-prediction-"
+              - not:
+                  contains:
+                    docker.container.name: "stock-prediction-filebeat"
+          config:
+            - type: container
+              paths:
+                - /var/lib/docker/containers/${data.docker.container.id}/*.log
+
+processors:
+  - add_docker_metadata: ~
+
+  # Normalise to the SAME `service` field the app logs use, so one query shape
+  # (`service:"postgres"`) works across both indices and the monitor's Kibana
+  # links need no per-node special-casing.
+  - script:
+      lang: javascript
+      id: service_from_container
+      source: >
+        function process(event) {
+          var name = event.Get("container.name");
+          if (name) {
+            event.Put("service", String(name).replace("stock-prediction-", ""));
+          }
+        }
+
+  # Best-effort level extraction so "errors only" filters work on plain-text
+  # logs too. Deliberately conservative: uppercase tokens only, because lowercase
+  # matching flags prose like "no errors found" as an error.
+  - script:
+      lang: javascript
+      id: level_from_message
+      source: >
+        function process(event) {
+          var m = event.Get("message");
+          if (!m) { return; }
+          if (/\b(ERROR|CRITICAL|FATAL|SEVERE)\b/.test(m))      { event.Put("level", "ERROR"); }
+          else if (/\b(WARN|WARNING)\b/.test(m))                { event.Put("level", "WARNING"); }
+          else if (/\b(DEBUG|TRACE)\b/.test(m))                 { event.Put("level", "DEBUG"); }
+          else                                                  { event.Put("level", "INFO"); }
+        }
+
+  # Beat/host bookkeeping is noise here — every event is from this one host.
+  - drop_fields:
+      fields: ["agent", "ecs", "input", "host", "container.labels", "docker"]
+      ignore_missing: true
+
+output.elasticsearch:
+  hosts: ["http://elasticsearch:9200"]
+  index: "neuradex-docker-%{+yyyy.MM.dd}"
+
+# Filebeat's own template is DISABLED on purpose. Its ECS mapping declares
+# `service` as an OBJECT (service.name, service.version, ...), while the app's
+# elk_logger writes `service` as a plain string. Letting Filebeat install its
+# template made Elasticsearch reject every single event with
+#   "object mapping for [service] tried to parse field [service] as object,
+#    but found a concrete value"
+# and silently drop them — the index existed with 0 documents.
+#
+# The template is instead managed by scripts/es_templates.sh, which maps
+# `service` as a keyword so ONE query shape (`service:"postgres"`) works across
+# both this index and neuradex-logs-*. It also omits any data_stream section, so
+# these are ordinary indices that a plain `neuradex-docker-*` pattern matches.
+setup.template.enabled: false
+# Single-node stack: ILM would try to create policies/aliases that add nothing.
+setup.ilm.enabled: false
+# Kibana objects are managed by the app, not by Filebeat.
+setup.kibana.enabled: false
+setup.dashboards.enabled: false
+
+logging.level: warning
+logging.to_files: false

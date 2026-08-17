@@ -157,6 +157,33 @@ services:
           memory: 1536M
           cpus: '0.5'
 
+  # Ships every container's stdout/stderr to Elasticsearch. Without it only the
+  # 14 Python services using elk_logger were searchable; postgres, redis,
+  # rabbitmq, nginx, the Java services and the rest had no queryable logs at all.
+  # See config/filebeat.yml for the field normalisation.
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.11.0
+    container_name: stock-prediction-filebeat
+    user: root                      # needs to read Docker's json-log files
+    # strict.perms=false: the config arrives via a Windows bind mount, which
+    # cannot express the ownership Filebeat otherwise insists on.
+    command: ["filebeat", "-e", "--strict.perms=false"]
+    volumes:
+      - ./config/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - filebeat_data:/usr/share/filebeat/data
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      - stock-prediction-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
   kibana:
     image: kibana:8.11.0
     container_name: stock-prediction-kibana
@@ -165,6 +192,15 @@ services:
       - xpack.security.enabled=false
       - SERVER_BASEPATH=/neuradex/dev/logs
       - SERVER_REWRITEBASEPATH=true
+      # Without an encryption key Kibana generates a throwaway one per boot and
+      # logs an ERROR from plugins.observabilityAIAssistant on every start, and
+      # any encrypted saved object (alert/action) silently stops working after a
+      # restart. Must be >= 32 chars and STABLE across restarts — this is a
+      # local operator stack, so it is fine in compose; rotate it if the stack
+      # is ever exposed beyond the ngrok tunnel.
+      - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=neuradex_kibana_saved_objects_key_2026_v1
+      - XPACK_REPORTING_ENCRYPTIONKEY=neuradex_kibana_reporting_key_2026_v1x
+      - XPACK_SECURITY_ENCRYPTIONKEY=neuradex_kibana_security_key_2026_v1xx
     ports:
       - "5601:5601"
     depends_on:
@@ -270,6 +306,10 @@ services:
       # Read access to the Docker Engine API powers the system-status panel
       # (list containers, view logs, start/stop/restart). Operator-only.
       - /var/run/docker.sock:/var/run/docker.sock
+      # Whole repo, read-only: the System Map resolves each documented symbol to
+      # its CURRENT line number at request time (see app/api/component_docs.py)
+      # instead of storing line numbers that silently rot as the code moves.
+      - .:/repo:ro
       # Container json-log files, so the panel can truncate ("clear") a service's
       # logs on demand (Docker has no API for this — the file must be truncated).
       - /var/lib/docker/containers:/var/lib/docker/containers
@@ -825,6 +865,12 @@ services:
       ELASTICSEARCH_URL: http://elasticsearch:9200
       SERVICE_NAME: model-trainer
       SERVICE_PORT: "8013"
+      # MLflow probes for a git executable that isn't in this image and prints a
+      # multi-line warning whose HELP TEXT contains the word CRITICAL — which the
+      # log-severity scanner then reads as a real error. Silencing the probe
+      # removes the false positive at source rather than teaching the scanner to
+      # ignore a substring.
+      GIT_PYTHON_REFRESH: quiet
       TRAIN_DAYS: "365"
       RL_TIMESTEPS: "200000"
       RETRAIN_SCHEDULE_HOURS: "24"
@@ -982,6 +1028,9 @@ services:
           cpus: '0.1'
 
 volumes:
+  # Filebeat's registry — which file offsets have already been shipped. Without
+  # it a restart re-ingests every container log from the beginning.
+  filebeat_data:
   postgres_data:
   mongodb_data:
   redis_data:

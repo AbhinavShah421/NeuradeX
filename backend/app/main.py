@@ -14,7 +14,7 @@ from app.config import settings
 from app.database.mongodb import init_mongodb, close_mongodb
 from app.database.postgres import init_postgres, close_postgres
 from app.utils.redis_client import init_redis, close_redis
-from app.api import stocks, predictions, portfolio, risk, orders, agent, backtest, auth, paper_trading, ai_engine, mlflow_proxy, sessions, user_settings, mutual_funds, delivery_paper, live_trading, system, recordings
+from app.api import stocks, predictions, portfolio, risk, orders, agent, backtest, auth, paper_trading, ai_engine, mlflow_proxy, sessions, user_settings, mutual_funds, delivery_paper, live_trading, system, recordings, monitor
 from app.websocket.socket_manager import sio
 from app.ml_core.initializer import initialize_ml_models
 from app.utils.groww_client import init_groww_client
@@ -90,6 +90,29 @@ async def lifespan(app: FastAPI):
                             extra={"log_type": "app_lifecycle", "event": "gbm_autotrain_scheduled"})
             except Exception as exc:
                 logger.warning("Could not schedule GBM auto-retrain: %s", exc)
+
+            # Nightly Elasticsearch log pruning. Both log indices are daily, so
+            # this drops whole indices past the retention window — 67 indices
+            # had accumulated with no ageing-out at all.
+            try:
+                from app.data.log_retention import log_retention_loop
+                app.state.log_retention_task = asyncio.create_task(log_retention_loop())
+                logger.info("ES log retention scheduled",
+                            extra={"log_type": "app_lifecycle", "event": "log_retention_scheduled"})
+            except Exception as exc:
+                logger.warning("Could not schedule log retention: %s", exc)
+
+            # Online pattern-model nightly auto-retrain. Until 2026-08-17 this
+            # was only ever kicked by the backtest autopilot on a completed
+            # day, so disabling that autopilot froze the model (last trained
+            # 2026-07-09) with nothing reporting it.
+            try:
+                from app.agents.pattern_model import pattern_autotrain_loop
+                app.state.pattern_autotrain_task = asyncio.create_task(pattern_autotrain_loop())
+                logger.info("Pattern-model nightly auto-retrain scheduled",
+                            extra={"log_type": "app_lifecycle", "event": "pattern_autotrain_scheduled"})
+            except Exception as exc:
+                logger.warning("Could not schedule pattern-model auto-retrain: %s", exc)
 
             # Nightly loss post-mortems. Previously reachable only through its
             # manual endpoint, so it last ran 2026-06-18 while losing trades kept
@@ -301,6 +324,7 @@ app.include_router(mutual_funds.router, prefix="/api/mutual-funds", tags=["mutua
 app.include_router(delivery_paper.router, prefix="/api/delivery-paper", tags=["delivery-paper"])
 app.include_router(live_trading.router, prefix="/api/live-trading", tags=["live-trading"])
 app.include_router(system.router, prefix="/api/system", tags=["system"])
+app.include_router(monitor.router, prefix="/api/monitor", tags=["monitor"])
 
 # Socket.IO ASGI app
 app_sio = socketio.ASGIApp(sio, app)
