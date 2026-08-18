@@ -225,7 +225,7 @@ const MetricModal: React.FC<{ cardId: string; stats: any; onClose: () => void }>
                     {cm.label}{!isSample && ` — last ${curvePoints.length} trades`}
                   </div>
                   {isSample && (
-                    <span style={{ fontSize: 9, fontWeight: 700, padding: '2px 6px', borderRadius: 4, background: 'rgba(245,158,11,0.15)', color: '#f59e0b', border: '1px solid rgba(245,158,11,0.3)', letterSpacing: 0.4 }}>
+                    <span style={{ fontSize: 9, fontWeight: 700, padding: '2px 6px', borderRadius: 4, background: 'rgba(245,158,11,0.15)', color: '#fbbf24', border: '1px solid rgba(245,158,11,0.3)', letterSpacing: 0.4 }}>
                       SAMPLE
                     </span>
                   )}

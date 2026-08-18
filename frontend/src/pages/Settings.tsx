@@ -147,7 +147,7 @@ const Settings: React.FC = () => {
           When the data provider is set to <strong>Auto</strong>, the system fetches from these sources
           <strong> in order</strong> — the first one that returns real data wins. Reorder by priority,
           enable/disable, and add API keys. {primary !== 'auto' && (
-            <span style={{ color: '#f59e0b' }}>Currently overridden — <strong>{primary}</strong> is forced as the primary source.</span>
+            <span style={{ color: '#fbbf24' }}>Currently overridden — <strong>{primary}</strong> is forced as the primary source.</span>
           )}
         </p>
 

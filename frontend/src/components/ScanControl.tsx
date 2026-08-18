@@ -38,7 +38,7 @@ const ScanControl: React.FC<{ align?: 'left' | 'right' }> = ({ align = 'right' }
         AI scan {scanned}/{universe}
         {scanning && <span style={{ color: 'var(--nd-accent)', fontWeight: 600 }}> · scanning… {pct}%</span>}
         {!scanning && runningSessions > 0 && (
-          <span style={{ color: '#f59e0b', fontWeight: 600 }}> · {runningSessions} session{runningSessions > 1 ? 's' : ''} running</span>
+          <span style={{ color: '#fbbf24', fontWeight: 600 }}> · {runningSessions} session{runningSessions > 1 ? 's' : ''} running</span>
         )}
         {lastScanLabel && (
           <span title={`Last full-market scan completed ${lastScanLabel}`}> · last scan {lastScanLabel}</span>

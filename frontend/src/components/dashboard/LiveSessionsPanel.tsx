@@ -8,11 +8,11 @@ import { inr } from '../../utils/format';
 
 // ── Live session detail modal (what's happening inside a running session) ──────
 
-const SESS_ACTION_COLOR: Record<string, string> = { BUY: '#22c55e', SELL: '#ef4444', HOLD: '#f59e0b' };
+const SESS_ACTION_COLOR: Record<string, string> = { BUY: '#34d399', SELL: '#fb5c7d', HOLD: '#fbbf24' };
 const SESS_AGENT_COLOR: Record<string, string> = {
-  technical: '#3b82f6', sentiment: '#06b6d4', macro: '#f59e0b', pattern: '#8b5cf6', rl: '#10b981',
-  gbm: '#14b8a6', regime: '#a855f7', anomaly: '#ec4899', momentum: '#eab308', memory: '#64748b',
-  meanrev: '#f97316', volatility: '#ef4444', day_structure: '#0ea5e9',
+  technical: '#38bdf8', sentiment: '#06b6d4', macro: '#fbbf24', pattern: '#8b5cf6', rl: '#10b981',
+  gbm: '#14b8a6', regime: '#a78bfa', anomaly: '#ec4899', momentum: '#eab308', memory: '#64748b',
+  meanrev: '#f97316', volatility: '#fb5c7d', day_structure: '#0ea5e9',
 };
 
 // ── Agent detail popup ────────────────────────────────────────────────────────
@@ -127,7 +127,7 @@ const SessionModal: React.FC<{ id: string; onClose: () => void }> = ({ id, onClo
   const markers = (d?.tradesList || [])
     .filter((t: any) => t.timestamp)
     .map((t: any) => ({ timestamp: t.timestamp, action: t.action, price: t.price }));
-  const modeColor: Record<string, string> = { paper: '#f59e0b', backtest: '#3b82f6', replay: '#a855f7' };
+  const modeColor: Record<string, string> = { paper: '#fbbf24', backtest: '#38bdf8', replay: '#a78bfa' };
 
   const Section: React.FC<{ icon: string; color: string; title: string; children: React.ReactNode }> = ({ icon, color, title, children }) => (
     <div style={{ marginBottom: 16 }}>
@@ -204,7 +204,7 @@ const SessionModal: React.FC<{ id: string; onClose: () => void }> = ({ id, onClo
               </Section>
 
               {/* Latest ensemble decision */}
-              <Section icon="how_to_vote" color="#f59e0b" title="Latest Decision">
+              <Section icon="how_to_vote" color="#fbbf24" title="Latest Decision">
                 <div style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 10, padding: '10px 14px' }}>
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px 28px', marginBottom: ld.reason ? 8 : 0 }}>
                     <Kv k="Action" v={ld.action ?? '—'} c={SESS_ACTION_COLOR[ld.action] ?? 'var(--nd-text-1)'} />
@@ -240,7 +240,7 @@ const SessionModal: React.FC<{ id: string; onClose: () => void }> = ({ id, onClo
 
               {/* Indicators */}
               {(ind.rsi != null || ind.vwap != null) && (
-                <Section icon="insights" color="#3b82f6" title="Indicators (latest candle)">
+                <Section icon="insights" color="#38bdf8" title="Indicators (latest candle)">
                   <div style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 10, padding: '10px 14px', display: 'flex', flexWrap: 'wrap', gap: '10px 28px' }}>
                     <Kv k="RSI" v={ind.rsi ?? '—'} />
                     <Kv k="VWAP" v={ind.vwap ? `₹${ind.vwap}` : '—'} />
@@ -253,11 +253,11 @@ const SessionModal: React.FC<{ id: string; onClose: () => void }> = ({ id, onClo
 
               {/* Trade Decisions — ensemble + full agent breakdown at every BUY / SELL */}
               {Array.isArray(d?.tradesList) && d.tradesList.length > 0 && (
-                <Section icon="swap_vert" color="#22c55e" title={`Trade Decisions (${d.tradesList.length})`}>
+                <Section icon="swap_vert" color="#34d399" title={`Trade Decisions (${d.tradesList.length})`}>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxHeight: 480, overflowY: 'auto' }}>
                     {[...d.tradesList].reverse().map((t: any, i: number) => {
                       const isBuy = t.action === 'BUY';
-                      const accentColor = isBuy ? '#22c55e' : '#ef4444';
+                      const accentColor = isBuy ? '#34d399' : '#fb5c7d';
                       // agents stored directly on trade (new sessions) or fallback from decisionLog
                       const logEntry = (d.decisionLog || []).find((x: any) => x.time === t.time && x.executed);
                       const agentVotes: any[] = (t.agents?.length ? t.agents : logEntry?.agents) || [];
@@ -282,7 +282,7 @@ const SessionModal: React.FC<{ id: string; onClose: () => void }> = ({ id, onClo
                               <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>× {t.quantity}</span>
                             )}
                             {t.pnl != null && (
-                              <span style={{ marginLeft: 'auto', fontSize: 13, fontWeight: 700, color: t.pnl >= 0 ? '#22c55e' : '#ef4444' }}>
+                              <span style={{ marginLeft: 'auto', fontSize: 13, fontWeight: 700, color: t.pnl >= 0 ? '#34d399' : '#fb5c7d' }}>
                                 {t.pnl >= 0 ? '+' : ''}₹{t.pnl.toFixed(2)}
                                 {t.pnlPct != null && (
                                   <span style={{ fontSize: 10, fontWeight: 400, marginLeft: 4, color: 'var(--nd-text-3)' }}>
@@ -483,7 +483,7 @@ const LiveSessionsPanel: React.FC = () => {
                 onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
                 <td style={{ padding: '7px 10px', fontWeight: 700, color: 'var(--nd-text-1)' }}>{s.symbol}</td>
                 <td style={{ padding: '7px 10px' }}>
-                  <span style={{ fontSize: 10, fontWeight: 600, padding: '2px 6px', borderRadius: 4, background: s.mode === 'paper' ? 'rgba(245,158,11,0.15)' : s.mode === 'backtest' ? 'rgba(59,130,246,0.15)' : 'rgba(168,85,247,0.15)', color: s.mode === 'paper' ? '#f59e0b' : s.mode === 'backtest' ? '#3b82f6' : '#a855f7' }}>{(s.mode || '').toUpperCase()}</span>
+                  <span style={{ fontSize: 10, fontWeight: 600, padding: '2px 6px', borderRadius: 4, background: s.mode === 'paper' ? 'rgba(245,158,11,0.15)' : s.mode === 'backtest' ? 'rgba(59,130,246,0.15)' : 'rgba(168,85,247,0.15)', color: s.mode === 'paper' ? '#fbbf24' : s.mode === 'backtest' ? '#38bdf8' : '#a78bfa' }}>{(s.mode || '').toUpperCase()}</span>
                 </td>
                 <td style={{ padding: '7px 10px' }}>
                   <span style={{ fontWeight: 600, color: s.position === 'LONG' ? 'var(--nd-green)' : 'var(--nd-text-3)' }}>{s.position ?? 'NONE'}</span>

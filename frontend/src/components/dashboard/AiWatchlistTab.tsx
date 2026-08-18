@@ -6,8 +6,8 @@ import { getErrorMessage } from '../../utils/errors';
 
 // ── AI Watchlist tab (self-running scanner output + evidence) ──────────────────
 
-const ACTION_BG: Record<string, string> = { BUY: '#22c55e', SELL: '#ef4444', HOLD: '#f59e0b' };
-const GRADE_COLOR: Record<string, string> = { A: '#22c55e', B: '#3b82f6', C: '#f59e0b', D: '#94a3b8' };
+const ACTION_BG: Record<string, string> = { BUY: '#34d399', SELL: '#fb5c7d', HOLD: '#fbbf24' };
+const GRADE_COLOR: Record<string, string> = { A: '#34d399', B: '#38bdf8', C: '#fbbf24', D: '#94a3b8' };
 // Hold-cap presets (minutes) for inline auto-trading of a watchlist stock
 const HOLD_CAPS = [0, 15, 30, 60] as const;   // 0 = auto (system decides exits)
 
@@ -123,7 +123,7 @@ const WatchlistRow: React.FC<{ w: WatchlistStock; i: number; onClick: () => void
       {onWatch && (
         <button onClick={e => { e.stopPropagation(); if (!watchState) onWatch(w.symbol); }} disabled={!!watchState}
           title="Add to the live watcher (2nd-level scan) — promoted to paper trading only if it shows live confidence AND re-scores grade A"
-          style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 3, padding: '6px 10px', minHeight: 34, borderRadius: 6, border: `1px solid ${watchState ? '#f59e0b' : 'var(--nd-border)'}`, background: watchState ? 'rgba(245,158,11,0.1)' : 'var(--nd-surface)', color: watchState ? '#f59e0b' : 'var(--nd-text-2)', cursor: watchState ? 'default' : 'pointer', fontSize: 11.5, fontWeight: 600, flexShrink: 0 }}>
+          style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 3, padding: '6px 10px', minHeight: 34, borderRadius: 6, border: `1px solid ${watchState ? '#fbbf24' : 'var(--nd-border)'}`, background: watchState ? 'rgba(245,158,11,0.1)' : 'var(--nd-surface)', color: watchState ? '#fbbf24' : 'var(--nd-text-2)', cursor: watchState ? 'default' : 'pointer', fontSize: 11.5, fontWeight: 600, flexShrink: 0 }}>
           <span className="material-icons" style={{ fontSize: 13 }}>{watchState === 'promoted' ? 'trending_up' : watchState ? 'check' : 'visibility'}</span>
           {watchState === 'promoted' ? 'Promoted' : watchState ? 'Watching' : 'Watch'}
         </button>
@@ -164,7 +164,7 @@ const ScanDiffPanel: React.FC<{ diff: ScanDiff | null }> = ({ diff }) => {
   const c = diff.counts ?? { moved: moved.length, entered: entered.length, dropped: dropped.length };
 
   const Row: React.FC<{ m: ScanDiffMove | ScanDiffEntry; kind: 'up' | 'down' | 'in' | 'out' }> = ({ m, kind }) => {
-    const color = kind === 'up' ? '#22c55e' : kind === 'down' ? '#ef4444' : kind === 'in' ? '#3b82f6' : '#94a3b8';
+    const color = kind === 'up' ? '#34d399' : kind === 'down' ? '#fb5c7d' : kind === 'in' ? '#38bdf8' : '#94a3b8';
     const badge = kind === 'up' ? `▲ ${(m as ScanDiffMove).delta}` : kind === 'down' ? `▼ ${Math.abs((m as ScanDiffMove).delta)}` : kind === 'in' ? 'NEW' : 'OUT';
     return (
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, padding: '4px 0', borderBottom: '1px solid var(--nd-border)', flexWrap: 'wrap' }}>
@@ -188,8 +188,8 @@ const ScanDiffPanel: React.FC<{ diff: ScanDiff | null }> = ({ diff }) => {
         <div>
           <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--nd-text-1)' }}>What changed since the last scan</div>
           <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>
-            <span style={{ color: '#22c55e' }}>▲ {ups.length}</span> · <span style={{ color: '#ef4444' }}>▼ {downs.length}</span>
-            {' · '}<span style={{ color: '#3b82f6' }}>{c.entered} new</span> · <span style={{ color: '#94a3b8' }}>{c.dropped} dropped</span>
+            <span style={{ color: '#34d399' }}>▲ {ups.length}</span> · <span style={{ color: '#fb5c7d' }}>▼ {downs.length}</span>
+            {' · '}<span style={{ color: '#38bdf8' }}>{c.entered} new</span> · <span style={{ color: '#94a3b8' }}>{c.dropped} dropped</span>
           </div>
         </div>
         <span className="material-icons" style={{ color: 'var(--nd-text-3)' }}>{open ? 'expand_less' : 'expand_more'}</span>
@@ -197,13 +197,13 @@ const ScanDiffPanel: React.FC<{ diff: ScanDiff | null }> = ({ diff }) => {
       {open && (
         <div style={{ marginTop: 10, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 14 }}>
           <div>
-            <div style={{ fontSize: 11, fontWeight: 700, color: '#22c55e', marginBottom: 4 }}>Climbed ({ups.length})</div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: '#34d399', marginBottom: 4 }}>Climbed ({ups.length})</div>
             {ups.length ? ups.slice(0, 12).map((m, i) => <Row key={i} m={m} kind="up" />) : <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>—</div>}
-            <div style={{ fontSize: 11, fontWeight: 700, color: '#3b82f6', margin: '10px 0 4px' }}>Entered the board ({c.entered})</div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: '#38bdf8', margin: '10px 0 4px' }}>Entered the board ({c.entered})</div>
             {entered.length ? entered.slice(0, 10).map((m, i) => <Row key={i} m={m} kind="in" />) : <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>—</div>}
           </div>
           <div>
-            <div style={{ fontSize: 11, fontWeight: 700, color: '#ef4444', marginBottom: 4 }}>Slipped ({downs.length})</div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: '#fb5c7d', marginBottom: 4 }}>Slipped ({downs.length})</div>
             {downs.length ? downs.slice(0, 12).map((m, i) => <Row key={i} m={m} kind="down" />) : <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>—</div>}
             <div style={{ fontSize: 11, fontWeight: 700, color: '#94a3b8', margin: '10px 0 4px' }}>Dropped off ({c.dropped})</div>
             {dropped.length ? dropped.slice(0, 10).map((m, i) => <Row key={i} m={m} kind="out" />) : <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>—</div>}
@@ -369,7 +369,7 @@ const AiWatchlistTab: React.FC = () => {
                 <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>
                   · Live watch: {(agrade.watch.symbols ?? []).filter((s: any) => s?.status !== 'promoted').length} watching
                   · {agrade.watch.promotionsToday ?? 0}/{agrade.watch.cap ?? 5} promoted
-                  {agrade.watch.feedOk === false && <span style={{ color: 'var(--nd-red, #ef4444)' }}> · live feed offline</span>}
+                  {agrade.watch.feedOk === false && <span style={{ color: 'var(--nd-red, #fb5c7d)' }}> · live feed offline</span>}
                 </span>
               )}
               <span style={{ flex: 1 }} />

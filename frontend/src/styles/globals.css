@@ -28,16 +28,37 @@
   --nd-shadow-md: 0 2px 12px rgba(0,0,0,0.10);
 }
 
+/* Dark theme — the System Map's instrument-panel palette, applied app-wide.
+   Retheming here reaches everything: 2,832 .nd-* class usages AND the ~2,289
+   inline `var(--nd-*)` references in components, so pages pick it up without
+   being rewritten one by one.
+
+   Neutrals carry a slight blue-cyan bias rather than being pure grey, so they
+   read as chosen against the accent instead of inherited. */
 .dark-mode {
-  --nd-bg:        #0d1117;
-  --nd-surface:   #161b22;
-  --nd-surface-2: #21262d;
-  --nd-border:    #30363d;
-  --nd-text-1:    #e6edf3;
-  --nd-text-2:    #8b949e;
-  --nd-text-3:    #484f58;
-  --nd-shadow:    0 1px 4px rgba(0,0,0,0.4);
-  --nd-shadow-md: 0 2px 12px rgba(0,0,0,0.5);
+  --nd-bg:        #070b14;   /* deep ground, matches the System Map canvas */
+  --nd-surface:   #0d1524;   /* panels                                     */
+  --nd-surface-2: #131d30;   /* raised / hover                             */
+  --nd-border:    rgba(120,150,190,0.28);
+  --nd-text-1:    #dbe6f5;
+  --nd-text-2:    #7d8ca6;
+  --nd-text-3:    #5b6b85;
+
+  /* Semantic colours retuned to the same family. Teal reads as "healthy"
+     rather than the old flat green; the red is softened so a losing row does
+     not shout louder than a broken system. */
+  --nd-green:     #2dd4bf;
+  --nd-green-50:  rgba(45,212,191,0.12);
+  --nd-red:       #fb5c7d;
+  --nd-red-50:    rgba(251,92,125,0.12);
+  --nd-orange:    #fbbf24;
+  --nd-purple:    #a78bfa;
+  --nd-blue:      #38bdf8;
+  --nd-primary:   #2dd4bf;
+  --nd-accent:    #38bdf8;
+
+  --nd-shadow:    0 1px 2px rgba(0,0,0,.45), 0 8px 24px rgba(0,0,0,.35);
+  --nd-shadow-md: 0 2px 6px rgba(0,0,0,.5),  0 16px 40px rgba(0,0,0,.4);
 }
 
 /* ── Reset ─────────────────────────────────────────────────────────────────── */
@@ -273,6 +294,89 @@ body {
   border-radius: 10px;
   padding: 20px;
   box-shadow: var(--nd-shadow);
+}
+
+/* ── Instrument-panel treatment (dark only) ──────────────────────────────────
+   The light theme stays a plain document; the dark theme is the one the
+   operator actually works in, so it gets the System Map's surface language:
+   translucent panels over the deep ground, a hairline that reads as an edge
+   rather than a box, and a quiet lift on hover. Scoped to .dark-mode so
+   nothing here can leak into light mode. */
+.dark-mode .nd-card {
+  background: rgba(16, 24, 42, 0.72);
+  backdrop-filter: blur(6px);
+  transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease;
+}
+.dark-mode .nd-card:hover {
+  border-color: rgba(56, 189, 248, 0.38);
+  box-shadow: var(--nd-shadow-md);
+}
+
+/* Uppercase mono eyebrows — the label voice from the System Map. Opt-in via
+   .nd-eyebrow so existing headings are untouched. */
+.nd-eyebrow {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace;
+  font-size: 10.5px;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--nd-accent);
+}
+
+/* Digits line up in tables and stat tiles. */
+.dark-mode .nd-card table,
+.dark-mode .nd-table,
+.nd-tabular { font-variant-numeric: tabular-nums; }
+
+/* Buttons: quiet by default, accent on intent. */
+.dark-mode .nd-btn {
+  transition: background .15s ease, border-color .15s ease, color .15s ease;
+}
+.dark-mode .nd-btn-primary {
+  background: rgba(45, 212, 191, 0.14);
+  border: 1px solid var(--nd-green);
+  color: var(--nd-green);
+}
+.dark-mode .nd-btn-primary:hover {
+  background: rgba(45, 212, 191, 0.22);
+}
+.dark-mode .nd-btn-outline,
+.dark-mode .nd-btn-ghost {
+  border: 1px solid var(--nd-border);
+  color: var(--nd-text-1);
+  background: transparent;
+}
+.dark-mode .nd-btn-outline:hover,
+.dark-mode .nd-btn-ghost:hover {
+  border-color: rgba(56, 189, 248, 0.45);
+  color: var(--nd-accent);
+}
+
+/* Badges become outlined chips rather than filled blocks — less shouty in a
+   dense table, and consistent with the map's status pills. */
+.dark-mode .nd-badge {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 10.5px;
+  letter-spacing: .06em;
+  border: 1px solid currentColor;
+  background: transparent;
+  border-radius: 4px;
+}
+.dark-mode .nd-badge-green  { color: var(--nd-green);  }
+.dark-mode .nd-badge-red    { color: var(--nd-red);    }
+.dark-mode .nd-badge-orange { color: var(--nd-orange); }
+.dark-mode .nd-badge-purple { color: var(--nd-purple); }
+.dark-mode .nd-badge-gray   { color: var(--nd-text-2); }
+
+/* Keyboard focus must stay visible against the darker ground. */
+.dark-mode :focus-visible {
+  outline: 2px solid var(--nd-accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dark-mode .nd-card,
+  .dark-mode .nd-btn { transition: none; }
 }
 
 .nd-surface {

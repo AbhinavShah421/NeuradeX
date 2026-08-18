@@ -40,7 +40,7 @@ export function calcVaR(stocks: PortfolioStock[], totalValue: number): number {
 }
 
 export function RiskMeter({ score, label }: { score: 'LOW' | 'MEDIUM' | 'HIGH'; label: string }) {
-  const color = score === 'LOW' ? 'var(--nd-green)' : score === 'MEDIUM' ? '#f59e0b' : 'var(--nd-red)';
+  const color = score === 'LOW' ? 'var(--nd-green)' : score === 'MEDIUM' ? '#fbbf24' : 'var(--nd-red)';
   const pct   = score === 'LOW' ? 25 : score === 'MEDIUM' ? 60 : 90;
   return (
     <div>
@@ -66,10 +66,10 @@ export const RISK_QUIZ: { q: string; opts: [string, number][] }[] = [
 export const riskFromScore = (pts: number) => pts >= 13 ? 'aggressive' : pts >= 9 ? 'moderate' : 'conservative';
 
 export const ACTION_STYLE: Record<string, { bg: string; color: string }> = {
-  EXIT: { bg: '#ef444420', color: '#ef4444' },
-  TRIM: { bg: '#f59e0b20', color: '#f59e0b' },
+  EXIT: { bg: '#fb5c7d20', color: '#fb5c7d' },
+  TRIM: { bg: '#fbbf2420', color: '#fbbf24' },
   HOLD: { bg: 'var(--nd-surface-2)', color: 'var(--nd-text-2)' },
-  ADD:  { bg: '#22c55e20', color: '#22c55e' },
+  ADD:  { bg: '#34d39920', color: '#34d399' },
 };
 
 // Orders in these Groww statuses can still be cancelled by the user.

@@ -11,7 +11,7 @@ const pct = (v: number | null | undefined) =>
   v == null ? '—' : `${v > 0 ? '+' : ''}${v.toFixed(2)}%`;
 const green  = 'var(--nd-green)';
 const red    = 'var(--nd-red)';
-const amber  = '#f59e0b';
+const amber  = '#fbbf24';
 const pnlClr = (v: number) => (v > 0 ? green : v < 0 ? red : 'var(--nd-text-3)');
 
 // ── styles ─────────────────────────────────────────────────────────────────────

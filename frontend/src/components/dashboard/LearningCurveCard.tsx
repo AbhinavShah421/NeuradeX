@@ -13,7 +13,7 @@ const SOURCE_PRESETS: Record<string, string> = {
 };
 
 const EVENT_COLOR: Record<string, string> = {
-  scanner: '#3b82f6', trading: '#f59e0b', learning: '#a855f7', update: '#94a3b8',
+  scanner: '#38bdf8', trading: '#fbbf24', learning: '#a78bfa', update: '#94a3b8',
 };
 
 const LearningCurveCard: React.FC<{ embedded?: boolean }> = ({ embedded }) => {
@@ -60,7 +60,7 @@ const LearningCurveCard: React.FC<{ embedded?: boolean }> = ({ embedded }) => {
     metric === 'equity' ? p.cumEquity
       : p.rollWinRate * 100;   // rolling-50 OR rolling-200 depending on activeData
   const isPct = metric !== 'equity';
-  const color = metric === 'equity' ? 'var(--nd-green)' : metric === 'rolling' ? '#3b82f6' : '#a855f7';
+  const color = metric === 'equity' ? 'var(--nd-green)' : metric === 'rolling' ? '#38bdf8' : '#a78bfa';
 
   const visiblePts = pts;  // no tail-zoom needed — Trend WR (200-window) always moves
 

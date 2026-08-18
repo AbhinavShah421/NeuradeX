@@ -46,12 +46,12 @@ const PatternModelCard: React.FC<{ embedded?: boolean }> = ({ embedded }) => {
         <div>
           <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>Pattern Recognition Model</div>
           <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>
-            Learns price <span style={{ color: '#06b6d4' }}>patterns only</span> across the full NSE universe. <span style={{ color: '#a855f7' }}>High-confidence</span> = accuracy when the model is sure (it abstains otherwise)
+            Learns price <span style={{ color: '#06b6d4' }}>patterns only</span> across the full NSE universe. <span style={{ color: '#a78bfa' }}>High-confidence</span> = accuracy when the model is sure (it abstains otherwise)
           </div>
         </div>
         <div style={{ display: 'flex', gap: 14, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
           <div style={{ textAlign: 'right' }}>
-            <div style={{ fontSize: 18, fontWeight: 700, color: '#a855f7' }}>{hcAcc != null ? `${hcAcc.toFixed(1)}%` : '—'}</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: '#a78bfa' }}>{hcAcc != null ? `${hcAcc.toFixed(1)}%` : '—'}</div>
             <div style={{ fontSize: 10, color: 'var(--nd-text-3)' }}>high-confidence{hcCov != null ? ` · ${hcCov.toFixed(0)}% of picks` : ''}</div>
           </div>
           <div style={{ textAlign: 'right' }}>

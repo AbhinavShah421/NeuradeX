@@ -6,8 +6,8 @@ import { useScanStore } from '../stores/scanStore';
 const inr = (v: number) =>
   `₹${(v ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-const ACTION_BG: Record<string, string> = { BUY: '#22c55e', SELL: '#ef4444', HOLD: '#f59e0b' };
-const GRADE_COLOR: Record<string, string> = { A: '#22c55e', B: '#3b82f6', C: '#f59e0b', D: '#94a3b8' };
+const ACTION_BG: Record<string, string> = { BUY: '#34d399', SELL: '#fb5c7d', HOLD: '#fbbf24' };
+const GRADE_COLOR: Record<string, string> = { A: '#34d399', B: '#38bdf8', C: '#fbbf24', D: '#94a3b8' };
 const FILTERS: (number | 'All')[] = [10, 20, 50, 100, 'All'];
 
 const fmtTime = (s?: string) => {
@@ -253,9 +253,9 @@ const Predictions: React.FC = () => {
 
       {recMsg && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14, padding: '10px 14px', borderRadius: 10,
-          borderLeft: `3px solid ${recMsg.ok ? 'var(--nd-green)' : '#ef4444'}`,
+          borderLeft: `3px solid ${recMsg.ok ? 'var(--nd-green)' : '#fb5c7d'}`,
           background: recMsg.ok ? 'rgba(0,179,134,0.08)' : 'rgba(239,68,68,0.08)' }}>
-          <span className="material-icons" style={{ fontSize: 16, color: recMsg.ok ? 'var(--nd-green)' : '#ef4444' }}>
+          <span className="material-icons" style={{ fontSize: 16, color: recMsg.ok ? 'var(--nd-green)' : '#fb5c7d' }}>
             {recMsg.ok ? 'check_circle' : 'error_outline'}
           </span>
           <span style={{ fontSize: 12.5, color: 'var(--nd-text-1)' }}>{recMsg.text}</span>

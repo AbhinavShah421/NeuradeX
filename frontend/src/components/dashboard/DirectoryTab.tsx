@@ -20,7 +20,7 @@ interface PriceInfo {
 // ── Exchange badge ─────────────────────────────────────────────────────────────
 
 const ExBadge = ({ ex }: { ex: string }) => {
-  const color = ex === 'NSE' ? '#3b82f6' : ex === 'BSE' ? '#f59e0b' : '#8b5cf6';
+  const color = ex === 'NSE' ? '#38bdf8' : ex === 'BSE' ? '#fbbf24' : '#8b5cf6';
   return (
     <span style={{
       fontSize: 9, fontWeight: 700, padding: '2px 5px', borderRadius: 3,

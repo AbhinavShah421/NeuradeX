@@ -88,7 +88,7 @@ const RefreshControl: React.FC<RefreshControlProps> = ({ sweeping, lastSweep, ru
           <span style={{
             fontSize: 11,
             color: seedMsg.startsWith('✓') ? 'var(--nd-green)'
-                 : seedMsg.startsWith('✗') ? '#e74c3c'
+                 : seedMsg.startsWith('✗') ? '#fb5c7d'
                  : 'var(--nd-text-3)',
           }}>{seedMsg}</span>
         )}

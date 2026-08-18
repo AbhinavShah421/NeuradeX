@@ -275,7 +275,7 @@ const StockDetail: React.FC = () => {
             <div style={{ padding: '0 24px', borderRight: '1px solid var(--nd-border)', display: 'flex', flexDirection: 'column', gap: 14 }}>
               {[
                 { label: 'News Sentiment',   value: sentiment.newsSentiment,         color: 'var(--nd-green)' },
-                { label: 'Social Media',     value: sentiment.socialMediaSentiment,  color: '#3b82f6' },
+                { label: 'Social Media',     value: sentiment.socialMediaSentiment,  color: '#38bdf8' },
               ].map(s => (
                 <div key={s.label}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>

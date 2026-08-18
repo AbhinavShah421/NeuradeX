@@ -4,9 +4,9 @@ import apiService from '../../services/api';
 // ── Performance + market-regime hero strip ────────────────────────────────────
 
 const REGIME_STYLE: Record<string, { color: string; label: string; icon: string }> = {
-  bullish: { color: '#22c55e', label: 'Risk-On · Bullish',  icon: 'trending_up' },
-  bearish: { color: '#ef4444', label: 'Risk-Off · Bearish', icon: 'trending_down' },
-  neutral: { color: '#f59e0b', label: 'Neutral',            icon: 'trending_flat' },
+  bullish: { color: '#34d399', label: 'Risk-On · Bullish',  icon: 'trending_up' },
+  bearish: { color: '#fb5c7d', label: 'Risk-Off · Bearish', icon: 'trending_down' },
+  neutral: { color: '#fbbf24', label: 'Neutral',            icon: 'trending_flat' },
 };
 
 // ── AI forecast bits ──────────────────────────────────────────────────────────
@@ -14,7 +14,7 @@ const REGIME_STYLE: Record<string, { color: string; label: string; icon: string 
 // Accuracy sparkline — single series (rolling-20 out-of-sample accuracy) with a
 // dashed 50% reference line. Neutral accent (not a bullish/bearish status color)
 // so the line reads as "model quality", not market direction.
-const ACC_COLOR = '#3b82f6';
+const ACC_COLOR = '#38bdf8';
 
 const AccuracySparkline: React.FC<{ series: { d: string; a: number }[]; w?: number; h?: number }> = ({ series, w = 110, h = 30 }) => {
   if (!series || series.length < 2) return null;
@@ -219,7 +219,7 @@ const RegimeModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
                           </div>
                         </div>
                         {!beats && (
-                          <div style={{ marginTop: 8, fontSize: 10.5, color: '#f59e0b' }}>
+                          <div style={{ marginTop: 8, fontSize: 10.5, color: '#fbbf24' }}>
                             ⚠ Model is not currently beating the persistence baseline — treat the forecast as low-signal.
                           </div>
                         )}
@@ -252,12 +252,12 @@ const RegimeModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
               {/* Watch for */}
               <div style={{ background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.25)', borderRadius: 10, padding: '12px 14px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-                  <span className="material-icons" style={{ fontSize: 14, color: '#f59e0b' }}>warning_amber</span>
-                  <span style={{ fontSize: 11, fontWeight: 700, color: '#f59e0b', textTransform: 'uppercase', letterSpacing: 0.4 }}>Watch For</span>
+                  <span className="material-icons" style={{ fontSize: 14, color: '#fbbf24' }}>warning_amber</span>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: '#fbbf24', textTransform: 'uppercase', letterSpacing: 0.4 }}>Watch For</span>
                 </div>
                 {impl.watch.map((w, i) => (
                   <div key={i} style={{ display: 'flex', gap: 8, marginBottom: i < impl.watch.length - 1 ? 4 : 0 }}>
-                    <span style={{ fontSize: 12, color: '#f59e0b', flexShrink: 0 }}>›</span>
+                    <span style={{ fontSize: 12, color: '#fbbf24', flexShrink: 0 }}>›</span>
                     <span style={{ fontSize: 12, color: 'var(--nd-text-2)', lineHeight: 1.5 }}>{w}</span>
                   </div>
                 ))}
@@ -281,7 +281,7 @@ const ReturnSparkline: React.FC<{ points: number[]; good: boolean }> = ({ points
   const ys = points.map(v => H - PAD - ((v - min) / range) * (H - PAD * 2));
   const line = xs.map((x, i) => `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${ys[i].toFixed(1)}`).join(' ');
   const area = `${line} L${xs[xs.length - 1].toFixed(1)},${H} L${xs[0].toFixed(1)},${H} Z`;
-  const color = good ? '#22c55e' : '#ef4444';
+  const color = good ? '#34d399' : '#fb5c7d';
   const zeroY = H - PAD - ((0 - min) / range) * (H - PAD * 2);
   return (
     <svg width={W} height={H} style={{ display: 'block', marginTop: 4 }}>

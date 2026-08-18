@@ -88,7 +88,7 @@ function buildExecutionSteps(trade: TradeRecord): ExecStep[] {
     step: 1,
     name: 'Market Signal',
     icon: 'wifi',
-    color: '#3b82f6',
+    color: '#38bdf8',
     data: {
       symbol: trade.symbol,
       price: `₹${trade.entryPrice?.toFixed(2)}`,
@@ -127,7 +127,7 @@ function buildExecutionSteps(trade: TradeRecord): ExecStep[] {
     step: 3,
     name: 'Ensemble Vote',
     icon: 'how_to_vote',
-    color: '#f59e0b',
+    color: '#fbbf24',
     data: ensembleData,
   });
 
@@ -165,7 +165,7 @@ function buildExecutionSteps(trade: TradeRecord): ExecStep[] {
     step: 6,
     name: 'Trade Outcome',
     icon: trade.pnlPct != null && trade.pnlPct >= 0 ? 'trending_up' : 'trending_down',
-    color: trade.pnlPct != null && trade.pnlPct >= 0 ? '#22c55e' : '#ef4444',
+    color: trade.pnlPct != null && trade.pnlPct >= 0 ? '#34d399' : '#fb5c7d',
     data: {
       'Exit Price': trade.exitPrice ? `₹${trade.exitPrice.toFixed(2)}` : '—',
       'P&L': trade.pnlAbs != null ? `₹${trade.pnlAbs.toFixed(2)}` : '—',
@@ -181,14 +181,14 @@ function buildExecutionSteps(trade: TradeRecord): ExecStep[] {
 // ── Execution Modal ───────────────────────────────────────────────────────────
 
 const AGENT_COLORS: Record<string, string> = {
-  technical: '#3b82f6', sentiment: '#06b6d4', macro: '#f59e0b',
+  technical: '#38bdf8', sentiment: '#06b6d4', macro: '#fbbf24',
   pattern: '#8b5cf6', rl: '#10b981',
   // Full ensemble roster
-  gbm: '#14b8a6', regime: '#a855f7', anomaly: '#ec4899', momentum: '#eab308',
-  memory: '#64748b', meanrev: '#f97316', volatility: '#ef4444',
+  gbm: '#14b8a6', regime: '#a78bfa', anomaly: '#ec4899', momentum: '#eab308',
+  memory: '#64748b', meanrev: '#f97316', volatility: '#fb5c7d',
 };
 const ACTION_COLOR: Record<string, string> = {
-  BUY: '#22c55e', SELL: '#ef4444', HOLD: '#f59e0b',
+  BUY: '#34d399', SELL: '#fb5c7d', HOLD: '#fbbf24',
 };
 
 // Small labelled stat used inside the agent-detail expansion.
@@ -600,7 +600,7 @@ const Orders: React.FC = () => {
   const pnlColor = (v: number) => v >= 0 ? 'var(--nd-green)' : 'var(--nd-red)';
 
   const modeColor: Record<string, string> = {
-    LIVE: '#22c55e', PAPER: '#f59e0b', BACKTEST: '#3b82f6', REPLAY: '#a855f7',
+    LIVE: '#34d399', PAPER: '#fbbf24', BACKTEST: '#38bdf8', REPLAY: '#a78bfa',
   };
 
   if (loading) return <div style={{ padding: 40, textAlign: 'center', color: 'var(--nd-text-3)' }}>Loading trade history...</div>;
@@ -660,7 +660,7 @@ const Orders: React.FC = () => {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {lessons.map((l: any, i: number) => (
                 <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 10px', background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 8 }}>
-                  <span className="material-icons" style={{ fontSize: 15, color: '#f59e0b' }}>error_outline</span>
+                  <span className="material-icons" style={{ fontSize: 15, color: '#fbbf24' }}>error_outline</span>
                   <div style={{ flex: 1 }}>
                     <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--nd-text-1)' }}>{l.failureMode}</div>
                     <div style={{ fontSize: 11.5, color: 'var(--nd-text-2)', marginTop: 1 }}>{l.avoidWhen || l.lesson}</div>
@@ -683,7 +683,7 @@ const Orders: React.FC = () => {
                     <span style={{ fontWeight: 700, fontFamily: 'monospace', color: 'var(--nd-text-1)' }}>{p.symbol}</span>
                     <span style={{ fontSize: 10.5, color: ACTION_COLOR[p.action] ?? 'var(--nd-text-3)' }}>{p.action}</span>
                     <span style={{ fontSize: 11, color: 'var(--nd-red)' }}>{p.pnlPct != null ? `${p.pnlPct}%` : ''}</span>
-                    <span style={{ marginLeft: 'auto', fontSize: 10.5, fontWeight: 700, color: '#f59e0b' }}>{p.failureMode}</span>
+                    <span style={{ marginLeft: 'auto', fontSize: 10.5, fontWeight: 700, color: '#fbbf24' }}>{p.failureMode}</span>
                   </div>
                   <div style={{ fontSize: 11.5, color: 'var(--nd-text-2)', lineHeight: 1.5 }}>{p.rootCause}</div>
                   {p.lesson && <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginTop: 2 }}><strong>Lesson:</strong> {p.lesson}</div>}
@@ -747,7 +747,7 @@ const Orders: React.FC = () => {
                       </td>
                     ) : (
                       <>
-                        <td style={{ padding: '7px 10px', fontWeight: 600, color: (m.accuracy ?? 0) >= 0.55 ? 'var(--nd-green)' : (m.accuracy ?? 0) >= 0.45 ? '#f59e0b' : 'var(--nd-red)' }}>{((m.accuracy ?? 0) * 100).toFixed(0)}%</td>
+                        <td style={{ padding: '7px 10px', fontWeight: 600, color: (m.accuracy ?? 0) >= 0.55 ? 'var(--nd-green)' : (m.accuracy ?? 0) >= 0.45 ? '#fbbf24' : 'var(--nd-red)' }}>{((m.accuracy ?? 0) * 100).toFixed(0)}%</td>
                         <td style={{ padding: '7px 10px', color: 'var(--nd-text-2)' }}>{((m.precision ?? 0) * 100).toFixed(0)}%</td>
                         <td style={{ padding: '7px 10px', color: 'var(--nd-text-2)' }}>{((m.recall ?? 0) * 100).toFixed(0)}%</td>
                         <td style={{ padding: '7px 10px', fontWeight: 600, color: 'var(--nd-text-1)' }}>{(m.f1 ?? 0).toFixed(2)}</td>

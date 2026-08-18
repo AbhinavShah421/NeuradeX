@@ -67,7 +67,7 @@ const RiskAnalytics: React.FC = () => {
   };
   const severityBorder: Record<string, string> = {
     moderate: '#f5a623',
-    severe:   '#ef4444',
+    severe:   '#fb5c7d',
     extreme:  '#dc2626',
   };
 
@@ -82,7 +82,7 @@ const RiskAnalytics: React.FC = () => {
         </div>
         <div style={{ width: 1, height: 14, background: 'var(--nd-border)' }} />
         <div style={{ flex: 1 }}>
-          {isPos && <div style={{ background: '#3b82f6', height: 14, borderRadius: '0 3px 3px 0', width: `${pctWidth}%` }} />}
+          {isPos && <div style={{ background: '#38bdf8', height: 14, borderRadius: '0 3px 3px 0', width: `${pctWidth}%` }} />}
         </div>
         <span style={{ fontSize: 12, width: 40, textAlign: 'right', color: 'var(--nd-text-2)' }}>{val.toFixed(2)}</span>
       </div>
@@ -285,7 +285,7 @@ const RiskAnalytics: React.FC = () => {
                 <span style={{ display: 'inline-block', width: 12, height: 12, background: '#f97316', borderRadius: 2 }} /> Negative
               </span>
               <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                <span style={{ display: 'inline-block', width: 12, height: 12, background: '#3b82f6', borderRadius: 2 }} /> Positive
+                <span style={{ display: 'inline-block', width: 12, height: 12, background: '#38bdf8', borderRadius: 2 }} /> Positive
               </span>
             </div>
           </div>
@@ -294,9 +294,9 @@ const RiskAnalytics: React.FC = () => {
             <h2 className="nd-section-title">Risk Variance Decomposition</h2>
             <div style={{ display: 'flex', borderRadius: 6, overflow: 'hidden', height: 22, marginBottom: 12 }}>
               {[
-                { key: 'market',       label: 'Market',       color: '#3b82f6' },
+                { key: 'market',       label: 'Market',       color: '#38bdf8' },
                 { key: 'size',         label: 'Size',         color: '#7c3aed' },
-                { key: 'value',        label: 'Value',        color: '#22c55e' },
+                { key: 'value',        label: 'Value',        color: '#34d399' },
                 { key: 'momentum',     label: 'Momentum',     color: '#f97316' },
                 { key: 'idiosyncratic',label: 'Idiosyncratic',color: '#94a3b8' },
               ].map(seg => (
@@ -306,9 +306,9 @@ const RiskAnalytics: React.FC = () => {
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, fontSize: 12 }}>
               {[
-                { key: 'market', label: 'Market', color: '#3b82f6' },
+                { key: 'market', label: 'Market', color: '#38bdf8' },
                 { key: 'size', label: 'Size', color: '#7c3aed' },
-                { key: 'value', label: 'Value', color: '#22c55e' },
+                { key: 'value', label: 'Value', color: '#34d399' },
                 { key: 'momentum', label: 'Momentum', color: '#f97316' },
                 { key: 'idiosyncratic', label: 'Idiosyncratic', color: '#94a3b8' },
               ].map(seg => (
@@ -338,9 +338,9 @@ const RiskAnalytics: React.FC = () => {
                       <td style={{ fontWeight: 700, color: 'var(--nd-green)' }}>{h.symbol}</td>
                       <td className="text-right">{pct(h.weight)}</td>
                       <td className="text-right" style={{ fontWeight: 600, color: h.beta > 1 ? '#f97316' : 'var(--nd-green)' }}>{h.beta.toFixed(2)}</td>
-                      <td className="text-right" style={{ color: h.size >= 0 ? '#3b82f6' : '#f97316' }}>{h.size.toFixed(2)}</td>
-                      <td className="text-right" style={{ color: h.value >= 0 ? '#3b82f6' : '#f97316' }}>{h.value.toFixed(2)}</td>
-                      <td className="text-right" style={{ color: h.momentum >= 0 ? '#3b82f6' : '#f97316' }}>{h.momentum.toFixed(2)}</td>
+                      <td className="text-right" style={{ color: h.size >= 0 ? '#38bdf8' : '#f97316' }}>{h.size.toFixed(2)}</td>
+                      <td className="text-right" style={{ color: h.value >= 0 ? '#38bdf8' : '#f97316' }}>{h.value.toFixed(2)}</td>
+                      <td className="text-right" style={{ color: h.momentum >= 0 ? '#38bdf8' : '#f97316' }}>{h.momentum.toFixed(2)}</td>
                       <td className="text-right" style={{ color: h.quality >= 0.5 ? 'var(--nd-green)' : '#f97316' }}>{h.quality.toFixed(2)}</td>
                     </tr>
                   ))}
@@ -454,7 +454,7 @@ const RiskAnalytics: React.FC = () => {
                 <div className="nd-grid-3" style={{ gap: 14 }}>
                   {[
                     { label: 'Current Portfolio', p: optimization.currentPortfolio,     accent: 'var(--nd-border)', icon: 'account_balance_wallet' },
-                    { label: 'Min Variance',      p: optimization.minVariancePortfolio, accent: '#3b82f6',          icon: 'compress' },
+                    { label: 'Min Variance',      p: optimization.minVariancePortfolio, accent: '#38bdf8',          icon: 'compress' },
                     { label: 'Max Sharpe',        p: optimization.maxSharpePortfolio,   accent: 'var(--nd-green)', icon: 'stars' },
                   ].map(({ label, p, accent, icon }) => (
                     <div key={label} style={{ background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderTop: `3px solid ${accent}`, borderRadius: 10, padding: '14px 16px' }}>
@@ -465,7 +465,7 @@ const RiskAnalytics: React.FC = () => {
                       {[
                         { l: 'Expected Return', v: pct(p.expectedReturn), c: 'var(--nd-green)' },
                         { l: 'Volatility',      v: pct(p.volatility),     c: '#f97316' },
-                        { l: 'Sharpe Ratio',    v: p.sharpeRatio.toFixed(3), c: '#3b82f6' },
+                        { l: 'Sharpe Ratio',    v: p.sharpeRatio.toFixed(3), c: '#38bdf8' },
                       ].map(r => (
                         <div key={r.l} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid var(--nd-border)', fontSize: 12.5 }}>
                           <span style={{ color: 'var(--nd-text-2)' }}>{r.l}</span>
@@ -500,13 +500,13 @@ const RiskAnalytics: React.FC = () => {
                       const mv  = optimization.minVariancePortfolio;
                       return (
                         <>
-                          <polyline points={polyline} fill="none" stroke="#3b82f6" strokeWidth="2.5" strokeLinecap="round" />
-                          {pts.map((p, i) => <circle key={i} cx={sx(p.volatility)} cy={sy(p.return)} r="3" fill="#3b82f6" fillOpacity="0.45" />)}
+                          <polyline points={polyline} fill="none" stroke="#38bdf8" strokeWidth="2.5" strokeLinecap="round" />
+                          {pts.map((p, i) => <circle key={i} cx={sx(p.volatility)} cy={sy(p.return)} r="3" fill="#38bdf8" fillOpacity="0.45" />)}
                           <circle cx={sx(cur.volatility)} cy={sy(cur.expectedReturn)} r="7" fill="#94a3b8" stroke="white" strokeWidth="2" />
                           <text x={sx(cur.volatility) + 10} y={sy(cur.expectedReturn) - 5} fontSize="10" fill="var(--nd-text-2)">Current</text>
                           <circle cx={sx(ms.volatility)} cy={sy(ms.expectedReturn)} r="7" fill="var(--nd-green)" stroke="white" strokeWidth="2" />
                           <text x={sx(ms.volatility) + 10} y={sy(ms.expectedReturn) - 5} fontSize="10" fill="var(--nd-text-2)">Max Sharpe</text>
-                          <circle cx={sx(mv.volatility)} cy={sy(mv.expectedReturn)} r="7" fill="#3b82f6" stroke="white" strokeWidth="2" />
+                          <circle cx={sx(mv.volatility)} cy={sy(mv.expectedReturn)} r="7" fill="#38bdf8" stroke="white" strokeWidth="2" />
                           <text x={sx(mv.volatility) + 10} y={sy(mv.expectedReturn) + 14} fontSize="10" fill="var(--nd-text-2)">Min Var</text>
                         </>
                       );
@@ -560,7 +560,7 @@ const RiskAnalytics: React.FC = () => {
               <div className="nd-grid-3" style={{ gap: 16, marginBottom: 20 }}>
                 {[
                   { label: 'Current Portfolio', p: optimization.currentPortfolio,     accent: 'var(--nd-border)', icon: 'account_balance_wallet' },
-                  { label: 'Min Variance',      p: optimization.minVariancePortfolio, accent: '#3b82f6',          icon: 'compress' },
+                  { label: 'Min Variance',      p: optimization.minVariancePortfolio, accent: '#38bdf8',          icon: 'compress' },
                   { label: 'Max Sharpe',        p: optimization.maxSharpePortfolio,   accent: 'var(--nd-green)', icon: 'stars' },
                 ].map(({ label, p, accent, icon }) => (
                   <div key={label} className="nd-card" style={{ borderTop: `3px solid ${accent}` }}>
@@ -571,7 +571,7 @@ const RiskAnalytics: React.FC = () => {
                     {[
                       { l: 'Expected Return', v: pct(p.expectedReturn), c: 'var(--nd-green)' },
                       { l: 'Volatility',      v: pct(p.volatility),     c: '#f97316' },
-                      { l: 'Sharpe Ratio',    v: p.sharpeRatio.toFixed(3), c: '#3b82f6' },
+                      { l: 'Sharpe Ratio',    v: p.sharpeRatio.toFixed(3), c: '#38bdf8' },
                     ].map(r => (
                       <div key={r.l} style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid var(--nd-border)', fontSize: 13 }}>
                         <span style={{ color: 'var(--nd-text-2)' }}>{r.l}</span>
@@ -604,13 +604,13 @@ const RiskAnalytics: React.FC = () => {
                       const mv  = optimization.minVariancePortfolio;
                       return (
                         <>
-                          <polyline points={polyline} fill="none" stroke="#3b82f6" strokeWidth="2.5" strokeLinecap="round" />
-                          {pts.map((p, i) => <circle key={i} cx={sx(p.volatility)} cy={sy(p.return)} r="3" fill="#3b82f6" fillOpacity="0.45" />)}
+                          <polyline points={polyline} fill="none" stroke="#38bdf8" strokeWidth="2.5" strokeLinecap="round" />
+                          {pts.map((p, i) => <circle key={i} cx={sx(p.volatility)} cy={sy(p.return)} r="3" fill="#38bdf8" fillOpacity="0.45" />)}
                           <circle cx={sx(cur.volatility)} cy={sy(cur.expectedReturn)} r="7" fill="#94a3b8" stroke="white" strokeWidth="2" />
                           <text x={sx(cur.volatility) + 10} y={sy(cur.expectedReturn) - 5} fontSize="10" fill="var(--nd-text-2)">Current</text>
                           <circle cx={sx(ms.volatility)} cy={sy(ms.expectedReturn)} r="7" fill="var(--nd-green)" stroke="white" strokeWidth="2" />
                           <text x={sx(ms.volatility) + 10} y={sy(ms.expectedReturn) - 5} fontSize="10" fill="var(--nd-text-2)">Max Sharpe</text>
-                          <circle cx={sx(mv.volatility)} cy={sy(mv.expectedReturn)} r="7" fill="#3b82f6" stroke="white" strokeWidth="2" />
+                          <circle cx={sx(mv.volatility)} cy={sy(mv.expectedReturn)} r="7" fill="#38bdf8" stroke="white" strokeWidth="2" />
                           <text x={sx(mv.volatility) + 10} y={sy(mv.expectedReturn) + 14} fontSize="10" fill="var(--nd-text-2)">Min Var</text>
                         </>
                       );

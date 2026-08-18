@@ -52,9 +52,9 @@ const NAV_RIGHT = [
 ];
 
 const BROKER_COLORS: Record<string, string> = {
-  groww:    '#00b386',
+  groww:    '#2dd4bf',
   zerodha:  '#387ed1',
-  angelone: '#e74c3c',
+  angelone: '#fb5c7d',
   upstox:   '#7c3aed',
 };
 

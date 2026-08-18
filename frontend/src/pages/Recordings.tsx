@@ -21,8 +21,8 @@ interface Recording {
 }
 
 const STATUS_META: Record<string, { label: string; color: string; bg: string; icon: string }> = {
-  scheduled: { label: 'Scheduled', color: '#f59e0b', bg: 'rgba(245,158,11,0.12)', icon: 'schedule' },
-  recording: { label: 'Recording', color: '#ef4444', bg: 'rgba(239,68,68,0.12)',  icon: 'fiber_manual_record' },
+  scheduled: { label: 'Scheduled', color: '#fbbf24', bg: 'rgba(245,158,11,0.12)', icon: 'schedule' },
+  recording: { label: 'Recording', color: '#fb5c7d', bg: 'rgba(239,68,68,0.12)',  icon: 'fiber_manual_record' },
   completed: { label: 'Completed', color: 'var(--nd-green)', bg: 'rgba(0,179,134,0.12)', icon: 'check_circle' },
 };
 
@@ -222,10 +222,10 @@ const Recordings: React.FC = () => {
       {(err || msg) && (
         <div style={{
           ...card, marginBottom: 16, padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 8,
-          borderLeft: `3px solid ${err ? '#ef4444' : 'var(--nd-green)'}`,
+          borderLeft: `3px solid ${err ? '#fb5c7d' : 'var(--nd-green)'}`,
           background: err ? 'rgba(239,68,68,0.08)' : 'rgba(0,179,134,0.08)',
         }}>
-          <span className="material-icons" style={{ fontSize: 16, color: err ? '#ef4444' : 'var(--nd-green)' }}>
+          <span className="material-icons" style={{ fontSize: 16, color: err ? '#fb5c7d' : 'var(--nd-green)' }}>
             {err ? 'error_outline' : 'check_circle'}
           </span>
           <span style={{ fontSize: 12.5, color: 'var(--nd-text-1)' }}>{err || msg}</span>
@@ -341,7 +341,7 @@ const Recordings: React.FC = () => {
                 <div style={{ marginLeft: 'auto', display: 'flex', gap: 6, alignItems: 'center' }}>
                   <span style={{ fontSize: 11.5, color: 'var(--nd-text-3)' }}>Delete? Captured data is kept.</span>
                   <button className="nd-btn nd-btn-outline" disabled={busy[rec.id]} onClick={() => remove(rec)}
-                    style={{ padding: '8px 12px', fontSize: 12.5, minHeight: 36, color: '#fff', background: '#ef4444', borderColor: '#ef4444' }}>
+                    style={{ padding: '8px 12px', fontSize: 12.5, minHeight: 36, color: '#fff', background: '#fb5c7d', borderColor: '#fb5c7d' }}>
                     {busy[rec.id] ? 'Deleting…' : 'Confirm'}
                   </button>
                   <button className="nd-btn nd-btn-outline" onClick={() => setConfirmDel(null)}
@@ -350,7 +350,7 @@ const Recordings: React.FC = () => {
               ) : (
                 <button className="nd-btn nd-btn-outline" disabled={busy[rec.id]} onClick={() => setConfirmDel(rec.id)}
                   title="Delete recording (captured data already in the dataset is kept)"
-                  style={{ marginLeft: 'auto', padding: '8px 12px', minHeight: 36, color: '#ef4444', borderColor: 'rgba(239,68,68,0.4)' }}>
+                  style={{ marginLeft: 'auto', padding: '8px 12px', minHeight: 36, color: '#fb5c7d', borderColor: 'rgba(239,68,68,0.4)' }}>
                   <span className="material-icons" style={{ fontSize: 16 }}>delete_outline</span>
                 </button>
               )}
@@ -370,7 +370,7 @@ const Recordings: React.FC = () => {
                           <span style={{ fontWeight: 700, fontSize: 13, color: 'var(--nd-text-1)' }}>{c.symbol}</span>
                           {c.ticks === 0 ? <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>No data</span>
                             : c.fullDay ? <span style={{ fontSize: 11, color: 'var(--nd-green)', fontWeight: 600 }}>Full day</span>
-                            : <span style={{ fontSize: 11, color: '#f59e0b', fontWeight: 600 }}>Partial</span>}
+                            : <span style={{ fontSize: 11, color: '#fbbf24', fontWeight: 600 }}>Partial</span>}
                         </div>
                         <div style={{ fontSize: 11.5, color: 'var(--nd-text-3)', marginBottom: 10 }}>
                           {c.ticks.toLocaleString()} ticks
@@ -404,7 +404,7 @@ const Recordings: React.FC = () => {
                         <span>
                           {c.ticks === 0 ? <span style={{ color: 'var(--nd-text-3)' }}>—</span>
                             : c.fullDay ? <span style={{ color: 'var(--nd-green)', fontWeight: 600 }}>Full day</span>
-                            : <span style={{ color: '#f59e0b', fontWeight: 600 }}>Partial</span>}
+                            : <span style={{ color: '#fbbf24', fontWeight: 600 }}>Partial</span>}
                         </span>
                         <span style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
                           <button className="nd-btn nd-btn-outline" disabled={c.ticks === 0} onClick={() => openChart(rec.id, c.symbol)}
@@ -462,7 +462,7 @@ const Recordings: React.FC = () => {
                   <div style={{ fontSize: 12, color: 'var(--nd-text-3)', marginBottom: 10 }}>
                     {chart.candles.length} bars · {chart.coverage.ticks.toLocaleString()} ticks ·
                     {chart.coverage.firstTime}–{chart.coverage.lastTime} ·
-                    {chart.coverage.fullDay ? <span style={{ color: 'var(--nd-green)' }}> full day</span> : <span style={{ color: '#f59e0b' }}> partial</span>}
+                    {chart.coverage.fullDay ? <span style={{ color: 'var(--nd-green)' }}> full day</span> : <span style={{ color: '#fbbf24' }}> partial</span>}
                   </div>
                 )}
                 <TradingChart candles={chart.candles}

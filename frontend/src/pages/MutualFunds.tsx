@@ -200,7 +200,7 @@ const MutualFunds: React.FC = () => {
                   AI verdict · {scan.replace} replace, {scan.count - scan.replace} keep/review
                 </div>
                 {scan.results.map((r: any) => {
-                  const col = r.verdict === 'REPLACE' ? '#ef4444' : r.verdict === 'REVIEW' ? '#f59e0b' : '#22c55e';
+                  const col = r.verdict === 'REPLACE' ? '#fb5c7d' : r.verdict === 'REVIEW' ? '#fbbf24' : '#34d399';
                   return (
                     <div key={r.fund.schemeCode} style={{ border: '1px solid var(--nd-border)', borderLeft: `3px solid ${col}`, borderRadius: 8, padding: '10px 12px', marginBottom: 8 }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
@@ -242,7 +242,7 @@ const MutualFunds: React.FC = () => {
                   🤖 {opt.aiSummary || opt.summary}
                 </div>
                 <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 14 }}>
-                  {[['Keep', opt.keep, '#22c55e'], ['Replace', opt.replace, '#ef4444'], ['Consolidate', opt.consolidate, '#f59e0b'], ['Avg risk-adj', opt.avgRiskAdjusted, 'var(--nd-text-1)']].map(([l, v, c], i) => (
+                  {[['Keep', opt.keep, '#34d399'], ['Replace', opt.replace, '#fb5c7d'], ['Consolidate', opt.consolidate, '#fbbf24'], ['Avg risk-adj', opt.avgRiskAdjusted, 'var(--nd-text-1)']].map(([l, v, c], i) => (
                     <div key={i} className="nd-card" style={{ padding: '10px 14px' }}><div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>{l as string}</div><div style={{ fontSize: 16, fontWeight: 700, color: c as string }}>{v as any}</div></div>
                   ))}
                 </div>
@@ -250,7 +250,7 @@ const MutualFunds: React.FC = () => {
                 <div className="nd-card" style={{ padding: '14px 18px', marginBottom: 14 }}>
                   <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>Asset allocation vs {opt.risk} target</div>
                   {opt.allocation.map((a: any) => {
-                    const col = a.status === 'overweight' ? '#ef4444' : a.status === 'underweight' ? '#f59e0b' : '#22c55e';
+                    const col = a.status === 'overweight' ? '#fb5c7d' : a.status === 'underweight' ? '#fbbf24' : '#34d399';
                     return (
                       <div key={a.asset} style={{ marginBottom: 10 }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, marginBottom: 3 }}>
@@ -269,7 +269,7 @@ const MutualFunds: React.FC = () => {
 
                 <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>Action plan</div>
                 {opt.actions.map((a: any, i: number) => {
-                  const col = a.verdict === 'REPLACE' ? '#ef4444' : a.verdict === 'CONSOLIDATE' ? '#f59e0b' : '#22c55e';
+                  const col = a.verdict === 'REPLACE' ? '#fb5c7d' : a.verdict === 'CONSOLIDATE' ? '#fbbf24' : '#34d399';
                   return (
                     <div key={i} style={{ border: '1px solid var(--nd-border)', borderLeft: `3px solid ${col}`, borderRadius: 8, padding: '10px 12px', marginBottom: 8 }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
@@ -321,7 +321,7 @@ const MutualFunds: React.FC = () => {
                   </tr></thead>
                   <tbody>
                     {screen.funds.map((f: any) => (
-                      <tr key={f.schemeCode} style={{ borderTop: '1px solid var(--nd-border)', background: f.aiPick ? 'rgba(34,197,94,0.12)' : 'transparent', boxShadow: f.aiPick ? 'inset 3px 0 0 #22c55e' : 'none' }}>
+                      <tr key={f.schemeCode} style={{ borderTop: '1px solid var(--nd-border)', background: f.aiPick ? 'rgba(34,197,94,0.12)' : 'transparent', boxShadow: f.aiPick ? 'inset 3px 0 0 #34d399' : 'none' }}>
                         <td style={{ padding: '8px 10px', color: 'var(--nd-text-3)', whiteSpace: 'nowrap' }}>{f.rank}{f.aiPick ? ' ⭐' : ''}</td>
                         <td style={{ padding: '8px 10px', maxWidth: 260 }}>
                           <div style={{ fontWeight: 600, color: 'var(--nd-text-1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={f.name}>{f.name}</div>

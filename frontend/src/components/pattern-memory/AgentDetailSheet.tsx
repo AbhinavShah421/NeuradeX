@@ -18,7 +18,7 @@ const AgentDetailSheet: React.FC<{ agent: LearningAgent; rank: number; onClose: 
     edge: '',
   };
 
-  const ACTION_COLOR: Record<string, string> = { BUY: '#22c55e', SELL: '#ef4444', HOLD: '#f59e0b' };
+  const ACTION_COLOR: Record<string, string> = { BUY: '#34d399', SELL: '#fb5c7d', HOLD: '#fbbf24' };
   const ACTION_BG:    Record<string, string> = { BUY: 'rgba(34,197,94,0.08)', SELL: 'rgba(239,68,68,0.08)', HOLD: 'rgba(245,158,11,0.08)' };
 
   const byAction: AgentActionStat[] = a.byAction ?? a.by_action ?? [];
@@ -86,7 +86,7 @@ const AgentDetailSheet: React.FC<{ agent: LearningAgent; rank: number; onClose: 
               { label: 'Weight',  value: String(a.weight),       icon: 'balance',      iconCol: 'var(--nd-text-2)' },
               { label: 'Rank',    value: `#${rank}`,              icon: 'leaderboard',  iconCol: 'var(--nd-text-2)' },
               { label: 'Correct', value: String(a.correct ?? 0), icon: 'check_circle', iconCol: 'var(--nd-green)'  },
-              { label: 'Wrong',   value: String(wrong),           icon: 'cancel',       iconCol: '#e74c3c'          },
+              { label: 'Wrong',   value: String(wrong),           icon: 'cancel',       iconCol: '#fb5c7d'          },
             ].map(s => (
               <div key={s.label} style={{ background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 10, padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 10 }}>
                 <span className="material-icons" style={{ fontSize: 22, color: s.iconCol, flexShrink: 0 }}>{s.icon}</span>
@@ -102,8 +102,8 @@ const AgentDetailSheet: React.FC<{ agent: LearningAgent; rank: number; onClose: 
           {sortedActions.length > 0 && (
             <div style={{ background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 12, padding: '14px 16px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 12 }}>
-                <span className="material-icons" style={{ fontSize: 14, color: '#a855f7' }}>pie_chart</span>
-                <span style={{ fontSize: 11, fontWeight: 700, color: '#a855f7', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                <span className="material-icons" style={{ fontSize: 14, color: '#a78bfa' }}>pie_chart</span>
+                <span style={{ fontSize: 11, fontWeight: 700, color: '#a78bfa', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
                   Vote Contribution to Training
                 </span>
               </div>
@@ -141,7 +141,7 @@ const AgentDetailSheet: React.FC<{ agent: LearningAgent; rank: number; onClose: 
                         <span style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>{x.total.toLocaleString()}</span>
                         <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>decisions ({sharePct}%)</span>
                         {avgPnl != null && x.action !== 'HOLD' && (
-                          <span style={{ marginLeft: 'auto', fontSize: 12, fontWeight: 600, color: avgPnl >= 0 ? '#22c55e' : '#ef4444' }}>
+                          <span style={{ marginLeft: 'auto', fontSize: 12, fontWeight: 600, color: avgPnl >= 0 ? '#34d399' : '#fb5c7d' }}>
                             {avgPnl >= 0 ? '+' : ''}{avgPnl}% avg P&L
                           </span>
                         )}
@@ -155,21 +155,21 @@ const AgentDetailSheet: React.FC<{ agent: LearningAgent; rank: number; onClose: 
                       {/* Row 2: correct / wrong / accuracy */}
                       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                          <span className="material-icons" style={{ fontSize: 13, color: '#22c55e' }}>check_circle</span>
-                          <span style={{ fontSize: 13, fontWeight: 700, color: '#22c55e' }}>{correct.toLocaleString()}</span>
+                          <span className="material-icons" style={{ fontSize: 13, color: '#34d399' }}>check_circle</span>
+                          <span style={{ fontSize: 13, fontWeight: 700, color: '#34d399' }}>{correct.toLocaleString()}</span>
                           <span style={{ fontSize: 10, color: 'var(--nd-text-3)' }}>correct</span>
                         </div>
                         <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>·</span>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                          <span className="material-icons" style={{ fontSize: 13, color: '#ef4444' }}>cancel</span>
-                          <span style={{ fontSize: 13, fontWeight: 700, color: '#ef4444' }}>{wrongCnt.toLocaleString()}</span>
+                          <span className="material-icons" style={{ fontSize: 13, color: '#fb5c7d' }}>cancel</span>
+                          <span style={{ fontSize: 13, fontWeight: 700, color: '#fb5c7d' }}>{wrongCnt.toLocaleString()}</span>
                           <span style={{ fontSize: 10, color: 'var(--nd-text-3)' }}>wrong</span>
                         </div>
                         {ratePct != null && (
                           <div style={{ marginLeft: 'auto', display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 3 }}>
-                            <span style={{ fontSize: 16, fontWeight: 800, color: ratePct >= 50 ? '#22c55e' : '#ef4444', lineHeight: 1 }}>{ratePct}%</span>
+                            <span style={{ fontSize: 16, fontWeight: 800, color: ratePct >= 50 ? '#34d399' : '#fb5c7d', lineHeight: 1 }}>{ratePct}%</span>
                             <div style={{ width: 72, height: 4, background: 'var(--nd-border)', borderRadius: 2 }}>
-                              <div style={{ height: '100%', width: `${ratePct}%`, background: ratePct >= 50 ? '#22c55e' : '#ef4444', borderRadius: 2 }} />
+                              <div style={{ height: '100%', width: `${ratePct}%`, background: ratePct >= 50 ? '#34d399' : '#fb5c7d', borderRadius: 2 }} />
                             </div>
                           </div>
                         )}
@@ -259,8 +259,8 @@ const AgentDetailSheet: React.FC<{ agent: LearningAgent; rank: number; onClose: 
                   borderRadius: 12, padding: '14px 16px',
                 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
-                    <span className="material-icons" style={{ fontSize: 14, color: '#f59e0b' }}>lightbulb</span>
-                    <span style={{ fontSize: 11, fontWeight: 700, color: '#f59e0b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                    <span className="material-icons" style={{ fontSize: 14, color: '#fbbf24' }}>lightbulb</span>
+                    <span style={{ fontSize: 11, fontWeight: 700, color: '#fbbf24', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
                       When it shines
                     </span>
                   </div>

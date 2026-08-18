@@ -73,7 +73,7 @@ const OptimizeTab: React.FC<OptimizeTabProps> = ({
                   const status = String(o.status || '').toUpperCase();
                   const canCancel = CANCELLABLE.includes(status);
                   const stColor = ['EXECUTED', 'COMPLETE', 'FILLED'].includes(status) ? 'var(--nd-green)'
-                    : ['FAILED', 'REJECTED', 'CANCELLED'].includes(status) ? 'var(--nd-red)' : 'var(--nd-orange, #f59e0b)';
+                    : ['FAILED', 'REJECTED', 'CANCELLED'].includes(status) ? 'var(--nd-red)' : 'var(--nd-orange, #fbbf24)';
                   return (
                     <tr key={o.orderId || o.referenceId}>
                       <td style={{ fontWeight: 700, fontFamily: 'monospace', color: 'var(--nd-text-1)' }}>{o.symbol}</td>
@@ -86,7 +86,7 @@ const OptimizeTab: React.FC<OptimizeTabProps> = ({
                           <button onClick={() => cancelPendingOrder(o.orderId, o.segment)} disabled={cancellingId === o.orderId}
                             // Cancels a live Groww order — minHeight keeps
                             // the tap target real-sized in this dense row.
-                            style={{ fontSize: 11.5, fontWeight: 700, padding: '6px 12px', minHeight: 34, borderRadius: 6, border: '1px solid #ef444455', background: '#ef44441a', color: '#ef4444', cursor: cancellingId === o.orderId ? 'wait' : 'pointer' }}>
+                            style={{ fontSize: 11.5, fontWeight: 700, padding: '6px 12px', minHeight: 34, borderRadius: 6, border: '1px solid #fb5c7d55', background: '#fb5c7d1a', color: '#fb5c7d', cursor: cancellingId === o.orderId ? 'wait' : 'pointer' }}>
                             {cancellingId === o.orderId ? '…' : 'Cancel'}
                           </button>
                         ) : (
@@ -193,8 +193,8 @@ const OptimizeTab: React.FC<OptimizeTabProps> = ({
                                     quantity: alt.order?.quantity ?? alt.buyQty, orderType: alt.order?.orderType,
                                     price: alt.order?.limitPrice, exchange: alt.order?.exchange, product: alt.order?.product,
                                     estValue: alt.order?.estValue })}
-                                    style={{ marginLeft: 'auto', fontSize: 11, fontWeight: 700, padding: '3px 10px', borderRadius: 6, border: '1px solid #22c55e55',
-                                      background: '#22c55e1a', color: '#22c55e', cursor: 'pointer' }}>
+                                    style={{ marginLeft: 'auto', fontSize: 11, fontWeight: 700, padding: '3px 10px', borderRadius: 6, border: '1px solid #34d39955',
+                                      background: '#34d3991a', color: '#34d399', cursor: 'pointer' }}>
                                     Buy {alt.buyQty}
                                   </button>
                                 )}
@@ -214,9 +214,9 @@ const OptimizeTab: React.FC<OptimizeTabProps> = ({
                                 quantity: trade.quantity, orderType: trade.orderType, price: trade.limitPrice,
                                 exchange: trade.exchange, product: trade.product, estValue: trade.estValue })}
                                 style={{ fontSize: 11, fontWeight: 700, padding: '4px 12px', borderRadius: 6, cursor: 'pointer',
-                                  border: `1px solid ${trade.transactionType === 'SELL' ? '#ef444455' : '#22c55e55'}`,
-                                  background: trade.transactionType === 'SELL' ? '#ef44441a' : '#22c55e1a',
-                                  color: trade.transactionType === 'SELL' ? '#ef4444' : '#22c55e' }}>
+                                  border: `1px solid ${trade.transactionType === 'SELL' ? '#fb5c7d55' : '#34d39955'}`,
+                                  background: trade.transactionType === 'SELL' ? '#fb5c7d1a' : '#34d3991a',
+                                  color: trade.transactionType === 'SELL' ? '#fb5c7d' : '#34d399' }}>
                                 {trade.transactionType} {trade.quantity}
                               </button>
                             ) : (
@@ -249,9 +249,9 @@ const OptimizeTab: React.FC<OptimizeTabProps> = ({
 
             {/* Risk warnings */}
             {Array.isArray(plan.riskWarnings) && plan.riskWarnings.length > 0 && (
-              <div style={{ background: '#f59e0b10', border: '1px solid #f59e0b30', borderRadius: 12, padding: '14px 18px' }}>
+              <div style={{ background: '#fbbf2410', border: '1px solid #fbbf2430', borderRadius: 12, padding: '14px 18px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                  <span className="material-icons" style={{ color: '#f59e0b', fontSize: 18 }}>warning_amber</span>
+                  <span className="material-icons" style={{ color: '#fbbf24', fontSize: 18 }}>warning_amber</span>
                   <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--nd-text-1)' }}>Risk Warnings</span>
                 </div>
                 <ul style={{ margin: 0, paddingLeft: 22, color: 'var(--nd-text-2)', fontSize: 12.5, lineHeight: 1.7 }}>

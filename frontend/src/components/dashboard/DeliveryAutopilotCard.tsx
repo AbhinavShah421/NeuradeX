@@ -35,20 +35,20 @@ const DeliveryAutopilotCard: React.FC = () => {
   const on = !!data?.enabled;
 
   return (
-    <div className="nd-card" style={{ padding: '16px 18px', marginBottom: 20, borderLeft: `3px solid ${on ? '#3b82f6' : 'var(--nd-border)'}` }}>
+    <div className="nd-card" style={{ padding: '16px 18px', marginBottom: 20, borderLeft: `3px solid ${on ? '#38bdf8' : 'var(--nd-border)'}` }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 10 }}>
-        <div className="nd-icon-chip" style={{ background: on ? '#3b82f61a' : 'var(--nd-surface)' }}>
-          <span className="material-icons" style={{ color: on ? '#3b82f6' : 'var(--nd-text-2)' }}>calendar_month</span>
+        <div className="nd-icon-chip" style={{ background: on ? '#38bdf81a' : 'var(--nd-surface)' }}>
+          <span className="material-icons" style={{ color: on ? '#38bdf8' : 'var(--nd-text-2)' }}>calendar_month</span>
         </div>
         <div style={{ flex: 1, minWidth: 180 }}>
           <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>Delivery Autopilot
-            <span style={{ fontSize: 10, fontWeight: 700, marginLeft: 6, color: on ? '#3b82f6' : 'var(--nd-text-3)', border: `1px solid ${on ? '#3b82f6' : 'var(--nd-border)'}`, borderRadius: 4, padding: '0 5px' }}>{on ? 'ON' : 'OFF'}</span>
+            <span style={{ fontSize: 10, fontWeight: 700, marginLeft: 6, color: on ? '#38bdf8' : 'var(--nd-text-3)', border: `1px solid ${on ? '#38bdf8' : 'var(--nd-border)'}`, borderRadius: 4, padding: '0 5px' }}>{on ? 'ON' : 'OFF'}</span>
           </div>
           <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>Multi-day paper portfolios on delivery picks — an AI agent times the exits (target / stop / time-stop / downgrade). Feeds the Delivery line.</div>
         </div>
         <button onClick={() => setShowCreate(s => !s)} style={{ padding: '6px 12px', fontSize: 12, fontWeight: 600, borderRadius: 7, border: '1px solid var(--nd-border)', background: 'transparent', color: 'var(--nd-text-2)', cursor: 'pointer' }}>+ Portfolio</button>
-        <button onClick={runTick} disabled={busy} style={{ padding: '6px 12px', fontSize: 12, fontWeight: 600, borderRadius: 7, border: '1px solid #3b82f6', background: 'transparent', color: '#3b82f6', cursor: 'pointer' }}>{busy ? '…' : 'Run now'}</button>
-        <button onClick={toggle} disabled={busy} style={{ padding: '6px 14px', fontSize: 12, fontWeight: 700, borderRadius: 7, border: 'none', background: on ? 'var(--nd-red)' : '#3b82f6', color: '#fff', cursor: 'pointer' }}>{on ? 'Disable' : 'Enable'}</button>
+        <button onClick={runTick} disabled={busy} style={{ padding: '6px 12px', fontSize: 12, fontWeight: 600, borderRadius: 7, border: '1px solid #38bdf8', background: 'transparent', color: '#38bdf8', cursor: 'pointer' }}>{busy ? '…' : 'Run now'}</button>
+        <button onClick={toggle} disabled={busy} style={{ padding: '6px 14px', fontSize: 12, fontWeight: 700, borderRadius: 7, border: 'none', background: on ? 'var(--nd-red)' : '#38bdf8', color: '#fff', cursor: 'pointer' }}>{on ? 'Disable' : 'Enable'}</button>
       </div>
 
       {showCreate && (
@@ -58,7 +58,7 @@ const DeliveryAutopilotCard: React.FC = () => {
               <input className="nd-input" style={{ width: w as number }} value={(form as any)[k as string]}
                 onChange={e => setForm({ ...form, [k as string]: k === 'name' ? e.target.value : e.target.value.replace(/[^0-9.]/g, '') })} /></div>
           ))}
-          <button onClick={create} style={{ padding: '8px 14px', borderRadius: 7, border: 'none', background: '#3b82f6', color: '#fff', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>Create</button>
+          <button onClick={create} style={{ padding: '8px 14px', borderRadius: 7, border: 'none', background: '#38bdf8', color: '#fff', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>Create</button>
         </div>
       )}
 
@@ -70,7 +70,7 @@ const DeliveryAutopilotCard: React.FC = () => {
           <div key={p.id} style={{ border: '1px solid var(--nd-border)', borderRadius: 8, padding: '10px 12px', marginBottom: 8 }}>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
               <span style={{ fontWeight: 700, color: 'var(--nd-text-1)' }}>{p.name}</span>
-              <span style={{ fontSize: 9, fontWeight: 700, color: p.source === 'optimize' ? '#a855f7' : '#3b82f6', border: `1px solid ${p.source === 'optimize' ? '#a855f7' : '#3b82f6'}`, borderRadius: 4, padding: '0 5px' }}>{p.source === 'optimize' ? 'OPTIMIZE TEST' : 'AI-MANAGED'}</span>
+              <span style={{ fontSize: 9, fontWeight: 700, color: p.source === 'optimize' ? '#a78bfa' : '#38bdf8', border: `1px solid ${p.source === 'optimize' ? '#a78bfa' : '#38bdf8'}`, borderRadius: 4, padding: '0 5px' }}>{p.source === 'optimize' ? 'OPTIMIZE TEST' : 'AI-MANAGED'}</span>
               <span style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>₹{inr(p.value)} · {p.positions.length} pos · cash ₹{inr(p.cash)}</span>
               <span style={{ fontSize: 13, fontWeight: 700, color: ret >= 0 ? 'var(--nd-green)' : 'var(--nd-red)' }}>{ret >= 0 ? '+' : ''}{ret}%</span>
               <span style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>

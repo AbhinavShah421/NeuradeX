@@ -135,7 +135,7 @@ const InvestTab: React.FC<InvestTabProps> = ({
                           <td style={{ textAlign: 'center' }}>
                             <button onClick={() => askOrder({ symbol: p.symbol, transactionType: 'BUY', quantity: p.order.quantity,
                               orderType: p.order.orderType, price: p.order.limitPrice, exchange: p.order.exchange, product: p.order.product, estValue: p.order.estValue })}
-                              style={{ fontSize: 11, fontWeight: 700, padding: '4px 12px', borderRadius: 6, border: '1px solid #22c55e55', background: '#22c55e1a', color: '#22c55e', cursor: 'pointer' }}>
+                              style={{ fontSize: 11, fontWeight: 700, padding: '4px 12px', borderRadius: 6, border: '1px solid #34d39955', background: '#34d3991a', color: '#34d399', cursor: 'pointer' }}>
                               Buy {p.quantity}
                             </button>
                           </td>

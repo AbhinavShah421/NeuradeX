@@ -49,7 +49,7 @@ const RiskTab: React.FC<RiskTabProps> = ({ portfolio, riskMetrics, riskLab }) =>
                 label: 'Diversification (HHI)',
                 value: riskMetrics.hhi.toFixed(3),
                 sub: riskMetrics.hhi > 0.25 ? 'High concentration' : riskMetrics.hhi > 0.12 ? 'Moderate' : 'Well diversified',
-                color: riskMetrics.hhi > 0.25 ? 'var(--nd-red)' : riskMetrics.hhi > 0.12 ? '#f59e0b' : 'var(--nd-green)',
+                color: riskMetrics.hhi > 0.25 ? 'var(--nd-red)' : riskMetrics.hhi > 0.12 ? '#fbbf24' : 'var(--nd-green)',
                 icon: 'donut_large',
               },
               {
@@ -94,7 +94,7 @@ const RiskTab: React.FC<RiskTabProps> = ({ portfolio, riskMetrics, riskLab }) =>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                       <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--nd-text-1)' }}>{sw.symbol}</span>
                       {sw.isConcentrated && (
-                        <span style={{ fontSize: 10, background: '#ef444420', color: '#ef4444', padding: '1px 6px', borderRadius: 4, fontWeight: 600 }}>HIGH</span>
+                        <span style={{ fontSize: 10, background: '#fb5c7d20', color: '#fb5c7d', padding: '1px 6px', borderRadius: 4, fontWeight: 600 }}>HIGH</span>
                       )}
                     </div>
                     <div style={{ display: 'flex', gap: 16, alignItems: 'center' }}>
@@ -110,7 +110,7 @@ const RiskTab: React.FC<RiskTabProps> = ({ portfolio, riskMetrics, riskLab }) =>
                     <div style={{
                       height: '100%',
                       width: `${Math.min(sw.pct, 100)}%`,
-                      background: sw.isConcentrated ? 'var(--nd-red)' : sw.gain >= 0 ? 'var(--nd-green)' : '#f59e0b',
+                      background: sw.isConcentrated ? 'var(--nd-red)' : sw.gain >= 0 ? 'var(--nd-green)' : '#fbbf24',
                       borderRadius: 3,
                       transition: 'width 0.4s',
                     }} />
@@ -122,7 +122,7 @@ const RiskTab: React.FC<RiskTabProps> = ({ portfolio, riskMetrics, riskLab }) =>
 
           {/* Largest position warning */}
           {riskMetrics.topWeight > 0.10 && (
-            <div style={{ background: '#ef444410', border: '1px solid #ef444430', borderRadius: 12, padding: '14px 18px', display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div style={{ background: '#fb5c7d10', border: '1px solid #fb5c7d30', borderRadius: 12, padding: '14px 18px', display: 'flex', alignItems: 'center', gap: 12 }}>
               <span className="material-icons" style={{ color: 'var(--nd-red)', fontSize: 20 }}>warning</span>
               <div>
                 <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--nd-red)' }}>High Concentration Warning</div>
@@ -157,11 +157,11 @@ const RiskTab: React.FC<RiskTabProps> = ({ portfolio, riskMetrics, riskLab }) =>
                 <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6 }}>True diversification (correlation)</div>
                 {riskLab.diversification?.score == null ? <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>{riskLab.diversification?.note}</div> : (
                   <>
-                    <div style={{ fontSize: 28, fontWeight: 700, color: riskLab.diversification.score >= 60 ? 'var(--nd-green)' : riskLab.diversification.score >= 40 ? '#f59e0b' : 'var(--nd-red)' }}>{riskLab.diversification.score}<span style={{ fontSize: 13, color: 'var(--nd-text-3)' }}>/100</span></div>
+                    <div style={{ fontSize: 28, fontWeight: 700, color: riskLab.diversification.score >= 60 ? 'var(--nd-green)' : riskLab.diversification.score >= 40 ? '#fbbf24' : 'var(--nd-red)' }}>{riskLab.diversification.score}<span style={{ fontSize: 13, color: 'var(--nd-text-3)' }}>/100</span></div>
                     <div style={{ fontSize: 11.5, color: 'var(--nd-text-3)', marginBottom: 8 }}>avg correlation {riskLab.diversification.avgCorrelation} · {riskLab.diversification.note}</div>
                     {(riskLab.diversification.correlatedPairs ?? []).length > 0 && <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginBottom: 3 }}>Move together (hidden concentration):</div>}
                     {(riskLab.diversification.correlatedPairs ?? []).map((p: any, i: number) => (
-                      <div key={i} style={{ fontSize: 12, padding: '2px 0' }}><strong>{p.a}</strong> ↔ <strong>{p.b}</strong> <span style={{ color: '#f59e0b', fontWeight: 700 }}>{p.corr}</span></div>
+                      <div key={i} style={{ fontSize: 12, padding: '2px 0' }}><strong>{p.a}</strong> ↔ <strong>{p.b}</strong> <span style={{ color: '#fbbf24', fontWeight: 700 }}>{p.corr}</span></div>
                     ))}
                   </>
                 )}

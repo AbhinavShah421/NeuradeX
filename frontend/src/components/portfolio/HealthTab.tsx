@@ -12,7 +12,7 @@ const HealthTab: React.FC<HealthTabProps> = ({ health }) => {
       ) : health.score == null ? (
         <div style={{ textAlign: 'center', padding: 40, color: 'var(--nd-text-3)', fontSize: 13 }}>{health.note}</div>
       ) : (() => {
-        const sc = health.score; const col = sc >= 70 ? '#22c55e' : sc >= 55 ? '#f59e0b' : '#ef4444';
+        const sc = health.score; const col = sc >= 70 ? '#34d399' : sc >= 55 ? '#fbbf24' : '#fb5c7d';
         return (
           <div style={{ display: 'flex', gap: 22, flexWrap: 'wrap' }}>
             <div className="nd-card" style={{ padding: '18px 22px', textAlign: 'center', minWidth: 180 }}>
@@ -28,7 +28,7 @@ const HealthTab: React.FC<HealthTabProps> = ({ health }) => {
             <div style={{ flex: 1, minWidth: 280 }}>
               <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>Health factors</div>
               {health.factors.map((f: any) => {
-                const fc = f.score >= 70 ? '#22c55e' : f.score >= 50 ? '#f59e0b' : '#ef4444';
+                const fc = f.score >= 70 ? '#34d399' : f.score >= 50 ? '#fbbf24' : '#fb5c7d';
                 return (
                   <div key={f.key} style={{ marginBottom: 8 }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 2 }}>

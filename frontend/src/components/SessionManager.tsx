@@ -361,7 +361,7 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
                   <span className="material-icons" style={{ fontSize: 16, color: 'var(--nd-accent)' }}>psychology</span>
                   <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--nd-text-1)' }}>Live AI Decision</span>
                   {(detail.timingMode === 'aggressive' || d.timingMode === 'aggressive') && (
-                    <span style={{ fontSize: 9.5, fontWeight: 700, padding: '1px 6px', borderRadius: 4, background: '#f59e0b22', color: '#f59e0b', border: '1px solid #f59e0b55' }}>AGGRESSIVE</span>
+                    <span style={{ fontSize: 9.5, fontWeight: 700, padding: '1px 6px', borderRadius: 4, background: '#fbbf2422', color: '#fbbf24', border: '1px solid #fbbf2455' }}>AGGRESSIVE</span>
                   )}
                   <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 9px', borderRadius: 5, background: `${actColor(d.action)}1a`, color: actColor(d.action) }}>{d.action}</span>
                   {d.confidence != null && <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>{(d.confidence * 100).toFixed(0)}%</span>}

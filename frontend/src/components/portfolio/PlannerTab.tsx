@@ -51,7 +51,7 @@ const PlannerTab: React.FC<PlannerTabProps> = ({ plan, planForm, setPlanForm, pl
             ))}
           </div>
           {plan.goalAmount && (
-            <div style={{ fontSize: 12.5, marginBottom: 14, color: plan.onTrack ? 'var(--nd-green)' : '#f59e0b' }}>
+            <div style={{ fontSize: 12.5, marginBottom: 14, color: plan.onTrack ? 'var(--nd-green)' : '#fbbf24' }}>
               {plan.onTrack ? `✓ On track — projected ₹${inr(plan.projectedCorpus)} meets your ₹${inr(plan.goalAmount)} goal.` : `⚠ Short of goal — increase the SIP or horizon. Range: ₹${inr(plan.pessimistic)}–₹${inr(plan.optimistic)}.`}
             </div>
           )}
@@ -66,8 +66,8 @@ const PlannerTab: React.FC<PlannerTabProps> = ({ plan, planForm, setPlanForm, pl
               <div className="nd-card" style={{ padding: '14px 18px', marginBottom: 14 }}>
                 <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 6 }}>Projected growth ({plan.years} yrs)</div>
                 <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 140 }} preserveAspectRatio="none">
-                  <polyline points={`${line('optimistic')} ${pts.map((p: any, i: number) => `${sx(pts.length - 1 - i).toFixed(1)},${sy(p.pessimistic ? pts[pts.length - 1 - i].pessimistic : 0).toFixed(1)}`).join(' ')}`} fill="#22c55e15" stroke="none" />
-                  <polyline points={line('expected')} fill="none" stroke="#22c55e" strokeWidth="2" />
+                  <polyline points={`${line('optimistic')} ${pts.map((p: any, i: number) => `${sx(pts.length - 1 - i).toFixed(1)},${sy(p.pessimistic ? pts[pts.length - 1 - i].pessimistic : 0).toFixed(1)}`).join(' ')}`} fill="#34d39915" stroke="none" />
+                  <polyline points={line('expected')} fill="none" stroke="#34d399" strokeWidth="2" />
                   <text x={PL} y={H - 6} fontSize="9" fill="var(--nd-text-3)">Yr 1</text>
                   <text x={W - PR} y={H - 6} fontSize="9" fill="var(--nd-text-3)" textAnchor="end">Yr {plan.years}</text>
                 </svg>

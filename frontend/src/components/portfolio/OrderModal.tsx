@@ -18,7 +18,7 @@ const OrderModal: React.FC<OrderModalProps> = ({ orderMsg, setOrderMsg, pendingO
         <div onClick={() => setOrderMsg(null)}
           style={{ position: 'fixed', bottom: 20, right: 20, zIndex: 1100, maxWidth: 360, cursor: 'pointer',
             background: orderMsg.ok ? 'var(--nd-green-50)' : 'var(--nd-red-50)',
-            border: `1px solid ${orderMsg.ok ? '#22c55e55' : '#ef444455'}`, borderRadius: 10, padding: '12px 16px',
+            border: `1px solid ${orderMsg.ok ? '#34d39955' : '#fb5c7d55'}`, borderRadius: 10, padding: '12px 16px',
             display: 'flex', alignItems: 'center', gap: 10, boxShadow: 'var(--nd-shadow-md)' }}>
           <span className="material-icons" style={{ color: orderMsg.ok ? 'var(--nd-green)' : 'var(--nd-red)', fontSize: 20 }}>
             {orderMsg.ok ? 'check_circle' : 'error_outline'}

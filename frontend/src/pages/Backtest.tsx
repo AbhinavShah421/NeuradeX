@@ -88,11 +88,11 @@ const EquityCurve: React.FC<{ curve: EquityPoint[]; initialCapital: number; trad
   const dateIndex = new Map(curve.map((p, i) => [p.date, i]));
   const tradeMarkers = trades.flatMap(t => {
     const marks: {x:number;y:number;color:string;label:string}[] = [];
-    const ei = dateIndex.get(t.entryDate); if (ei !== undefined) marks.push({ x: sx(ei), y: sy(curve[ei].portfolio), color: '#22C55E', label: 'B' });
-    const xi = dateIndex.get(t.exitDate);  if (xi !== undefined) marks.push({ x: sx(xi), y: sy(curve[xi].portfolio), color: t.type === 'WIN' ? '#3B82F6' : '#EF4444', label: 'S' });
+    const ei = dateIndex.get(t.entryDate); if (ei !== undefined) marks.push({ x: sx(ei), y: sy(curve[ei].portfolio), color: '#34d399', label: 'B' });
+    const xi = dateIndex.get(t.exitDate);  if (xi !== undefined) marks.push({ x: sx(xi), y: sy(curve[xi].portfolio), color: t.type === 'WIN' ? '#38bdf8' : '#fb5c7d', label: 'S' });
     return marks;
   });
-  const portColor = curve[curve.length - 1].portfolio >= initialCapital ? '#3B82F6' : '#EF4444';
+  const portColor = curve[curve.length - 1].portfolio >= initialCapital ? '#38bdf8' : '#fb5c7d';
   return (
     <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: 300 }}>
       {yLabels.map((l, i) => <line key={i} x1={PL} x2={W-PR} y1={l.y} y2={l.y} stroke={gridColor} strokeDasharray="4" strokeWidth="1" />)}

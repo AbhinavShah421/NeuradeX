@@ -83,7 +83,7 @@ const AutopilotBanner: React.FC = () => {
             return (
               <button key={m} onClick={() => setPaperTiming(m)} disabled={busy === 'timing'}
                 style={{ padding: '3px 12px', borderRadius: 6, border: 'none', cursor: busy === 'timing' ? 'wait' : 'pointer', fontSize: 11, fontWeight: 600, textTransform: 'capitalize',
-                  background: active ? (m === 'aggressive' ? '#f59e0b' : 'var(--nd-green)') : 'transparent',
+                  background: active ? (m === 'aggressive' ? '#fbbf24' : 'var(--nd-green)') : 'transparent',
                   color: active ? '#fff' : 'var(--nd-text-2)' }}>
                 {m}
               </button>

@@ -25,12 +25,12 @@ const SectorsTab: React.FC<SectorsTabProps> = ({ sectorData }) => {
           </div>
 
           {(sectorData.warnings ?? []).map((w: string, i: number) => (
-            <div key={i} style={{ fontSize: 12, color: '#fca5a5', background: '#ef444415', border: '1px solid #ef444433', borderRadius: 8, padding: '8px 11px', marginBottom: 10 }}>⚠ {w}</div>
+            <div key={i} style={{ fontSize: 12, color: '#fca5a5', background: '#fb5c7d15', border: '1px solid #fb5c7d33', borderRadius: 8, padding: '8px 11px', marginBottom: 10 }}>⚠ {w}</div>
           ))}
 
           {/* Donut of current sector allocation */}
           {(() => {
-            const PALETTE = ['#22c55e', '#3b82f6', '#a855f7', '#f59e0b', '#ef4444', '#06b6d4', '#ec4899', '#84cc16', '#94a3b8'];
+            const PALETTE = ['#34d399', '#38bdf8', '#a78bfa', '#fbbf24', '#fb5c7d', '#06b6d4', '#ec4899', '#84cc16', '#94a3b8'];
             const entries = Object.entries(sectorData.current || {}) as [string, number][];
             if (!entries.length) return null;
             const top = entries.slice(0, 8);
@@ -71,7 +71,7 @@ const SectorsTab: React.FC<SectorsTabProps> = ({ sectorData }) => {
           <div className="nd-card" style={{ padding: '14px 18px', marginBottom: 14 }}>
             <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--nd-text-1)', marginBottom: 10 }}>Your sectors vs the AI-favoured target</div>
             {(sectorData.sectors ?? []).map((r: any) => {
-              const col = r.status === 'overweight' ? '#ef4444' : r.status === 'underweight' ? '#f59e0b' : '#22c55e';
+              const col = r.status === 'overweight' ? '#fb5c7d' : r.status === 'underweight' ? '#fbbf24' : '#34d399';
               return (
                 <div key={r.sector} style={{ marginBottom: 11 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, marginBottom: 3 }}>
@@ -92,7 +92,7 @@ const SectorsTab: React.FC<SectorsTabProps> = ({ sectorData }) => {
               <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--nd-text-1)', marginBottom: 10 }}>AI rebalance moves</div>
               {sectorData.suggestions.map((s: any, i: number) => (
                 <div key={i} style={{ display: 'flex', alignItems: 'baseline', gap: 8, padding: '7px 0', borderBottom: '1px solid var(--nd-border)', fontSize: 12.5 }}>
-                  <span style={{ fontSize: 10, fontWeight: 700, color: s.action === 'ADD' ? '#22c55e' : '#ef4444', minWidth: 38 }}>{s.action}</span>
+                  <span style={{ fontSize: 10, fontWeight: 700, color: s.action === 'ADD' ? '#34d399' : '#fb5c7d', minWidth: 38 }}>{s.action}</span>
                   <span style={{ fontWeight: 700, color: 'var(--nd-text-1)', minWidth: 120 }}>{s.sector}</span>
                   <span style={{ color: 'var(--nd-text-2)' }}>{s.reason}{s.stock ? ` → ${s.action === 'ADD' ? 'buy' : 'trim'} ${s.stock}` : ''}</span>
                 </div>

@@ -6,7 +6,7 @@ import apiService from '../services/api';
 // the time, and whether it was RIGHT (BUY correct when the trade won; SELL/HOLD
 // correct when it lost/flat). Reached from the Orders execution-trace popup.
 
-const ACTION_COLOR: Record<string, string> = { BUY: '#22c55e', SELL: '#ef4444', HOLD: '#f59e0b' };
+const ACTION_COLOR: Record<string, string> = { BUY: '#34d399', SELL: '#fb5c7d', HOLD: '#fbbf24' };
 
 interface AgentTrade {
   symbol: string; date: string; time: string; vote: string;
