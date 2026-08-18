@@ -33,8 +33,9 @@ public class TradeOutcome {
 
     private String status;
 
+    // Passed straight through from RiskValidated — vote objects, not strings.
     @JsonProperty("agent_votes")
-    private Map<String, String> agentVotes;
+    private Map<String, Object> agentVotes;
 
     @JsonProperty("executed_at")
     private String executedAt;
