@@ -558,11 +558,7 @@ async def analyze_stock(
 
 _SERVICES = [
     {"name": "Market Data",      "host": "market-data-service", "port": 8001},
-    {"name": "Technical Agent",  "host": "technical-agent",     "port": 8002},
     {"name": "Sentiment Agent",  "host": "sentiment-agent",     "port": 8003},
-    {"name": "Macro Agent",      "host": "macro-agent",         "port": 8004},
-    {"name": "Pattern Agent",    "host": "pattern-agent",       "port": 8005},
-    {"name": "RL Agent",         "host": "rl-agent",            "port": 8006},
     {"name": "Ensemble Engine",  "host": "ensemble-engine",     "port": 8007},
     {"name": "Feedback Service", "host": "feedback-service",    "port": 8012},
     {"name": "Model Trainer",    "host": "model-trainer",       "port": 8013},

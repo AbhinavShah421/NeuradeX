@@ -49,10 +49,11 @@ _LAYERS = ["edge", "ui", "api", "vote", "agents", "decision", "execution", "data
 # The 12 agents the BACKEND ensemble actually votes with. These are Python
 # classes inside the backend/session-runner process — they have no container of
 # their own, which is why a container-only map showed 7 "agents" while
-# ai_engine_agent_weights tracked 12. Four of them (technical, pattern,
-# sentiment, rl) also exist as standalone microservices, but those serve the
-# separate ensemble-engine pipeline; these in-process ones are what produce
-# session_decisions. Weight and measured accuracy are attached live.
+# ai_engine_agent_weights tracked 12. The duplicate technical/pattern/macro/rl
+# microservices were deleted 2026-08-18; only sentiment-agent remains as a
+# container, and solely because the backend calls it for FinBERT inference.
+# These in-process agents produce session_decisions AND now feed the execution
+# chain via app/utils/decision_publisher.py. Weight and accuracy attached live.
 _VOTE_AGENTS: list[tuple[str, str, str]] = [
     ("technical",     "Technical",     "backend/app/agents/technical.py"),
     ("pattern",       "Pattern",       "backend/app/agents/pattern.py"),
@@ -76,12 +77,7 @@ _NODES: list[dict] = [
     {"id": "runner",     "label": "Session Runner",  "layer": "api",       "container": "stock-prediction-session-runner"},
     {"id": "market",     "label": "Market Data",     "layer": "api",       "container": "stock-prediction-market-data",   "probe": "http", "url": "http://market-data-service:8001/health"},
     {"id": "groww",      "label": "Groww Feed",      "layer": "api",       "container": "stock-prediction-groww-feed"},
-
-    {"id": "technical",  "label": "Technical Agent", "layer": "agents",    "container": "stock-prediction-technical-agent", "probe": "http", "url": "http://technical-agent:8002/health"},
     {"id": "sentiment",  "label": "Sentiment Agent", "layer": "agents",    "container": "stock-prediction-sentiment-agent", "probe": "http", "url": "http://sentiment-agent:8003/health"},
-    {"id": "macro",      "label": "Macro Agent",     "layer": "agents",    "container": "stock-prediction-macro-agent",     "probe": "http", "url": "http://macro-agent:8004/health"},
-    {"id": "pattern",    "label": "Pattern Agent",   "layer": "agents",    "container": "stock-prediction-pattern-agent",   "probe": "http", "url": "http://pattern-agent:8005/health"},
-    {"id": "rl",         "label": "RL Agent",        "layer": "agents",    "container": "stock-prediction-rl-agent",        "probe": "http", "url": "http://rl-agent:8006/health"},
     {"id": "scanner",    "label": "Stock Scanner",   "layer": "agents",    "container": "stock-prediction-stock-scanner",   "probe": "http", "url": "http://stock-scanner:8014/health"},
     {"id": "sentsvc",    "label": "Sentiment Svc",   "layer": "agents",    "container": "stock-prediction-sentiment",       "probe": "http", "url": "http://sentiment-service:8016/health"},
 
@@ -128,16 +124,12 @@ _EDGES: list[dict] = [
     {"from": "groww",     "to": "runner",    "kind": "ws"},
     {"from": "market",    "to": "rabbitmq",  "kind": "amqp"},
     {"from": "market",    "to": "influxdb",  "kind": "tsdb"},
-    {"from": "market",    "to": "technical", "kind": "amqp", "queue": "market.data.technical"},
     {"from": "market",    "to": "sentiment", "kind": "amqp", "queue": "market.data.sentiment"},
-    {"from": "market",    "to": "macro",     "kind": "amqp", "queue": "market.data.macro"},
-    {"from": "market",    "to": "pattern",   "kind": "amqp", "queue": "market.data.pattern"},
-    {"from": "market",    "to": "rl",        "kind": "amqp", "queue": "market.data.rl"},
-    {"from": "technical", "to": "ensemble",  "kind": "amqp", "queue": "agent.signals"},
     {"from": "sentiment", "to": "ensemble",  "kind": "amqp"},
-    {"from": "macro",     "to": "ensemble",  "kind": "amqp"},
-    {"from": "pattern",   "to": "ensemble",  "kind": "amqp"},
-    {"from": "rl",        "to": "ensemble",  "kind": "amqp"},
+    # The backend ensemble now supplies the decision (decision_publisher.py,
+    # flag-gated). ensemble-engine applies the MLflow meta-gate + calibration
+    # and forwards to risk — it no longer aggregates raw agent signals.
+    {"from": "backend",   "to": "ensemble",  "kind": "amqp", "queue": "ensemble.decision"},
     {"from": "ensemble",  "to": "risk",      "kind": "amqp", "queue": "ensemble.decision"},
     {"from": "risk",      "to": "executor",  "kind": "amqp", "queue": "risk.validated"},
     {"from": "executor",  "to": "feedback",  "kind": "amqp", "queue": "trade.outcomes.feedback"},

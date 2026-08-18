@@ -10,6 +10,8 @@ logger = logging.getLogger(__name__)
 EXCHANGES = [
     ("market.data",       "fanout"),
     ("agent.signals",     "direct"),
+    # backend ensemble -> ensemble-engine (MLflow gate) -> risk
+    ("ensemble.raw",      "direct"),
     ("ensemble.decision", "direct"),
     ("risk.validated",    "direct"),
     ("trade.orders",      "direct"),
@@ -21,17 +23,14 @@ EXCHANGES = [
 # (queue_name, exchange_name, routing_key)
 QUEUE_BINDINGS = [
     # market.data fanout → one queue per agent
-    ("market.data.technical",  "market.data",       ""),
     ("market.data.sentiment",  "market.data",       ""),
-    ("market.data.macro",      "market.data",       ""),
-    ("market.data.pattern",    "market.data",       ""),
-    ("market.data.rl",         "market.data",       ""),
-    # agent signals
-    ("agent.signals",          "agent.signals",     "technical"),
+    # agent signals — only `sentiment` remains a microservice; the
+    # technical/macro/pattern/rl agents were removed 2026-08-18 because
+    # they duplicated in-process backend agents and fed an aggregation
+    # the backend now performs itself.
     ("agent.signals",          "agent.signals",     "sentiment"),
-    ("agent.signals",          "agent.signals",     "macro"),
-    ("agent.signals",          "agent.signals",     "pattern"),
-    ("agent.signals",          "agent.signals",     "rl"),
+    # backend ensemble -> ensemble-engine
+    ("ensemble.raw",           "ensemble.raw",      "decision"),
     # ensemble → risk → executor
     ("ensemble.decision",      "ensemble.decision", "decision"),
     ("risk.validated",         "risk.validated",    "validated"),
