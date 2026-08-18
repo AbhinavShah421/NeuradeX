@@ -29,9 +29,14 @@ from collections import defaultdict
 from datetime import date
 from typing import Sequence
 
-# Horizons in minutes. 60 is the ceiling because the live policy's stagnation
-# exit fires there, so beyond it the two labels stop being comparable.
-HORIZONS = (5, 15, 30, 60)
+# Horizons in minutes. 60 was the original ceiling only because the live policy's
+# stagnation exit fires there — an arbitrary limit, not a property of the market.
+# The session runs 09:15-15:30 (375 minutes), so the data supports far longer.
+#
+# Costs are fixed per round trip while edge grows with holding period, so the
+# horizon is the one lever that changes edge/cost without needing a better
+# signal. That is what these longer horizons are for.
+HORIZONS = (5, 15, 30, 60, 90, 120, 180, 240)
 
 _PANEL_SQL = """
     SELECT created_at::date AS d, symbol, candle_time, AVG(price) AS price

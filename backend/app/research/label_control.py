@@ -56,7 +56,14 @@ _DAY_SQL = """
 """
 
 
-async def _load_day(db, day: date) -> list[dict]:
+async def _load_day(db, day: date, *, matched: bool = False) -> list[dict]:
+    """Load one day. `matched` keeps only rows where EVERY horizon resolves.
+
+    Without it, comparing horizons compares different samples: a 240-minute
+    forward return only exists for entries before ~11:30, so a long horizon
+    silently becomes a statement about morning entries. Matching costs sample
+    size and buys the right to read the horizon column as a trend.
+    """
     from sqlalchemy import text
 
     raw = (await db.execute(text(_DAY_SQL), {"day": day})).fetchall()
@@ -79,11 +86,14 @@ async def _load_day(db, day: date) -> list[dict]:
         }
         for h in HORIZONS:
             r[f"fwd_{h}"] = panel.forward_return_pct(day, symbol, candle_time or "", h)
+        if matched and any(r[f"fwd_{h}"] is None for h in HORIZONS):
+            continue
         rows.append(r)
     return rows
 
 
-async def sweep(since: date, features: Sequence[str] = tuple(DERIVED_INDICATORS)) -> dict:
+async def sweep(since: date, features: Sequence[str] = tuple(DERIVED_INDICATORS),
+                *, matched: bool = False) -> dict:
     from sqlalchemy import text
     from app.database.postgres import AsyncSessionLocal
 
@@ -93,7 +103,7 @@ async def sweep(since: date, features: Sequence[str] = tuple(DERIVED_INDICATORS)
     async with AsyncSessionLocal() as db:
         days = [r[0] for r in (await db.execute(text(_DAYS_SQL), {"since": since})).fetchall()]
         for day in days:
-            rows = await _load_day(db, day)
+            rows = await _load_day(db, day, matched=matched)
             for feature in features:
                 for label in LABELS:
                     obs = indicator_observations(rows, feature, label=label)
@@ -145,8 +155,13 @@ async def main(since: date) -> None:
     from app.database.postgres import init_postgres
 
     await init_postgres()
-    verdicts = await sweep(since)
-    print(report(verdicts))
+    for matched in (False, True):
+        label = ("MATCHED SAMPLE — only rows where every horizon resolves"
+                 if matched else
+                 "ALL ROWS — each horizon uses whatever it can resolve")
+        bar = "=" * 74
+        print("\n" + bar + "\n" + label + "\n" + bar)
+        print(report(await sweep(since, matched=matched)))
     mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
     print(f"peak RSS {mb:.0f}MB")
 
