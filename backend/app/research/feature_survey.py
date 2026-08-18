@@ -53,7 +53,8 @@ DERIVED_INDICATORS: dict[str, str] = {
 }
 
 _SQL = """
-    SELECT created_at::date AS d, price, action, agents, indicators, cf_pnl_pct
+    SELECT created_at::date AS d, symbol, candle_time, price, action,
+           agents, indicators, cf_pnl_pct
     FROM session_decisions
     WHERE cf_pnl_pct IS NOT NULL
       AND created_at::date >= :since
@@ -104,7 +105,8 @@ def agent_observations(rows: Sequence[dict], agent: str, side: str) -> list[Obse
     return obs
 
 
-def indicator_observations(rows: Sequence[dict], feature: str) -> list[Observation]:
+def indicator_observations(rows: Sequence[dict], feature: str,
+                           label: str = "cf") -> list[Observation]:
     """Top quintile against bottom quintile, cut within each day.
 
     Cutting within the day is what stops the feature scoring on market drift: on
@@ -114,8 +116,9 @@ def indicator_observations(rows: Sequence[dict], feature: str) -> list[Observati
     by_day: dict[date, list[tuple[float, float]]] = defaultdict(list)
     for r in rows:
         v = (r.get("_feat") or {}).get(feature)
-        if v is not None:
-            by_day[r["d"]].append((v, r["cf"]))
+        y = r.get(label)
+        if v is not None and y is not None:
+            by_day[r["d"]].append((v, float(y)))
 
     obs: list[Observation] = []
     for day, pairs in by_day.items():
@@ -140,7 +143,7 @@ async def load_rows(since: date) -> list[dict]:
         raw = (await db.execute(text(_SQL), {"since": since})).fetchall()
 
     rows: list[dict] = []
-    for d, price, _action, agents, indicators, cf in raw:
+    for d, symbol, candle_time, price, _action, agents, indicators, cf in raw:
         votes = {
             a.get("agent"): (a.get("action") or "").upper()
             for a in (_as_json(agents) or [])
@@ -148,6 +151,8 @@ async def load_rows(since: date) -> list[dict]:
         }
         rows.append({
             "d": d,
+            "symbol": symbol,
+            "candle_time": candle_time,
             "cf": float(cf),
             "_votes": votes,
             "_feat": derive_indicators(
