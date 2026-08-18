@@ -421,21 +421,6 @@ async def _ensemble_decision(symbol: str, candles: list[dict], capital: float, p
         for a in decision.agents
     ]
 
-    # Bridge to the execution chain: ensemble.decision -> ensemble-engine
-    # (MLflow gate) -> risk-engine -> trade-executor. Off unless
-    # ENSEMBLE_PUBLISH_ENABLED=1, and never for replay/backtest — feeding
-    # simulated bars to a live risk engine would place orders off history.
-    if mode not in ("replay", "backtest"):
-        try:
-            from app.utils.decision_publisher import publish_decision
-            await publish_decision(decision, symbol, {
-                "price": candles[-1].get("close") if candles else 0.0,
-                "atr": (decision.indicators or {}).get("atr", 0.0)
-                       if hasattr(decision, "indicators") else 0.0,
-            })
-        except Exception:
-            logger.debug("decision publish skipped", exc_info=True)
-
     return decision, agents
 
 

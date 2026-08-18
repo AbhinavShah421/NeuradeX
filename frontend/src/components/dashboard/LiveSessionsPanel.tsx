@@ -230,11 +230,74 @@ const SessionModal: React.FC<{ id: string; onClose: () => void }> = ({ id, onClo
                           <div style={{ fontSize: 10, color: 'var(--nd-text-3)', textTransform: 'capitalize' }}>{name}</div>
                           <div style={{ fontSize: 13, fontWeight: 700, color: SESS_ACTION_COLOR[a.action] ?? 'var(--nd-text-3)' }}>{a.action}</div>
                           {a.confidence != null && <div style={{ fontSize: 9.5, color: 'var(--nd-text-3)' }}>{(a.confidence * 100).toFixed(0)}%</div>}
+                          {/* The EFFECTIVE weight the ensemble applied to this
+                              vote — base weight already scaled by the agent's
+                              accuracy for THIS action. `pull` is what actually
+                              lands on the tally: confidence x weight. */}
+                          {a.weight != null && (
+                            <div style={{ fontSize: 9, color: 'var(--nd-text-3)', fontFamily: 'ui-monospace, monospace', marginTop: 1 }}>
+                              w {Number(a.weight).toFixed(2)}
+                              {a.confidence != null && (
+                                <span style={{ color: SESS_ACTION_COLOR[a.action] ?? 'var(--nd-text-3)' }}>
+                                  {' '}· {(a.confidence * Number(a.weight)).toFixed(2)}
+                                </span>
+                              )}
+                            </div>
+                          )}
                           <span className="material-icons" style={{ fontSize: 10, color: 'var(--nd-text-3)', marginTop: 2 }}>info</span>
                         </div>
                       );
                     })}
                   </div>
+                  {(() => {
+                    // Reconstruct the tally the ensemble computed: each vote
+                    // contributes confidence x effective weight to its side.
+                    // Shown because "12 agents said HOLD" does not explain a
+                    // decision — the WEIGHTED mass behind each side does.
+                    const mass: Record<string, number> = { BUY: 0, SELL: 0, HOLD: 0 };
+                    const count: Record<string, number> = { BUY: 0, SELL: 0, HOLD: 0 };
+                    agents.forEach((a: any) => {
+                      const act = a.action || 'HOLD';
+                      if (mass[act] == null) return;
+                      mass[act] += (a.confidence ?? 0) * (a.weight ?? 1);
+                      count[act] += 1;
+                    });
+                    const total = mass.BUY + mass.SELL + mass.HOLD;
+                    if (!total) return null;
+                    const winner = (['BUY', 'SELL', 'HOLD'] as const)
+                      .reduce((x, y) => (mass[y] > mass[x] ? y : x), 'HOLD');
+                    return (
+                      <div style={{ marginTop: 10, background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 10, padding: '10px 14px' }}>
+                        <div style={{ fontFamily: 'ui-monospace, monospace', fontSize: 10, letterSpacing: '.12em', color: 'var(--nd-text-3)', marginBottom: 8 }}>
+                          HOW THE ENSEMBLE WEIGHED IT
+                        </div>
+                        {(['BUY', 'SELL', 'HOLD'] as const).map(act => {
+                          const pct = total ? (mass[act] / total) * 100 : 0;
+                          const col = SESS_ACTION_COLOR[act] ?? 'var(--nd-text-3)';
+                          return (
+                            <div key={act} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
+                              <span style={{ width: 42, fontSize: 11, fontWeight: 700, color: col }}>{act}</span>
+                              <div style={{ flex: 1, height: 6, background: 'var(--nd-bg)', borderRadius: 3, overflow: 'hidden' }}>
+                                <div style={{ width: `${pct}%`, height: '100%', background: col, opacity: act === winner ? 1 : 0.45 }} />
+                              </div>
+                              <span style={{ width: 116, textAlign: 'right', fontFamily: 'ui-monospace, monospace', fontSize: 10, color: 'var(--nd-text-3)' }}>
+                                {mass[act].toFixed(2)} ({pct.toFixed(0)}%) · {count[act]}v
+                              </span>
+                            </div>
+                          );
+                        })}
+                        <div style={{ fontSize: 10.5, color: 'var(--nd-text-3)', marginTop: 6, lineHeight: 1.5 }}>
+                          Weighted mass = confidence × effective weight, where the weight is each
+                          agent's base weight scaled by its measured accuracy for that specific
+                          action. Highest mass is <b style={{ color: SESS_ACTION_COLOR[winner] ?? 'var(--nd-text-1)' }}>{winner}</b>
+                          {ld?.action && ld.action !== winner && (
+                            <> — the final call was <b style={{ color: SESS_ACTION_COLOR[ld.action] ?? 'var(--nd-text-1)' }}>{ld.action}</b>, so a gate overrode the raw vote (see the reason above).</>
+                          )}
+                          {ld?.action && ld.action === winner && <> and the final call matched it.</>}
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </Section>
               )}
 

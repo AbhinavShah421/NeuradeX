@@ -408,7 +408,7 @@ class EnsembleEngine:
                            "prediction_id": pred_id,
                            "vote": {k: round(v, 3) for k, v in vote_pct.items()}})
 
-        return EnsembleDecision(
+        decision = EnsembleDecision(
             action          = action,
             confidence      = round(confidence, 3),
             agent_agreement = round(agreement, 3),
@@ -420,3 +420,25 @@ class EnsembleEngine:
             vote_mode       = vote_mode,
             veto            = veto,
         )
+
+        # Bridge to the execution chain (ensemble.raw -> ensemble-engine ->
+        # risk-engine -> trade-executor). Hooked HERE, at decide(), because this
+        # is the one point every caller passes through. It was originally placed
+        # in sessions_service._ensemble_decision, but the live paper-trading path
+        # is paper_trading.py -> _llm_decide -> engine.decide() and never touches
+        # that helper — so with publishing armed, 60 live decisions produced 0
+        # messages and the chain sat silent.
+        #
+        # Replay/backtest are excluded: feeding simulated bars to a live risk
+        # engine would place orders off history.
+        if mode not in ("replay", "backtest"):
+            try:
+                from app.utils.decision_publisher import publish_decision
+                await publish_decision(decision, symbol, {
+                    "price": candles[-1].get("close") if candles else 0.0,
+                    "atr": (context.get("indicators") or {}).get("atr", 0.0),
+                })
+            except Exception:
+                logger.debug("decision publish skipped", exc_info=True)
+
+        return decision
