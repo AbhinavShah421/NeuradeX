@@ -161,6 +161,14 @@ const TradingChart: React.FC<Props> = ({
   const macdHistRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const syncingRef = useRef(false);
   const didFitRef = useRef(false);
+  // Auto-fit keeps the whole session in view as bars stream in, but must yield
+  // the moment the user zooms or pans — otherwise their view is yanked back on
+  // every new candle.
+  const userZoomedRef = useRef(false);
+  const lastFitLenRef = useRef(0);
+  // Set while WE call fitContent, so the range-change handler can tell our
+  // own adjustment apart from a real user gesture.
+  const fittingRef = useRef(false);
 
   const [overlays, setOverlays] = useState({ vwap: true, sma: true, bb: false });
   const [chartType, setChartType] = useState<'candles' | 'line'>('candles');
@@ -271,7 +279,13 @@ const TradingChart: React.FC<Props> = ({
       },
       timeScale: {
         borderColor: isDark ? 'rgba(42,46,57,0.8)' : 'rgba(0,0,0,0.12)',
-        timeVisible: true, secondsVisible: false, rightOffset: isNarrow ? 3 : 6,
+        timeVisible: true, secondsVisible: false,
+        // Small right gap only. The old 6-bar offset pushed an intraday session
+        // (~20 bars) toward the right edge and left dead space on the left.
+        rightOffset: isNarrow ? 1 : 2,
+        // Cannot scroll past the first bar, so the session always starts at the
+        // left edge instead of floating in the middle of the pane.
+        fixLeftEdge: true,
         tickMarkFormatter: (t: number, tickType: number) => {
           const d = new Date(t * 1000);
           if (tickType < 3) return `${p2(d.getUTCDate())} ${MON[d.getUTCMonth()]}`;
@@ -356,6 +370,9 @@ const TradingChart: React.FC<Props> = ({
       const ts = src.timeScale();
       const handler = (range: any) => {
         if (syncingRef.current || !range) return;
+        // A range change that is NOT our own sync and not our own fitContent is
+        // the user zooming or panning — stop auto-fitting so their view sticks.
+        if (!fittingRef.current) userZoomedRef.current = true;
         syncingRef.current = true;
         charts.forEach(dst => { if (dst !== src) dst.timeScale().setVisibleLogicalRange(range); });
         syncingRef.current = false;
@@ -401,7 +418,18 @@ const TradingChart: React.FC<Props> = ({
       })),
     );
 
-    if (!didFitRef.current && rows.length) { chart.timeScale().fitContent(); didFitRef.current = true; }
+    // Re-fit as the session grows, not just once. The original single-shot fit
+    // ran on whatever data existed at first paint — often a handful of bars, or
+    // before the modal had laid out — and never corrected, which is what left
+    // the candles clustered on the right with an empty left half.
+    if (rows.length && !userZoomedRef.current && rows.length !== lastFitLenRef.current) {
+      fittingRef.current = true;
+      chart.timeScale().fitContent();
+      lastFitLenRef.current = rows.length;
+      didFitRef.current = true;
+      // Cleared after the range-change events this fit triggers have flushed.
+      setTimeout(() => { fittingRef.current = false; }, 0);
+    }
   }, [rows, ind, effMarkers, overlays, chartType]);
 
   // ── Push RSI / MACD data into the sub-panes ────────────────────────────────
