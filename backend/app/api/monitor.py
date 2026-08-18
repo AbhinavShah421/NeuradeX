@@ -367,6 +367,51 @@ async def _agent_stats() -> dict:
     return out
 
 
+async def _ensemble_engine_health() -> dict | None:
+    """Is the microservice (Orders) pipeline capable of ever trading?
+
+    It ran for its entire life emitting 100% HOLD without anyone noticing,
+    because "container up, queues flowing, agents responding" all looked healthy.
+    The cause is arithmetic: `aggregate_signals` divides the winning side's
+    weighted confidence by the TOTAL weight, so HOLD votes dilute every
+    directional score. Observed ceiling 0.560 against MIN_CONFIDENCE_TO_TRADE
+    0.60 — no decision could ever clear the gate.
+
+    Comparing the observed confidence ceiling against the gate turns that from an
+    invisible dead end into a stated fault.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT) as c:
+            r = await c.get("http://ensemble-engine:8007/decisions/recent")
+            r.raise_for_status()
+            raw = r.json()
+    except Exception as exc:
+        logger.debug("ensemble-engine decision probe failed: %s", exc)
+        return None
+
+    rows = raw if isinstance(raw, list) else raw.get("decisions", raw.get("data", []))
+    payloads = [x.get("payload", x) for x in rows if isinstance(x, dict)]
+    if not payloads:
+        return None
+
+    actions = [p.get("final_action") for p in payloads if p.get("final_action")]
+    confs = [p.get("weighted_confidence") for p in payloads
+             if isinstance(p.get("weighted_confidence"), (int, float))]
+    if not actions:
+        return None
+
+    gate = 0.60          # MIN_CONFIDENCE_TO_TRADE in ensemble-engine
+    ceiling = max(confs) if confs else None
+    hold_pct = 100.0 * sum(1 for a in actions if a == "HOLD") / len(actions)
+    return {
+        "sample": len(actions),
+        "holdPct": round(hold_pct, 1),
+        "confCeiling": ceiling,
+        "gate": gate,
+        "inert": bool(ceiling is not None and ceiling < gate and hold_pct >= 99.0),
+    }
+
+
 async def _learning_loops() -> list[dict]:
     """Health of every learning loop. Thresholds follow each loop's real cadence:
     nightly trainers get 48h, per-trade loops get a trading-week."""
@@ -557,11 +602,12 @@ async def snapshot(force: bool = False):
             return node["id"], {"ok": True, "detail": "serving this request"}
         return node["id"], {}
 
-    probe_results, loops, registry, agent_stats = await asyncio.gather(
+    probe_results, loops, registry, agent_stats, ens_health = await asyncio.gather(
         asyncio.gather(*[_run_probe(n) for n in _NODES], return_exceptions=True),
         _learning_loops(),
         _model_registry(),
         _agent_stats(),
+        _ensemble_engine_health(),
         return_exceptions=False,
     )
     probes = {pid: res for pid, res in
@@ -645,6 +691,20 @@ async def snapshot(force: bool = False):
     )
 
     faults = _faults(nodes, edges, loops)
+
+    if ens_health and ens_health["inert"]:
+        faults.append({
+            "severity": "critical", "target": "Ensemble Engine", "kind": "inert-pipeline",
+            "message": (
+                f"Orders pipeline cannot trade: confidence peaks at "
+                f"{ens_health['confCeiling']:.3f} but MIN_CONFIDENCE_TO_TRADE is "
+                f"{ens_health['gate']:.2f}, so {ens_health['holdPct']:.0f}% of decisions "
+                f"are HOLD and none can ever pass. HOLD votes dilute the directional "
+                f"score in aggregate_signals. The 5 agent microservices feeding it "
+                f"duplicate in-process backend agents that DO drive real decisions."
+            ),
+        })
+
     for name in unmapped:
         faults.append({
             "severity": "warning", "target": name, "kind": "topology",
@@ -663,6 +723,7 @@ async def snapshot(force: bool = False):
         "registry": registry,
         "faults": faults,
         "unmapped": unmapped,
+        "ensembleEngine": ens_health,
         "summary": {
             "nodes": len(nodes),
             "running": sum(1 for n in nodes if n.get("running")),
