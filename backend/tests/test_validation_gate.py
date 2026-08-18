@@ -172,3 +172,30 @@ def test_verdict_moves_with_the_cost_assumption(cost, expected):
     days = _days(90)
     obs = [o for d in days for o in _obs(d, selected=[0.30], baseline=[0.0])]
     assert evaluate("cost_sensitive", obs, cost_pct=cost).status == expected
+
+
+# ── memory-bounded entry point ──────────────────────────────────────────────
+
+def test_evaluate_from_daily_edges_matches_evaluate():
+    """The streaming path must give the identical verdict to the buffered one.
+
+    `evaluate` holds every Observation; `evaluate_from_daily_edges` takes only
+    the collapsed per-day values, which is what makes a full sweep fit in memory.
+    They must not drift apart.
+    """
+    from app.research.validation import daily_edges, evaluate_from_daily_edges
+
+    days = _days(90)
+    rng = random.Random(5)
+    obs: list[Observation] = []
+    for d in days:
+        obs += _obs(d, selected=[0.40 + rng.gauss(0, 0.1)] * 7, baseline=[0.0] * 7)
+
+    buffered = evaluate("x", obs, cost_pct=0.06)
+    streamed = evaluate_from_daily_edges("x", daily_edges(obs), cost_pct=0.06)
+
+    assert streamed.status == buffered.status
+    assert math.isclose(streamed.mean_daily_edge_pct, buffered.mean_daily_edge_pct)
+    assert math.isclose(streamed.t_stat, buffered.t_stat)
+    assert streamed.oos_mean_edge_pct == buffered.oos_mean_edge_pct
+    assert streamed.n_days == buffered.n_days

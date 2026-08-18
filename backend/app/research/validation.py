@@ -166,28 +166,49 @@ def daily_edges(observations: Iterable[Observation]) -> dict[date, float]:
 
 # ── the gate ────────────────────────────────────────────────────────────────
 
-def evaluate(
+def evaluate_from_daily_edges(
     name: str,
-    observations: Sequence[Observation],
+    edges_by_day: dict[date, float],
     *,
+    n_selected: int = 0,
+    n_baseline: int = 0,
     min_days: int = MIN_DAYS,
     hurdle_mult: float = HURDLE_MULT,
     oos_split: float = OOS_SPLIT,
     cost_pct: float | None = None,
 ) -> Verdict:
-    """Day-clustered, cost-netted, out-of-sample-checked verdict on one candidate."""
+    """Same verdict, but from pre-collapsed daily edges.
+
+    `evaluate` holds every Observation in memory, which is fine for a single
+    candidate and fatal for a full sweep: 290k decisions x two labels peaked at
+    ~3GB inside a 2GB container and took the Docker engine down with it on
+    2026-08-18. A caller that folds each day as it loads keeps memory at O(days)
+    — a few hundred floats — instead of O(rows).
+    """
+    days = sorted(edges_by_day)
+    edges = [edges_by_day[d] for d in days]
+    return _verdict(name, days, edges, n_selected, n_baseline,
+                    min_days, hurdle_mult, oos_split, cost_pct)
+
+
+
+def _verdict(
+    name: str,
+    days: list,
+    edges: list[float],
+    n_sel: int,
+    n_base: int,
+    min_days: int,
+    hurdle_mult: float,
+    oos_split: float,
+    cost_pct: float | None,
+) -> Verdict:
+    """Shared verdict logic, over already-collapsed per-day edges."""
     if cost_pct is None:
         from app.utils.trade_costs import round_trip_cost_pct
         cost_pct = round_trip_cost_pct()
     hurdle = hurdle_mult * cost_pct
-
-    edges_by_day = daily_edges(observations)
-    days = sorted(edges_by_day)
-    edges = [edges_by_day[d] for d in days]
     n_days = len(days)
-    n_sel = sum(1 for o in observations if o.selected)
-    n_base = len(observations) - n_sel
-
     reasons: list[str] = []
 
     if n_days < 3:
@@ -214,14 +235,13 @@ def evaluate(
 
     # Out-of-sample: chronological split, held-out half must agree on sign.
     cut = int(n_days * oos_split)
-    oos_days_list = days[cut:]
+    oos_edges = edges[cut:]
     oos_mean: float | None = None
     oos_agrees: bool | None = None
-    if len(oos_days_list) >= 3:
-        oos_mean = _mean([edges_by_day[d] for d in oos_days_list])
+    if len(oos_edges) >= 3:
+        oos_mean = _mean(oos_edges)
         oos_agrees = (oos_mean > 0) == (mean_edge > 0)
 
-    # ── verdict ─────────────────────────────────────────────────────────────
     if n_days < min_days:
         reasons.append(
             f"only {n_days} days — the gate needs {min_days} before it will call "
@@ -258,46 +278,24 @@ def evaluate(
         mean_daily_edge_pct=mean_edge, sd_daily_edge_pct=sd,
         t_stat=t, p_value=p, ci95_pct=ci,
         cost_pct=cost_pct, hurdle_pct=hurdle, edge_over_cost=edge_over_cost,
-        oos_days=len(oos_days_list), oos_mean_edge_pct=oos_mean,
+        oos_days=len(oos_edges), oos_mean_edge_pct=oos_mean,
         oos_sign_agrees=oos_agrees, reasons=reasons,
     )
 
 
-# ── loading real observations ───────────────────────────────────────────────
-
-_DECISIONS_SQL = """
-    SELECT created_at::date AS d, action, cf_pnl_pct
-    FROM session_decisions
-    WHERE cf_pnl_pct IS NOT NULL
-      AND created_at::date >= :since
-"""
-
-
-async def observations_from_decisions(
-    since: date,
+def evaluate(
+    name: str,
+    observations: Sequence[Observation],
     *,
-    selected_actions: Sequence[str] = ("BUY",),
-    baseline_actions: Sequence[str] = ("HOLD",),
-) -> list[Observation]:
-    """Pull counterfactually-labelled decisions as Observations.
-
-    `cf_pnl_pct` is already net of slippage and charges, so a verdict built on it
-    is directly comparable to the cost hurdle.
-    """
-    from sqlalchemy import text
-    from app.database.postgres import AsyncSessionLocal
-
-    sel = {a.upper() for a in selected_actions}
-    base = {a.upper() for a in baseline_actions}
-
-    async with AsyncSessionLocal() as db:
-        rows = (await db.execute(text(_DECISIONS_SQL), {"since": since})).fetchall()
-
-    out: list[Observation] = []
-    for day, action, pnl in rows:
-        a = (action or "").upper()
-        if a in sel:
-            out.append(Observation(day=day, pnl_pct=float(pnl), selected=True))
-        elif a in base:
-            out.append(Observation(day=day, pnl_pct=float(pnl), selected=False))
-    return out
+    min_days: int = MIN_DAYS,
+    hurdle_mult: float = HURDLE_MULT,
+    oos_split: float = OOS_SPLIT,
+    cost_pct: float | None = None,
+) -> Verdict:
+    """Day-clustered, cost-netted, out-of-sample-checked verdict on one candidate."""
+    edges_by_day = daily_edges(observations)
+    days = sorted(edges_by_day)
+    n_sel = sum(1 for o in observations if o.selected)
+    return _verdict(name, days, [edges_by_day[d] for d in days],
+                    n_sel, len(observations) - n_sel,
+                    min_days, hurdle_mult, oos_split, cost_pct)
