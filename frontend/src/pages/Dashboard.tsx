@@ -40,11 +40,32 @@ const Dashboard: React.FC = () => {
     }).catch(() => setShowStartup(true));
   }, []);
 
+  // Net expectancy leads, not win rate. Win rate is a dial on the exit geometry
+  // — tighten the target and it rises while the strategy gets worse — so it is
+  // shown against the breakeven rate its own payoff ratio demands, which is the
+  // number that says whether accuracy or geometry is the problem.
+  const exp = accuracyStats?.expectancy;
+  const ok = (v?: number) => ((v ?? 0) > 0 ? 'var(--nd-green)' : 'var(--nd-red)');
+
   const STAT_CARDS = accuracyStats ? [
-    { id: 'accuracy', label: 'Model Accuracy', value: `${(accuracyStats.accuracyRate * 100).toFixed(1)}%`, icon: 'psychology',    color: 'var(--nd-green)',  bg: 'var(--nd-green-50)' },
-    { id: 'win',      label: 'Win Rate',       value: `${(accuracyStats.winRate * 100).toFixed(1)}%`,        icon: 'emoji_events', color: 'var(--nd-green)',  bg: 'var(--nd-green-50)' },
-    { id: 'return',   label: 'Avg Return',     value: `${accuracyStats.averageReturn?.toFixed(2)}%`,          icon: 'trending_up',  color: 'var(--nd-blue)',   bg: '#e3f2fd'            },
-    { id: 'sharpe',   label: 'Sharpe Ratio',   value: accuracyStats.sharpeRatio?.toFixed(2),                  icon: 'analytics',    color: 'var(--nd-purple)', bg: '#f5f3ff'            },
+    { id: 'expectancy', label: 'Net Expectancy / Trade',
+      value: exp ? `${exp.netExpectancyPct >= 0 ? '+' : ''}${exp.netExpectancyPct.toFixed(3)}%` : '—',
+      sub: exp ? `after ${exp.costPct.toFixed(3)}% costs` : undefined,
+      icon: 'savings', color: ok(exp?.netExpectancyPct), bg: 'var(--nd-green-50)' },
+    { id: 'win', label: 'Win Rate',
+      value: `${(accuracyStats.winRate * 100).toFixed(1)}%`,
+      sub: exp ? `needs ${(exp.breakevenWinRate * 100).toFixed(1)}% to break even` : undefined,
+      icon: 'emoji_events',
+      color: exp && accuracyStats.winRate >= exp.breakevenWinRate ? 'var(--nd-green)' : 'var(--nd-red)',
+      bg: 'var(--nd-green-50)' },
+    { id: 'payoff', label: 'Payoff Ratio',
+      value: exp ? `${exp.payoffRatio.toFixed(2)}:1` : '—',
+      sub: exp ? `+${exp.avgWinPct.toFixed(2)}% / −${exp.avgLossPct.toFixed(2)}%` : undefined,
+      icon: 'balance', color: 'var(--nd-blue)', bg: '#e3f2fd' },
+    { id: 'sharpe', label: 'Daily Sharpe',
+      value: exp?.dailySharpe != null ? exp.dailySharpe.toFixed(2) : '—',
+      sub: 'per day, not per trade',
+      icon: 'analytics', color: ok(exp?.dailySharpe), bg: '#f5f3ff' },
   ] : [];
 
   return (
@@ -84,6 +105,12 @@ const Dashboard: React.FC = () => {
               <div style={{ flex: 1, minWidth: 0 }}>
                 <p className="nd-label">{s.label}</p>
                 <p style={{ fontSize: 18, fontWeight: 700, color: s.color }}>{s.value}</p>
+                {s.sub && (
+                  <p style={{ fontSize: 11, color: 'var(--nd-text-3)', marginTop: 1,
+                              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {s.sub}
+                  </p>
+                )}
               </div>
             </div>
           ))}
