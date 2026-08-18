@@ -46,7 +46,7 @@ const AgentDetailModal: React.FC<{ agent: any; onClose: () => void }> = ({ agent
   return (
     <div
       onClick={e => { if (e.target === e.currentTarget) onClose(); }}
-      style={{ position: 'fixed', inset: 0, background: '#00000090', zIndex: 1100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(3,6,12,0.72)', zIndex: 1100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}
     >
       <div style={{ background: 'var(--nd-bg)', border: `1px solid ${accentColor}60`, borderRadius: 14, width: '100%', maxWidth: 420, boxShadow: `0 16px 48px #00000070, 0 0 0 1px ${accentColor}20` }}>
         {/* Header */}
@@ -146,13 +146,13 @@ const SessionModal: React.FC<{ id: string; onClose: () => void }> = ({ id, onClo
     <>
     {selectedAgent && <AgentDetailModal agent={selectedAgent} onClose={() => setSelectedAgent(null)} />}
     <div onClick={e => { if (e.target === e.currentTarget) onClose(); }}
-      style={{ position: 'fixed', inset: 0, background: '#000000aa', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 12 }}>
-      <div style={{ background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 16, width: '100%', maxWidth: 840, maxHeight: '92vh', overflow: 'auto', boxShadow: '0 24px 64px #00000060' }}>
+      style={{ position: 'fixed', inset: 0, background: 'rgba(3,6,12,0.72)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 12 }}>
+      <div style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 16, width: '100%', maxWidth: 840, maxHeight: '92vh', overflow: 'auto', boxShadow: 'var(--nd-shadow-md)' }}>
         {/* Header — two explicit rows (not one flex row with marginLeft:auto).
             The single-row version squeezed the date span into whatever px was
             left after the P&L block claimed the right edge, word-wrapping
             "@ 15:13 · 2026-07-02" into 4 stacked lines on a phone. */}
-        <div style={{ position: 'sticky', top: 0, background: 'var(--nd-bg)', zIndex: 2, padding: '14px 20px', borderBottom: '1px solid var(--nd-border)', display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ position: 'sticky', top: 0, background: 'var(--nd-surface)', zIndex: 2, padding: '14px 20px', borderBottom: '1px solid var(--nd-border)', display: 'flex', flexDirection: 'column', gap: 8 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <span style={{ fontSize: 18, fontWeight: 700, color: 'var(--nd-text-1)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d?.symbol ?? '…'}</span>
             {d?.mode && <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 4, background: `${modeColor[d.mode] ?? '#888'}22`, color: modeColor[d.mode] ?? 'var(--nd-text-3)', flexShrink: 0 }}>{d.mode.toUpperCase()}</span>}

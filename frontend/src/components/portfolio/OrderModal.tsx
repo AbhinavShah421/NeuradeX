@@ -31,7 +31,7 @@ const OrderModal: React.FC<OrderModalProps> = ({ orderMsg, setOrderMsg, pendingO
       {pendingOrder && (
         <div onClick={e => { if (e.target === e.currentTarget && !placing) setPendingOrder(null); }}
           style={{ position: 'fixed', inset: 0, background: '#00000080', zIndex: 1200, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
-          <div style={{ background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 14, width: '100%', maxWidth: 460, maxHeight: '88vh', overflow: 'auto', padding: 22 }}>
+          <div style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 14, width: '100%', maxWidth: 460, maxHeight: '88vh', overflow: 'auto', padding: 22 }}>
             {pendingOrder.kind === 'basket' ? (
               <>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>

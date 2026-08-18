@@ -347,7 +347,7 @@ const AiWatchlistTab: React.FC = () => {
 
       {/* Tab descriptions */}
       {tab === 'intraday' && (
-        <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginBottom: 10, padding: '6px 10px', background: 'var(--nd-bg)', borderRadius: 6, borderLeft: '3px solid var(--nd-green)' }}>
+        <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginBottom: 10, padding: '6px 10px', background: 'var(--nd-surface)', borderRadius: 6, borderLeft: '3px solid var(--nd-green)' }}>
           High-momentum stocks with above-average volume — suitable for same-day trades. Grades A/B are the highest win-probability setups. Click for full evidence.
         </div>
       )}
@@ -404,7 +404,7 @@ const AiWatchlistTab: React.FC = () => {
               <div style={{ fontSize: 11.5, color: 'var(--nd-text-3)' }}>No A/B-grade setups right now — only high win-probability names appear here.</div>
             )}
             {autoMsg && (
-              <div style={{ marginTop: 10, fontSize: 11.5, color: 'var(--nd-text-2)', background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 8, padding: '7px 10px' }}>
+              <div style={{ marginTop: 10, fontSize: 11.5, color: 'var(--nd-text-2)', background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 8, padding: '7px 10px' }}>
                 {autoMsg}
               </div>
             )}
@@ -412,12 +412,12 @@ const AiWatchlistTab: React.FC = () => {
         );
       })()}
       {tab === 'delivery' && (
-        <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginBottom: 10, padding: '6px 10px', background: 'var(--nd-bg)', borderRadius: 6, borderLeft: '3px solid var(--nd-blue)' }}>
+        <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginBottom: 10, padding: '6px 10px', background: 'var(--nd-surface)', borderRadius: 6, borderLeft: '3px solid var(--nd-blue)' }}>
           Stocks in a confirmed uptrend with moderate volatility — suitable for multi-week holding. The <strong style={{ color: 'var(--nd-text-2)' }}>Safe ~X wks</strong> badge is the AI's estimated safe holding window.
         </div>
       )}
       {tab === 'fno' && (
-        <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginBottom: 10, padding: '6px 10px', background: 'var(--nd-bg)', borderRadius: 6, borderLeft: '3px solid #a78bfa' }}>
+        <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginBottom: 10, padding: '6px 10px', background: 'var(--nd-surface)', borderRadius: 6, borderLeft: '3px solid #a78bfa' }}>
           F&O-eligible stocks with a directional signal. Each row shows the recommended option (CE/PE), strike, expiry, and estimated safe holding days.
         </div>
       )}
@@ -471,7 +471,7 @@ const AiWatchlistTab: React.FC = () => {
 
       {/* Metrics summary row for active tab */}
       {activeItems.length > 0 && tab === 'delivery' && (
-        <div style={{ marginTop: 12, padding: '8px 12px', background: 'var(--nd-bg)', borderRadius: 8, fontSize: 11, color: 'var(--nd-text-3)', display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+        <div style={{ marginTop: 12, padding: '8px 12px', background: 'var(--nd-surface)', borderRadius: 8, fontSize: 11, color: 'var(--nd-text-3)', display: 'flex', gap: 16, flexWrap: 'wrap' }}>
           <span>Avg holding: <strong style={{ color: 'var(--nd-text-2)' }}>
             {Math.round(activeItems.reduce((s: number, i) => s + (i.deliveryWeeks || 0), 0) / activeItems.length)} wks
           </strong></span>
@@ -489,7 +489,7 @@ const AiWatchlistTab: React.FC = () => {
 const WatchlistEvidence: React.FC<{ stock: WatchlistStock; scannedAt?: string; onClose: () => void }> = ({ stock, scannedAt, onClose }) => (
   <div onClick={e => { if (e.target === e.currentTarget) onClose(); }}
     style={{ position: 'fixed', inset: 0, background: '#00000080', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 12 }}>
-    <div style={{ background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 16, width: '100%', maxWidth: 500, maxHeight: '88vh', overflow: 'auto', boxShadow: '0 24px 64px #00000060' }}>
+    <div style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 16, width: '100%', maxWidth: 500, maxHeight: '88vh', overflow: 'auto', boxShadow: '0 24px 64px #00000060' }}>
       <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--nd-border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span style={{ fontSize: 16, fontWeight: 700, color: 'var(--nd-text-1)' }}>{stock.symbol}</span>

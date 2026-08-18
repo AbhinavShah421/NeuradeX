@@ -362,7 +362,7 @@ const StockDetail: React.FC = () => {
       {/* Order Modal */}
       {showOrderModal && (
         <div style={{ position: 'fixed', inset: 0, zIndex: 50, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.55)' }}>
-          <div style={{ width: '100%', maxWidth: 420, margin: '0 16px', borderRadius: 14, background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', boxShadow: 'var(--nd-shadow-md)', padding: 24 }}>
+          <div style={{ width: '100%', maxWidth: 420, margin: '0 16px', borderRadius: 14, background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', boxShadow: 'var(--nd-shadow-md)', padding: 24 }}>
 
             {orderResult ? (
               <div style={{ textAlign: 'center', padding: '8px 0' }}>
@@ -442,12 +442,12 @@ const StockDetail: React.FC = () => {
                   <label className="nd-field-label">Quantity</label>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <button onClick={() => setOrderQty(q => Math.max(1, q - 1))}
-                      style={{ width: 34, height: 34, border: '1px solid var(--nd-border)', borderRadius: 6, background: 'var(--nd-bg)', cursor: 'pointer', fontSize: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--nd-text-1)' }}>−</button>
+                      style={{ width: 34, height: 34, border: '1px solid var(--nd-border)', borderRadius: 6, background: 'var(--nd-surface)', cursor: 'pointer', fontSize: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--nd-text-1)' }}>−</button>
                     <input type="number" min={1} value={orderQty}
                       onChange={e => setOrderQty(Math.max(1, parseInt(e.target.value) || 1))}
                       className="nd-input" style={{ textAlign: 'center', flex: 1 }} />
                     <button onClick={() => setOrderQty(q => q + 1)}
-                      style={{ width: 34, height: 34, border: '1px solid var(--nd-border)', borderRadius: 6, background: 'var(--nd-bg)', cursor: 'pointer', fontSize: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--nd-text-1)' }}>+</button>
+                      style={{ width: 34, height: 34, border: '1px solid var(--nd-border)', borderRadius: 6, background: 'var(--nd-surface)', cursor: 'pointer', fontSize: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--nd-text-1)' }}>+</button>
                   </div>
                 </div>
 

@@ -304,8 +304,12 @@ body {
    nothing here can leak into light mode. */
 .dark-mode .nd-card {
   background: rgba(16, 24, 42, 0.72);
-  backdrop-filter: blur(6px);
   transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease;
+  /* NO backdrop-filter here. It creates a containing block for
+     `position: fixed` descendants, so every modal rendered inside a card —
+     and most of them are, none are portalled — stopped covering the viewport
+     and got clipped to the card instead. The translucent background already
+     carries the intended look; the blur is not worth breaking overlays for. */
 }
 .dark-mode .nd-card:hover {
   border-color: rgba(56, 189, 248, 0.38);

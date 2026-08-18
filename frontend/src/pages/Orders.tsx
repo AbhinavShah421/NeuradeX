@@ -252,7 +252,7 @@ function ExecutionModal({ trade, allTrades = [], onClose }: { trade: TradeRecord
       style={{ position: 'fixed', inset: 0, background: '#00000080', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 12 }}
       onClick={e => { if (e.target === e.currentTarget) onClose(); }}
     >
-      <div style={{ background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 16, width: '100%', maxWidth: 680, maxHeight: '90vh', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 64px #00000060' }}>
+      <div style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 16, width: '100%', maxWidth: 680, maxHeight: '90vh', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 64px #00000060' }}>
 
         {/* Header */}
         <div style={{ padding: '18px 24px', borderBottom: '1px solid var(--nd-border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -347,7 +347,7 @@ function ExecutionModal({ trade, allTrades = [], onClose }: { trade: TradeRecord
                                       const s = acc.by_action!.find(x => x.action === act);
                                       if (!s) return null;
                                       return (
-                                        <div key={act} style={{ flex: '1 1 90px', background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 6, padding: '6px 10px' }}>
+                                        <div key={act} style={{ flex: '1 1 90px', background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 6, padding: '6px 10px' }}>
                                           <div style={{ fontSize: 10, fontWeight: 700, color: ACTION_COLOR[act] ?? 'var(--nd-text-3)' }}>{act}</div>
                                           <div style={{ fontSize: 15, fontWeight: 700, color: s.rate >= 0.5 ? 'var(--nd-green)' : 'var(--nd-text-2)' }}>{(s.rate * 100).toFixed(0)}%</div>
                                           <div style={{ fontSize: 9.5, color: 'var(--nd-text-3)' }}>{s.total} decisions</div>
@@ -659,7 +659,7 @@ const Orders: React.FC = () => {
             <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--nd-text-3)', letterSpacing: 0.5, marginBottom: 8 }}>LESSONS APPLIED TO FUTURE DECISIONS</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {lessons.map((l: any, i: number) => (
-                <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 10px', background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 8 }}>
+                <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 10px', background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 8 }}>
                   <span className="material-icons" style={{ fontSize: 15, color: '#fbbf24' }}>error_outline</span>
                   <div style={{ flex: 1 }}>
                     <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--nd-text-1)' }}>{l.failureMode}</div>
@@ -678,7 +678,7 @@ const Orders: React.FC = () => {
             <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--nd-text-3)', letterSpacing: 0.5, marginBottom: 8 }}>RECENT LOSS POST-MORTEMS</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 280, overflow: 'auto' }}>
               {postmortems.slice(0, 25).map((p: any, i: number) => (
-                <div key={i} style={{ padding: '8px 10px', background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 8 }}>
+                <div key={i} style={{ padding: '8px 10px', background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 8 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
                     <span style={{ fontWeight: 700, fontFamily: 'monospace', color: 'var(--nd-text-1)' }}>{p.symbol}</span>
                     <span style={{ fontSize: 10.5, color: ACTION_COLOR[p.action] ?? 'var(--nd-text-3)' }}>{p.action}</span>
@@ -887,7 +887,7 @@ const Orders: React.FC = () => {
           <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' as any }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, minWidth: 820 }}>
             <thead>
-              <tr style={{ borderBottom: '1px solid var(--nd-border)', background: 'var(--nd-bg)' }}>
+              <tr style={{ borderBottom: '1px solid var(--nd-border)', background: 'var(--nd-surface)' }}>
                 <th style={{ width: 34 }} />
                 {SCOLS.map(c => (
                   <th key={c.key} onClick={() => onSort(c.key)}
@@ -929,7 +929,7 @@ const Orders: React.FC = () => {
 
                     {/* Expanded: the session's trade rows only (chart lives in the modal) */}
                     {open && (
-                      <tr style={{ background: 'var(--nd-bg)' }}>
+                      <tr style={{ background: 'var(--nd-surface)' }}>
                         <td colSpan={SCOLS.length + 1} style={{ padding: '8px 16px 16px' }}>
                           <div style={{ overflowX: 'auto' }}>
                             <table style={{ width: '100%', minWidth: 560, borderCollapse: 'collapse', fontSize: 12 }}>

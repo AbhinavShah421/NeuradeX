@@ -56,11 +56,11 @@ const AgentDetailSheet: React.FC<{ agent: LearningAgent; rank: number; onClose: 
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 3 }}>
               <span style={{ fontSize: 15, fontWeight: 700, color: 'var(--nd-text-1)', textTransform: 'capitalize', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.agent}</span>
-              <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--nd-text-3)', background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 5, padding: '1px 6px', flexShrink: 0 }}>#{rank}</span>
+              <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--nd-text-3)', background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 5, padding: '1px 6px', flexShrink: 0 }}>#{rank}</span>
             </div>
             <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>{meta.label}</span>
           </div>
-          <button onClick={onClose} style={{ background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 8, width: 32, height: 32, cursor: 'pointer', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <button onClick={onClose} style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 8, width: 32, height: 32, cursor: 'pointer', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
             <span className="material-icons" style={{ fontSize: 16, color: 'var(--nd-text-2)' }}>close</span>
           </button>
         </div>
@@ -69,7 +69,7 @@ const AgentDetailSheet: React.FC<{ agent: LearningAgent; rank: number; onClose: 
         <div style={{ padding: '16px 16px 0', display: 'flex', flexDirection: 'column', gap: 12 }}>
 
           {/* Accuracy hero */}
-          <div style={{ background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 14, padding: '14px 16px' }}>
+          <div style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 14, padding: '14px 16px' }}>
             <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--nd-text-3)', marginBottom: 6 }}>Live Accuracy</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 10 }}>
               <span style={{ fontSize: 38, fontWeight: 800, color: col, lineHeight: 1 }}>{pct}%</span>
@@ -88,7 +88,7 @@ const AgentDetailSheet: React.FC<{ agent: LearningAgent; rank: number; onClose: 
               { label: 'Correct', value: String(a.correct ?? 0), icon: 'check_circle', iconCol: 'var(--nd-green)'  },
               { label: 'Wrong',   value: String(wrong),           icon: 'cancel',       iconCol: '#fb5c7d'          },
             ].map(s => (
-              <div key={s.label} style={{ background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 10, padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 10 }}>
+              <div key={s.label} style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 10, padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 10 }}>
                 <span className="material-icons" style={{ fontSize: 22, color: s.iconCol, flexShrink: 0 }}>{s.icon}</span>
                 <div style={{ minWidth: 0 }}>
                   <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--nd-text-1)', lineHeight: 1, marginBottom: 4 }}>{s.value}</div>
@@ -100,7 +100,7 @@ const AgentDetailSheet: React.FC<{ agent: LearningAgent; rank: number; onClose: 
 
           {/* ── BUY / SELL contribution ── */}
           {sortedActions.length > 0 && (
-            <div style={{ background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 12, padding: '14px 16px' }}>
+            <div style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 12, padding: '14px 16px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 12 }}>
                 <span className="material-icons" style={{ fontSize: 14, color: '#a78bfa' }}>pie_chart</span>
                 <span style={{ fontSize: 11, fontWeight: 700, color: '#a78bfa', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
@@ -212,7 +212,7 @@ const AgentDetailSheet: React.FC<{ agent: LearningAgent; rank: number; onClose: 
 
                 {/* ── Data Sources ── */}
                 <div style={{
-                  background: 'var(--nd-bg)', border: '1px solid var(--nd-border)',
+                  background: 'var(--nd-surface)', border: '1px solid var(--nd-border)',
                   borderRadius: 12, padding: '14px 16px',
                 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
@@ -233,7 +233,7 @@ const AgentDetailSheet: React.FC<{ agent: LearningAgent; rank: number; onClose: 
 
                 {/* ── Signals it reads ── */}
                 <div style={{
-                  background: 'var(--nd-bg)', border: '1px solid var(--nd-border)',
+                  background: 'var(--nd-surface)', border: '1px solid var(--nd-border)',
                   borderRadius: 12, padding: '14px 16px',
                 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
@@ -255,7 +255,7 @@ const AgentDetailSheet: React.FC<{ agent: LearningAgent; rank: number; onClose: 
 
                 {/* ── Best used for ── */}
                 <div style={{
-                  background: 'var(--nd-bg)', border: '1px solid var(--nd-border)',
+                  background: 'var(--nd-surface)', border: '1px solid var(--nd-border)',
                   borderRadius: 12, padding: '14px 16px',
                 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
@@ -269,7 +269,7 @@ const AgentDetailSheet: React.FC<{ agent: LearningAgent; rank: number; onClose: 
 
                 {/* ── Ensemble influence ── */}
                 <div style={{
-                  background: 'var(--nd-bg)', border: '1px solid var(--nd-border)',
+                  background: 'var(--nd-surface)', border: '1px solid var(--nd-border)',
                   borderRadius: 12, padding: '14px 16px',
                 }}>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>

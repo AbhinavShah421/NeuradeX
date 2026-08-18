@@ -178,7 +178,7 @@ const Recordings: React.FC = () => {
   };
   const chip: React.CSSProperties = {
     display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 8px',
-    background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 20,
+    background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 20,
     fontSize: 12, fontWeight: 600, color: 'var(--nd-text-1)',
   };
 
@@ -365,7 +365,7 @@ const Recordings: React.FC = () => {
                   // buttons into ~50px each. Stack as a card per symbol instead.
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                     {(det.coverage ?? []).map(c => (
-                      <div key={c.symbol} style={{ background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 10, padding: '10px 12px' }}>
+                      <div key={c.symbol} style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 10, padding: '10px 12px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 4 }}>
                           <span style={{ fontWeight: 700, fontSize: 13, color: 'var(--nd-text-1)' }}>{c.symbol}</span>
                           {c.ticks === 0 ? <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>No data</span>
@@ -397,7 +397,7 @@ const Recordings: React.FC = () => {
                       <span>Symbol</span><span>Captured</span><span>Window</span><span>Coverage</span><span></span>
                     </div>
                     {(det.coverage ?? []).map(c => (
-                      <div key={c.symbol} style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr 1fr 0.8fr auto', gap: 8, alignItems: 'center', fontSize: 12, background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 8, padding: '8px 10px' }}>
+                      <div key={c.symbol} style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr 1fr 0.8fr auto', gap: 8, alignItems: 'center', fontSize: 12, background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 8, padding: '8px 10px' }}>
                         <span style={{ fontWeight: 700, color: 'var(--nd-text-1)' }}>{c.symbol}</span>
                         <span style={{ color: 'var(--nd-text-2)' }}>{c.ticks.toLocaleString()} ticks</span>
                         <span style={{ color: 'var(--nd-text-3)' }}>{c.firstTime && c.lastTime ? `${c.firstTime}–${c.lastTime}` : '—'}</span>
@@ -432,7 +432,7 @@ const Recordings: React.FC = () => {
       {/* Chart modal — full-screen sheet on phones, centered dialog on desktop */}
       {(chart || chartLoading) && (
         <div onClick={() => setChart(null)} style={{
-          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 200,
+          position: 'fixed', inset: 0, background: 'rgba(3,6,12,0.72)', zIndex: 200,
           display: 'flex', alignItems: narrow ? 'stretch' : 'center', justifyContent: 'center',
           padding: narrow ? 0 : 20,
         }}>

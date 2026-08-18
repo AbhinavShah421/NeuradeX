@@ -28,7 +28,7 @@ const btn = (c: string, bg: string, border = 'transparent'): React.CSSProperties
 });
 const label: React.CSSProperties = { fontSize: 11, fontWeight: 500, color: 'var(--nd-text-3)', marginBottom: 4 };
 const input: React.CSSProperties = {
-  background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 8,
+  background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 8,
   padding: '8px 12px', fontSize: 13, color: 'var(--nd-text-1)', width: '100%', boxSizing: 'border-box',
 };
 

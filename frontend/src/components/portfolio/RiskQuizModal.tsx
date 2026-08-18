@@ -20,7 +20,7 @@ interface RiskQuizModalProps {
 const RiskQuizModal: React.FC<RiskQuizModalProps> = ({ quizAns, setQuizAns, planForm, setPlanForm, onClose }) => {
   return (
     <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: '#00000080', zIndex: 1200, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
-      <div onClick={e => e.stopPropagation()} style={{ background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 14, width: '100%', maxWidth: 460, maxHeight: '88vh', overflow: 'auto', padding: 22 }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 14, width: '100%', maxWidth: 460, maxHeight: '88vh', overflow: 'auto', padding: 22 }}>
         <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>Find your risk profile</div>
         <div style={{ fontSize: 12, color: 'var(--nd-text-3)', marginBottom: 14 }}>5 quick questions → recommended risk level for your plan.</div>
         {RISK_QUIZ.map((item, qi) => (
