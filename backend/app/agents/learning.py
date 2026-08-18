@@ -78,6 +78,12 @@ _VETO_ONLY_WEIGHT = 0.7
 # direction rather than by staying silent.
 _ABSTAIN_CREDIT = 0.25
 
+# How much a replay/backtest outcome counts toward weight drift, relative to a
+# real paper/live one. Simulated fills ARE evidence — they are just weaker
+# evidence, because which symbols and dates got swept is an operator choice
+# rather than a market sample. Mirrors _CF_RATE_WEIGHT for counterfactual labels.
+_SIM_OUTCOME_WEIGHT = 0.3
+
 
 def _shrunk_rate(correct: int, total: int, base: float, k: int = _SHRINK_K) -> float:
     """Bayesian-shrunk accuracy: pulls small samples toward the base rate so an
@@ -271,13 +277,18 @@ class LearningSystem:
 
                 # Get the agent signals + fingerprint + rl_state for this prediction
                 row = (await conn.execute(
-                    text("SELECT agent_signals, fingerprint, final_action, rl_state "
-                         "FROM ai_engine_predictions WHERE prediction_id=:pid"),
+                    text("SELECT p.agent_signals, p.fingerprint, p.final_action, "
+                         "       p.rl_state, sm.mode "
+                         "FROM ai_engine_predictions p "
+                         "LEFT JOIN session_metadata sm "
+                         "  ON sm.session_id = p.context::jsonb->>'session_id' "
+                         "WHERE p.prediction_id=:pid"),
                     {"pid": prediction_id}
                 )).fetchone()
 
                 if row:
                     signals = json.loads(row[0])
+                    sess_mode = row[4]
                     mem_fp, mem_action = row[1], row[2]
                     rl_state = row[3]
 
@@ -293,6 +304,22 @@ class LearningSystem:
                     #
                     # Delta is scaled by |reward| so a 5% winner updates weights
                     # more than a 0.1% winner — magnitude matters.
+                    # EVERY trading mode contributes to learning — paper,
+                    # live, replay and backtest alike. Simulated outcomes are
+                    # real evidence about an agent's judgement; refusing them
+                    # throws away most of the sample.
+                    #
+                    # They are DOWN-WEIGHTED rather than excluded, for the same
+                    # reason counterfactual labels are (_CF_RATE_WEIGHT): a
+                    # simulated fill depends on which symbols and dates an
+                    # operator happened to sweep, so it is weaker evidence than
+                    # a real one. Without this, 71 of 75 outcomes on 2026-08-17
+                    # (95%) came from overnight backtest sweeps and drove
+                    # essentially all weight drift, while `sentiment` — which is
+                    # deliberately excluded from replay/backtest — was starved
+                    # to 1 scored prediction against 72 for every other agent.
+                    sim_scale = _SIM_OUTCOME_WEIGHT if sess_mode in ("replay", "backtest") else 1.0
+
                     _LR = 0.06   # per-trade learning rate; weight bounds [0.3, 3.0]
                     for sig in signals:
                         act = sig["action"]
@@ -334,7 +361,7 @@ class LearningSystem:
                                 signed  = -reward * _ABSTAIN_CREDIT
                                 correct = False
 
-                        delta = _LR * signed
+                        delta = _LR * signed * sim_scale
                         await conn.execute(text("""
                             UPDATE ai_engine_agent_weights
                             SET correct_predictions = correct_predictions + :corr,
@@ -344,7 +371,7 @@ class LearningSystem:
                             WHERE agent_name = :name
                         """), {
                             "corr":  1 if correct else 0,
-                            "rw":    signed,
+                            "rw":    signed * sim_scale,
                             "delta": delta,
                             "name":  sig["agent"],
                         })
@@ -525,6 +552,44 @@ class LearningSystem:
                     GROUP BY sig->>'agent', sig->>'action'
                 """))).fetchall()
 
+
+                # Replay/backtest outcomes, merged at _SIM_OUTCOME_WEIGHT. They
+                # are evidence about an agent's judgement too — just weaker,
+                # because the symbol/date coverage is an operator choice. This
+                # mirrors how counterfactual labels are merged, so every trading
+                # mode contributes to the rates without simulated sweeps (95% of
+                # raw outcome volume) drowning the real ones.
+                sim_base_row = (await conn.execute(text("""
+                    SELECT COUNT(*)::int,
+                           SUM(CASE WHEN o.outcome = 'correct' THEN 1 ELSE 0 END)::int
+                    FROM ai_engine_outcomes o
+                    JOIN ai_engine_predictions p USING (prediction_id)
+                    WHERE EXISTS (
+                        SELECT 1 FROM session_metadata sm
+                        WHERE sm.session_id = p.context::jsonb->>'session_id'
+                          AND sm.mode IN ('replay', 'backtest'))
+                """))).fetchone()
+                sim_rows = (await conn.execute(text("""
+                    SELECT
+                        sig->>'agent'  AS agent_name,
+                        sig->>'action' AS action,
+                        COUNT(*)::int  AS total,
+                        SUM(CASE
+                              WHEN sig->>'action' = 'BUY'
+                                   THEN CASE WHEN o.outcome = 'correct' THEN 1 ELSE 0 END
+                              ELSE CASE WHEN o.outcome = 'correct' THEN 0 ELSE 1 END
+                            END)::int AS correct
+                    FROM ai_engine_predictions p
+                    JOIN ai_engine_outcomes o USING (prediction_id)
+                    CROSS JOIN LATERAL jsonb_array_elements(p.agent_signals::jsonb) AS sig
+                    WHERE sig->>'agent' IS NOT NULL
+                      AND EXISTS (
+                        SELECT 1 FROM session_metadata sm
+                        WHERE sm.session_id = p.context::jsonb->>'session_id'
+                          AND sm.mode IN ('replay', 'backtest'))
+                    GROUP BY sig->>'agent', sig->>'action'
+                """))).fetchall()
+
                 # Counterfactual base + per-agent counts. Guarded: the cf columns
                 # only exist once the counterfactual module has initialised.
                 cf_base_row, cf_rows = None, []
@@ -558,6 +623,9 @@ class LearningSystem:
 
             # Merged base rate: real outcomes at full weight, cf at _CF_RATE_WEIGHT.
             n_out, n_win = float(base_row[0] or 0), float(base_row[1] or 0)
+            if sim_base_row:
+                n_out += _SIM_OUTCOME_WEIGHT * float(sim_base_row[0] or 0)
+                n_win += _SIM_OUTCOME_WEIGHT * float(sim_base_row[1] or 0)
             if cf_base_row:
                 n_out += _CF_RATE_WEIGHT * float(cf_base_row[0] or 0)
                 n_win += _CF_RATE_WEIGHT * float(cf_base_row[1] or 0)
@@ -570,6 +638,10 @@ class LearningSystem:
             counts: dict[tuple[str, str], list[float]] = {}
             for r in rows:
                 counts[(r[0], r[1])] = [float(r[2] or 0), float(r[3] or 0)]
+            for r in sim_rows:
+                cur = counts.setdefault((r[0], r[1]), [0.0, 0.0])
+                cur[0] += _SIM_OUTCOME_WEIGHT * float(r[2] or 0)
+                cur[1] += _SIM_OUTCOME_WEIGHT * float(r[3] or 0)
             for r in cf_rows:
                 cur = counts.setdefault((r[0], r[1]), [0.0, 0.0])
                 cur[0] += _CF_RATE_WEIGHT * float(r[2] or 0)
