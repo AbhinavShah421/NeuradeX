@@ -567,6 +567,102 @@ async def train_rl_from_labels(day: str) -> int:
     return updates
 
 
+_AGENT_WEIGHT_FLAG = "cf:agent_weights:"
+# One bounded nudge per agent per day. Deliberately small: there are ~10k labels
+# a day against a handful of real trades, so anything per-label would let
+# counterfactuals overwhelm executed outcomes entirely.
+_CF_WEIGHT_STEP = 0.02
+
+
+async def nudge_agent_weights_from_labels(day: str, force: bool = False) -> dict:
+    """Move each agent's weight toward the accuracy its OWN votes showed in the
+    day's counterfactual labels.
+
+    Why this exists: `record_outcome` — the only thing that moved
+    `ai_engine_agent_weights.weight` — fires solely on a CLOSED TRADE. On any day
+    the gates decline everything (or the execution chain is disarmed), the agent
+    weights froze completely, even though the labels contain full evidence about
+    which agents were right. RL, pattern memory and the per-action rates all
+    already learn from labels; the weight scalar was the one path that did not,
+    and it multiplies every vote.
+
+    Bounded by design: ONE update per agent per day, capped at _CF_WEIGHT_STEP,
+    idempotent via a Redis flag. Counterfactuals inform the weights; they cannot
+    stampede them.
+    """
+    from sqlalchemy import text
+    from app.database.postgres import engine
+    from app.utils.redis_client import get_redis
+
+    r = get_redis()
+    flag = _AGENT_WEIGHT_FLAG + day
+    if not force and await r.get(flag):
+        return {"skipped": "already applied", "day": day}
+
+    async with engine.begin() as conn:
+        rows = (await conn.execute(text("""
+            SELECT sig->>'agent'  AS agent,
+                   COUNT(*)::int  AS n,
+                   AVG(CASE
+                         WHEN sig->>'action' = 'BUY'
+                              THEN CASE WHEN d.cf_pnl_pct > 0 THEN 1.0 ELSE 0.0 END
+                         WHEN sig->>'action' = 'SELL'
+                              THEN CASE WHEN d.cf_pnl_pct > 0 THEN 0.0 ELSE 1.0 END
+                         ELSE NULL          -- HOLD carries no directional claim
+                       END)::float AS acc
+            FROM session_decisions d
+            CROSS JOIN LATERAL jsonb_array_elements(d.agents) sig
+            WHERE d.cf_pnl_pct IS NOT NULL
+              AND (d.created_at AT TIME ZONE 'Asia/Kolkata')::date::text = :day
+              AND sig->>'agent' IS NOT NULL
+              """ + _TRADEABLE_ENTRY_SQL + """
+            GROUP BY sig->>'agent'
+            HAVING COUNT(*) FILTER (WHERE sig->>'action' IN ('BUY','SELL')) >= 30
+        """), {"day": day})).fetchall()
+
+        base_row = (await conn.execute(text("""
+            SELECT AVG(CASE WHEN cf_pnl_pct > 0 THEN 1.0 ELSE 0.0 END)::float
+            FROM session_decisions d
+            WHERE cf_pnl_pct IS NOT NULL
+              AND (created_at AT TIME ZONE 'Asia/Kolkata')::date::text = :day
+              """ + _TRADEABLE_ENTRY_SQL + """
+        """), {"day": day})).fetchone()
+        base = float(base_row[0]) if base_row and base_row[0] is not None else 0.5
+
+        # ZERO-SUM against the cohort, not against the day's base rate.
+        #
+        # An agent's accuracy is measured only on the bars IT chose to vote
+        # directionally; the base rate spans every bar, most of which are HOLD.
+        # Those are different populations, so comparing them made nearly every
+        # agent clear the bar and collect the maximum +0.02 — uniform inflation
+        # that discriminates between nobody and walks every weight toward the
+        # 3.0 clamp. Centring the deltas on the cohort mean makes this a pure
+        # reallocation: being better than the OTHER AGENTS today is what earns
+        # weight, which is the only comparison where the populations match.
+        scored = [(a, float(acc)) for a, n, acc in rows
+                  if acc is not None and a not in ("anomaly",)]
+        applied = {}
+        if scored:
+            mean_acc = sum(v for _, v in scored) / len(scored)
+            for agent, acc in scored:
+                lift = acc - mean_acc
+                delta = max(-_CF_WEIGHT_STEP, min(_CF_WEIGHT_STEP, lift))
+                await conn.execute(text("""
+                    UPDATE ai_engine_agent_weights
+                    SET weight = GREATEST(0.3, LEAST(3.0, weight + :d)),
+                        updated_at = NOW()
+                    WHERE agent_name = :a
+                """), {"d": delta, "a": agent})
+                applied[agent] = round(delta, 4)
+
+    await r.set(flag, "1", ex=86400 * 30)
+    if applied:
+        logger.info("CF weight nudge for %s: base=%.3f, %d agents adjusted",
+                    day, base, len(applied),
+                    extra={"log_type": "ai_engine", "event": "cf_weight_nudge"})
+    return {"day": day, "base": round(base, 4), "applied": applied}
+
+
 async def promote_memory_phantoms(day: str) -> int:
     """Promote near-miss decisions (≥ _MEM_PHANTOM_MIN_BUYS agents voted BUY but
     no trade fired) into the pattern-memory bank as phantom BUY cases, labeled
@@ -1016,6 +1112,7 @@ async def counterfactual_loop() -> None:
                 day = _last_completed_trading_day(datetime.now(IST))
                 await train_rl_from_labels(day)
                 await promote_memory_phantoms(day)
+                await nudge_agent_weights_from_labels(day)
                 await run_exit_ab(day)
                 await run_exit_ab_store(day)   # whole-tick-store population too
                 # Re-run days missing a variant added after they were evaluated,
