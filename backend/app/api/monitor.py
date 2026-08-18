@@ -1050,3 +1050,20 @@ async def component_logs(name: str, tail: int = 200):
         return {"name": name, "lines": text.splitlines()[-tail:]}
     except Exception as exc:
         return {"name": name, "lines": [], "error": str(exc)[:200]}
+
+
+@router.get("/evidence")
+async def get_evidence_register():
+    """What justifies each live trading behaviour.
+
+    The validation gate is advisory on its own. This is the register that makes
+    it binding: every switch able to change what the system trades declares the
+    evidence behind its current setting, and `test_registry.py` fails the build
+    when live code reads one that is not declared here.
+
+    Enforcement is at build time rather than startup on purpose — refusing to
+    boot over a bookkeeping gap would be a worse failure than the one it
+    prevents — so this endpoint exists to make an unjustified behaviour visible.
+    """
+    from app.research.registry import evidence_debt
+    return {"status": "success", "data": evidence_debt()}
