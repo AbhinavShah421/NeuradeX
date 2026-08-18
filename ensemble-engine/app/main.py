@@ -211,6 +211,111 @@ async def on_all_signals_received(symbol: str, agent_signals: dict) -> None:
         _recent_decisions.pop()
 
 
+
+async def on_backend_decision(raw: dict) -> None:
+    """Apply the MLflow layer to a decision the BACKEND already aggregated.
+
+    This is the service's real job now. Aggregation moved to the backend
+    ensemble, which owns the tuned behaviour (directional contest, memory
+    evidence gate, learned weights, per-action lift) and the learning loops that
+    feed it. This service keeps what it is uniquely good for: serving the MLflow
+    meta-model and calibrator, which need the mlflow client that the backend
+    image deliberately does not carry.
+
+    Chain: backend -> ensemble.raw -> HERE -> ensemble.decision -> risk-engine.
+    """
+    payload = raw.get("payload", raw)
+    symbol = payload.get("symbol", "")
+    votes = payload.get("agent_votes") or payload.get("agentVotes") or {}
+    action = payload.get("final_action") or payload.get("finalAction") or "HOLD"
+    conf = float(payload.get("weighted_confidence")
+                 or payload.get("weightedConfidence") or 0.0)
+    agreement = float(payload.get("agreement_score")
+                      or payload.get("agreementScore") or 0.0)
+
+    meta_win_prob = predict_win_probability(votes, conf, settings.MLFLOW_TRACKING_URI)
+    if meta_win_prob is not None and meta_win_prob < settings.META_WIN_PROB_GATE:
+        logger.info("Meta-model gate: WIN_PROB=%.3f < %.3f — downgrading %s to HOLD",
+                    meta_win_prob, settings.META_WIN_PROB_GATE, action)
+        action = "HOLD"
+
+    raw_conf = conf
+    conf = round(calibrate_confidence(raw_conf, settings.MLFLOW_TRACKING_URI), 3)
+
+    decision = {
+        "event_id": str(uuid.uuid4()),
+        "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+        "service": settings.SERVICE_NAME,
+        "version": "1.0",
+        "payload": {
+            "symbol": symbol,
+            "exchange": payload.get("exchange", "NSE"),
+            "final_action": action,
+            "finalAction": action,
+            "weighted_confidence": conf,
+            "weightedConfidence": conf,
+            "raw_confidence": round(raw_conf, 3),
+            "agent_votes": votes,
+            "agentVotes": votes,
+            "agreement_score": agreement,
+            "agreementScore": agreement,
+            "uncertainty": round(1.0 - agreement, 3),
+            "meta_win_probability": round(meta_win_prob, 3) if meta_win_prob is not None else None,
+            "atr": float(payload.get("atr", 0.0) or 0.0),
+            "current_price": float(payload.get("current_price")
+                                   or payload.get("currentPrice") or 0.0),
+            "currentPrice": float(payload.get("current_price")
+                                  or payload.get("currentPrice") or 0.0),
+            "source": "backend-ensemble",
+        },
+    }
+
+    logger.info("BACKEND DECISION: %s → %s (conf=%.2f, raw=%.2f)",
+                symbol, action, conf, raw_conf)
+
+    if _publisher:
+        try:
+            ch = await _publisher.channel()
+            exchange = await ch.get_exchange("ensemble.decision")
+            await exchange.publish(
+                aio_pika.Message(
+                    body=json.dumps(decision, default=str).encode(),
+                    delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                    content_type="application/json",
+                ),
+                routing_key="decision",
+            )
+            await ch.close()
+        except Exception as exc:
+            logger.error("ensemble.decision publish failed: %s", exc)
+
+    _recent_decisions.insert(0, decision)
+    if len(_recent_decisions) > 50:
+        _recent_decisions.pop()
+
+
+async def _consume_backend_decisions(rabbitmq_url: str) -> None:
+    """Consume `ensemble.raw` — the backend ensemble's finished decisions."""
+    while True:
+        try:
+            conn = await aio_pika.connect_robust(rabbitmq_url)
+            async with conn:
+                ch = await conn.channel()
+                await ch.set_qos(prefetch_count=10)
+                queue = await ch.get_queue("ensemble.raw")
+                logger.info("listening on ensemble.raw for backend decisions")
+                async with queue.iterator() as it:
+                    async for msg in it:
+                        async with msg.process():
+                            try:
+                                await on_backend_decision(json.loads(msg.body))
+                            except Exception as exc:
+                                logger.error("backend decision handling failed: %s", exc)
+        except Exception as exc:
+            logger.warning("ensemble.raw consumer lost: %s — retry 5s", exc)
+            await asyncio.sleep(5)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _pool, _redis, _publisher
@@ -229,10 +334,25 @@ async def lifespan(app: FastAPI):
         required=True,
     )
 
-    collector = AgentSignalCollector(timeout_seconds=settings.AGENT_SIGNAL_TIMEOUT_SECONDS)
-    collector.on_decision_ready(on_all_signals_received)
+    # Primary path: decisions the backend ensemble already aggregated.
+    _tasks.append(asyncio.create_task(
+        _consume_backend_decisions(settings.RABBITMQ_URL), name="ensemble-raw-consumer"))
 
-    _tasks.append(asyncio.create_task(collector.start(settings.RABBITMQ_URL), name="ensemble-collector"))
+    # Legacy path: aggregate raw agent.signals ourselves. OFF by default since
+    # 2026-08-18 — the technical/pattern/macro/rl microservices it depended on
+    # were deleted as duplicates of in-process backend agents, so it could only
+    # ever reach 1/5 coverage (confidence scaled to ~0.07, rejected by every
+    # gate) while burning a 5s collector timeout per symbol per cycle.
+    # AGGREGATE_AGENT_SIGNALS=1 restores it if those services ever return.
+    if os.getenv("AGGREGATE_AGENT_SIGNALS", "0").strip().lower() in ("1", "true", "yes"):
+        collector = AgentSignalCollector(timeout_seconds=settings.AGENT_SIGNAL_TIMEOUT_SECONDS)
+        collector.on_decision_ready(on_all_signals_received)
+        _tasks.append(asyncio.create_task(
+            collector.start(settings.RABBITMQ_URL), name="ensemble-collector"))
+        logger.info("legacy agent.signals aggregation ENABLED")
+    else:
+        logger.info("legacy agent.signals aggregation disabled — "
+                    "consuming backend decisions from ensemble.raw instead")
 
     # Pre-load meta-model and calibrator so first inference doesn't block
     load_meta_model(settings.MLFLOW_TRACKING_URI)
