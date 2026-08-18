@@ -84,6 +84,7 @@ const SystemMap: React.FC = () => {
   const [openCall, setOpenCall] = useState<string | null>(null);
   const [reqs, setReqs] = useState<Record<string, any>>({});
   const [store, setStore] = useState<any>(null);
+  const [pubFlag, setPubFlag] = useState<any>(null);
   const [storeBusy, setStoreBusy] = useState<string | null>(null);
   const [hoverId, setHoverId] = useState<string | null>(null);
   const [onlyApi, setOnlyApi] = useState(false);
@@ -184,7 +185,10 @@ const SystemMap: React.FC = () => {
     if (view === 'map' && !store) {
       apiService.getLogStore().then(setStore).catch(() => setStore(null));
     }
-  }, [view, store]);
+    if (view === 'map' && !pubFlag) {
+      apiService.getPublishFlag().then(setPubFlag).catch(() => setPubFlag(null));
+    }
+  }, [view, store, pubFlag]);
 
   const runStoreAction = useCallback(async (label: string, fn: () => Promise<any>) => {
     setStoreBusy(label);
@@ -848,6 +852,45 @@ const SystemMap: React.FC = () => {
                   <div style={{ fontSize: 12.5, lineHeight: 1.45 }}>{f.message}</div>
                 </div>
               ))}
+            </Panel>
+
+            <Panel title="EXECUTION CHAIN">
+              {!pubFlag && <div style={{ color: C.dim, fontSize: 12 }}>reading flag…</div>}
+              {pubFlag && (
+                <>
+                  <div style={{ fontSize: 11, color: C.dim, lineHeight: 1.5, marginBottom: 10 }}>
+                    backend ensemble → ensemble-engine (MLflow gate) → risk-engine → trade-executor
+                  </div>
+                  <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <span style={{
+                      fontFamily: 'ui-monospace, monospace', fontSize: 11, fontWeight: 700,
+                      color: pubFlag.enabled ? C.ok : C.idle,
+                    }}>
+                      {pubFlag.enabled ? '● PUBLISHING' : '○ DISARMED'}
+                    </span>
+                    <button
+                      onClick={() => {
+                        const next = !pubFlag.enabled;
+                        if (next && !window.confirm(
+                          'Arm the execution chain? Decisions will reach '
+                          + 'risk-engine and, if they clear its 0.60 gate, '
+                          + 'trade-executor (paper mode). Confidence is '
+                          + 'de-saturated but measured NON-PREDICTIVE '
+                          + '(out-of-sample correlation ~0).')) return;
+                        apiService.setPublishFlag(next).then(setPubFlag).catch(() => {});
+                      }}
+                      style={{
+                        background: pubFlag.enabled ? 'rgba(251,92,125,.10)' : 'rgba(45,212,191,.12)',
+                        border: `1px solid ${pubFlag.enabled ? C.down : C.ok}`,
+                        color: pubFlag.enabled ? C.down : C.ok,
+                        borderRadius: 7, padding: '6px 13px', fontSize: 11.5,
+                        fontWeight: 600, cursor: 'pointer',
+                      }}>
+                      {pubFlag.enabled ? 'Disarm' : 'Arm'}
+                    </button>
+                  </div>
+                </>
+              )}
             </Panel>
 
             <Panel title="LOG STORE">

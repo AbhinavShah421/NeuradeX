@@ -1012,6 +1012,30 @@ async def purge_logs(service: str | None = None, keep_today: bool = True):
     return await purge_all(keep_today=keep_today)
 
 
+# ── Decision publishing (backend ensemble -> execution chain) ────────────────
+
+@router.get("/publish-flag")
+async def get_publish_flag():
+    """Whether the backend publishes decisions into the execution chain."""
+    from app.utils.decision_publisher import is_enabled, env_default
+    return {"enabled": await is_enabled(), "envDefault": env_default(),
+            "chain": "backend ensemble -> ensemble.raw -> ensemble-engine -> "
+                     "ensemble.decision -> risk-engine -> trade-executor"}
+
+
+@router.post("/publish-flag")
+async def set_publish_flag(enabled: bool):
+    """Arm or disarm publishing at runtime (no redeploy).
+
+    Live-behaviour switch: with this on, the backend ensemble's decisions reach
+    risk-engine and, if they clear its gate, trade-executor. That executor runs
+    PAPER_TRADING_MODE=true with no Groww keys, so orders are paper.
+    """
+    from app.utils.decision_publisher import set_enabled, is_enabled
+    await set_enabled(enabled)
+    return {"enabled": await is_enabled()}
+
+
 @router.get("/logs/{name}")
 async def component_logs(name: str, tail: int = 200):
     """Recent logs for one container, as plain lines for the detail drawer."""

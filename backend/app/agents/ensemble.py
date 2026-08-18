@@ -275,7 +275,7 @@ class EnsembleEngine:
             vote_mode = "directional"
             buy_n  = sum(1 for s in signals if s.action == "BUY")
             sell_n = sum(1 for s in signals if s.action == "SELL")
-            bm, sm = vote["BUY"], vote["SELL"]
+            bm, sm, hm = vote["BUY"], vote["SELL"], vote["HOLD"]
             if bm > 0 and bm >= _DIR_DOMINANCE * sm and buy_n >= _DIR_MIN_VOTERS:
                 action = "BUY"
             elif sm > 0 and sm >= _DIR_DOMINANCE * bm and sell_n >= _DIR_MIN_VOTERS:
@@ -291,7 +291,27 @@ class EnsembleEngine:
                 dir_mass  = (bm + sm) or 1.0
                 dir_n     = (buy_n + sell_n) or 1
                 agreement = win_n / dir_n
-                confidence = 0.30 + 0.65 * (0.6 * win_mass / dir_mass + 0.4 * agreement)
+                # Confidence is the winner's share of the WHOLE panel, not of
+                # the directional mass alone.
+                #
+                # The old form used win_mass/dir_mass, which is 1.0 whenever
+                # nobody votes the opposite way — regardless of how little mass
+                # actually backs the call. Two agents at 0.55 with nine
+                # abstaining scored the same 0.95 as a unanimous panel, so 38.8%
+                # of all decisions pinned at 0.95 and that top decile hit 22.0%
+                # against a 32.5% base: the most "confident" calls were the
+                # worst. Measured on 164,638 counterfactual-labelled bars, held
+                # out on August, this form removes the saturation entirely (0%)
+                # and lifts the top decile to 31.3%.
+                #
+                # Honest limit: it makes confidence UNINFORMATIVE rather than
+                # INVERTED. OOS correlation with the outcome is -0.002, i.e.
+                # ~zero. Nothing here creates predictive power — the agent votes
+                # themselves carry no rankable signal (see the A/B in
+                # scripts/ensemble_dryrun.py and the 2026-08-17 audit).
+                total_mass = (bm + sm + hm) or 1.0
+                confidence = 0.30 + 0.65 * (0.6 * (win_mass / total_mass)
+                                            + 0.4 * (win_n / len(signals) if signals else 0.0))
             else:
                 agreers    = sum(1 for s in signals if s.action == "HOLD")
                 agreement  = agreers / len(signals) if signals else 0.0

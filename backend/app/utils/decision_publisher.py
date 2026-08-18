@@ -40,14 +40,48 @@ logger = get_logger(__name__)
 # -> risk-engine, so ensemble-engine keeps its MLflow gate in the path.
 _EXCHANGE = "ensemble.raw"
 _ENABLED_ENV = "ENSEMBLE_PUBLISH_ENABLED"
+# Runtime override so the System Map can arm/disarm without a redeploy. Redis
+# wins over the env default; absent key falls back to the env, then to ON.
+_REDIS_KEY = "ensemble:publish_enabled"
 
 _conn: Any = None
 _channel: Any = None
 _warned = False
 
 
-def is_enabled() -> bool:
-    return os.getenv(_ENABLED_ENV, "0").strip().lower() in ("1", "true", "yes", "on")
+def _truthy(v: str) -> bool:
+    return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+
+def env_default() -> bool:
+    return _truthy(os.getenv(_ENABLED_ENV, "1"))
+
+
+async def is_enabled() -> bool:
+    """Runtime flag: Redis override first, then the env default.
+
+    Read per publish rather than cached — an operator disarming this from the
+    System Map must take effect on the very next decision, not after a restart.
+    Redis being unreachable falls back to the env value rather than silently
+    turning publishing off, so a cache blip cannot mute the pipeline.
+    """
+    try:
+        from app.utils.redis_client import cache_get
+        raw = await cache_get(_REDIS_KEY)
+        if raw is not None and str(raw) != "":
+            return _truthy(raw)
+    except Exception:
+        logger.debug("publish flag read failed; using env default", exc_info=True)
+    return env_default()
+
+
+async def set_enabled(on: bool) -> bool:
+    from app.utils.redis_client import cache_set
+    await cache_set(_REDIS_KEY, "1" if on else "0", expire=None)
+    logger.info("ensemble decision publishing %s", "ENABLED" if on else "DISABLED",
+                extra={"log_type": "ai_engine", "event": "publish_flag_set",
+                       "enabled": bool(on)})
+    return on
 
 
 def _rabbit_url() -> str:
@@ -111,7 +145,7 @@ async def publish_decision(decision, symbol: str, context: Optional[dict] = None
     """Best-effort publish. Returns False when disabled or on any failure —
     a broker problem must never break the decision loop that produced it."""
     global _warned
-    if not is_enabled():
+    if not await is_enabled():
         return False
     try:
         import aio_pika

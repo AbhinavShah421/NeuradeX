@@ -1247,6 +1247,21 @@ class ApiService {
     return r.data;
   }
 
+  /** Is the backend publishing decisions into the execution chain? */
+  async getPublishFlag(): Promise<any> {
+    const r = await this.api.get('/api/monitor/publish-flag', { timeout: 15000 });
+    return r.data;
+  }
+
+  /** Arm/disarm the execution chain at runtime. Live-behaviour switch: with
+   *  this on, decisions reach risk-engine and, if they clear its gate,
+   *  trade-executor (paper mode). */
+  async setPublishFlag(enabled: boolean): Promise<any> {
+    const r = await this.api.post('/api/monitor/publish-flag', null,
+      { params: { enabled }, timeout: 15000 });
+    return r.data;
+  }
+
   /** Absolute URL for the stop endpoint — `navigator.sendBeacon` takes a raw URL
    *  and cannot go through the axios instance, so it needs the same base the
    *  client is configured with (the app is served under /neuradex, so a bare
