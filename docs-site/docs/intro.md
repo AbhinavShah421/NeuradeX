@@ -91,10 +91,8 @@ Groww API / News Sources
 | `frontend` | **3000** | React 18 · Vite · TypeScript | Dashboard, backtesting UI, portfolio |
 | `docs` | **3001** | Docusaurus 3 | This developer portal |
 | `postgres` | **5432** | TimescaleDB (PG 15) | Time-series OHLCV, trades, portfolio |
-| `mongodb` | **27017** | MongoDB 6 | News articles, sentiment cache |
 | `redis` | **6379** | Redis 7 | Signal cache, session state, macro cache |
 | `rabbitmq` | **5672 / 15672** | RabbitMQ 3.12 | Event bus between all services |
-| `influxdb` | **8086** | InfluxDB 2 | High-frequency metric storage |
 | `elasticsearch` | **9200** | Elasticsearch 8.11 | Log aggregation |
 | `kibana` | **5601** | Kibana 8.11 | Log dashboards |
 | `mlflow` | **5000** | MLflow 2.10 | Experiment tracking, model registry |
@@ -118,7 +116,6 @@ Groww API / News Sources
 - **FastAPI** — async REST + WebSocket
 - **Socket.IO** — real-time push to the frontend
 - **SQLAlchemy + asyncpg** — async PostgreSQL ORM
-- **Motor** — async MongoDB driver
 - **aio-pika** — async RabbitMQ client
 - **FinBERT** (`ProsusAI/finbert`) — financial news NLP
 - **Stable-Baselines3** — PPO reinforcement learning
@@ -207,6 +204,6 @@ Collects all five agent signals within a 5-second window. Applies per-agent weig
 - [Dependency Matrix](./architecture/dependency-matrix) — which service talks to which
 - [Backend API Reference](./api/auth) — every HTTP endpoint documented
 - [RabbitMQ Topology](./infrastructure/rabbitmq) — all exchanges and queue bindings
-- [Database Schema](./infrastructure/database) — PostgreSQL tables and MongoDB collections
+- [Database Schema](./infrastructure/database) — PostgreSQL tables
 - [Frontend Overview](./frontend/overview) — component tree and page structure
 - [Live API (Swagger)](/neuradex/backend/docs) — interactive FastAPI docs

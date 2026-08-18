@@ -91,8 +91,6 @@ _NODES: list[dict] = [
     {"id": "postgres",   "label": "PostgreSQL",      "layer": "data",      "container": "stock-prediction-postgres",   "probe": "postgres"},
     {"id": "redis",      "label": "Redis",           "layer": "data",      "container": "stock-prediction-redis",      "probe": "redis"},
     {"id": "rabbitmq",   "label": "RabbitMQ",        "layer": "data",      "container": "stock-prediction-rabbitmq",   "probe": "rabbitmq"},
-    {"id": "mongodb",    "label": "MongoDB",         "layer": "data",      "container": "stock-prediction-mongodb"},
-    {"id": "influxdb",   "label": "InfluxDB",        "layer": "data",      "container": "stock-prediction-influxdb",   "probe": "http", "url": "http://influxdb:8086/health"},
     {"id": "elastic",    "label": "Elasticsearch",   "layer": "data",      "container": "stock-prediction-elasticsearch", "probe": "elastic"},
 
     {"id": "trainer",    "label": "Model Trainer",   "layer": "ml",        "container": "stock-prediction-model-trainer"},
@@ -123,7 +121,6 @@ _EDGES: list[dict] = [
     {"from": "runner",    "to": "redis",     "kind": "cache"},
     {"from": "groww",     "to": "runner",    "kind": "ws"},
     {"from": "market",    "to": "rabbitmq",  "kind": "amqp"},
-    {"from": "market",    "to": "influxdb",  "kind": "tsdb"},
     {"from": "market",    "to": "sentiment", "kind": "amqp", "queue": "market.data.sentiment"},
     {"from": "sentiment", "to": "ensemble",  "kind": "amqp"},
     # The backend ensemble now supplies the decision (decision_publisher.py,

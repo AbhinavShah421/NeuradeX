@@ -31,23 +31,6 @@ class Settings(BaseSettings):
     POSTGRES_DB: str = "stock_prediction_db"
     POSTGRES_URL: str = ""
 
-    # Database - MongoDB
-    MONGODB_HOST: str = "mongodb"
-    MONGODB_PORT: int = 27017
-    MONGODB_USER: str = "stock_admin"
-    MONGODB_PASSWORD: str = "stock_password"
-    MONGODB_DB: str = "stock_prediction"
-    MONGODB_URL: str = ""
-
-    # Database - InfluxDB
-    INFLUXDB_HOST: str = "influxdb"
-    INFLUXDB_PORT: int = 8086
-    INFLUXDB_USER: str = "stock_user"
-    INFLUXDB_PASSWORD: str = "stock_password"
-    INFLUXDB_DB: str = "stock_metrics"
-    INFLUXDB_ORG: str = "stock-org"
-    INFLUXDB_TOKEN: str = "stock-token"
-
     # Redis
     REDIS_HOST: str = "redis"
     REDIS_PORT: int = 6379
@@ -179,12 +162,6 @@ class Settings(BaseSettings):
             self.POSTGRES_URL = (
                 f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
                 f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
-            )
-        if not self.MONGODB_URL:
-            self.MONGODB_URL = (
-                f"mongodb://{self.MONGODB_USER}:{self.MONGODB_PASSWORD}"
-                f"@{self.MONGODB_HOST}:{self.MONGODB_PORT}/{self.MONGODB_DB}"
-                f"?authSource=admin"
             )
         if not self.REDIS_URL:
             if self.REDIS_PASSWORD:

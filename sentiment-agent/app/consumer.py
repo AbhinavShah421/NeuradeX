@@ -1,13 +1,18 @@
-"""Consumes market.data.sentiment queue + scores news from MongoDB → publishes signal."""
+"""Consumes market.data.sentiment queue + scores news → publishes signal.
+
+The news store (MongoDB) was removed 2026-08-18: the only writer never ran
+(no news API configured) and the collection this consumer read never
+existed, so every fetch already returned an empty list. Live headlines now
+reach FinBERT through POST /score instead.
+"""
 
 import asyncio
 import json
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import aio_pika
-from motor.motor_asyncio import AsyncIOMotorClient
 
 from app.config import settings
 from app.finbert_scorer import score_text, aggregate_scores
@@ -15,15 +20,9 @@ from app.finbert_scorer import score_text, aggregate_scores
 logger = logging.getLogger(__name__)
 
 
-async def _fetch_recent_news(db, symbol: str, window_minutes: int = 60) -> list[dict]:
-    cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=window_minutes)
-    cursor = db.news_articles.find(
-        {
-            "$or": [{"symbol": symbol}, {"symbol": None}, {"symbol": {"$exists": False}}],
-            "published_at": {"$gte": cutoff.isoformat()},
-        }
-    ).sort("published_at", -1).limit(50)
-    return await cursor.to_list(length=50)
+async def _fetch_recent_news(symbol: str, window_minutes: int = 60) -> list[dict]:
+    """No queue-side news store. Headlines arrive via POST /score."""
+    return []
 
 
 def _build_signal(symbol: str, aggregated: dict) -> dict:
@@ -66,10 +65,7 @@ def _build_signal(symbol: str, aggregated: dict) -> dict:
     }
 
 
-async def start_consuming(rabbitmq_url: str, mongodb_url: str) -> None:
-    mongo_client = AsyncIOMotorClient(mongodb_url)
-    db = mongo_client.stock_prediction
-
+async def start_consuming(rabbitmq_url: str) -> None:
     while True:
         try:
             connection = await aio_pika.connect_robust(rabbitmq_url)
@@ -89,7 +85,7 @@ async def start_consuming(rabbitmq_url: str, mongodb_url: str) -> None:
                                     continue
 
                                 articles = await _fetch_recent_news(
-                                    db, symbol, settings.SENTIMENT_WINDOW_MINUTES
+                                    symbol, settings.SENTIMENT_WINDOW_MINUTES
                                 )
 
                                 scored = []

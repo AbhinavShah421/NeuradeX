@@ -10,12 +10,11 @@ from fastapi.responses import JSONResponse
 from app.config import settings
 from app.sources.groww_source import GrowwSource
 from app.sources.yahoo_source import YahooSource
-from app.sources.news_source import NewsSource
 from app.services.rabbitmq_setup import setup_topology
 from app.services.rabbitmq_publisher import RabbitMQPublisher
 from app.services.redis_writer import RedisWriter
 from app.services.timescale_writer import TimescaleWriter
-from app.services.ingestion_loop import run_tick_loop, run_news_loop, run_historical_backfill
+from app.services.ingestion_loop import run_tick_loop, run_historical_backfill
 
 from app.elk_logger import setup_logging, get_logger
 setup_logging()
@@ -25,7 +24,6 @@ from app.cors import configure_cors
 
 _groww = GrowwSource(settings.GROWW_API_KEY, settings.GROWW_API_SECRET)
 _yahoo = YahooSource()
-_news = NewsSource(settings.NEWSAPI_KEY)
 _redis = RedisWriter(settings.REDIS_URL)
 _timescale = TimescaleWriter(settings.POSTGRES_URL)
 _publisher = RabbitMQPublisher(settings.RABBITMQ_URL)
@@ -54,12 +52,6 @@ async def lifespan(app: FastAPI):
     _background_tasks.append(asyncio.create_task(
         run_tick_loop(_groww, _yahoo, _timescale, _redis, _publisher, symbols),
         name="tick-loop",
-    ))
-
-    # News ingestion loop
-    _background_tasks.append(asyncio.create_task(
-        run_news_loop(_news, settings.MONGODB_URL, _publisher, symbols),
-        name="news-loop",
     ))
 
     logger.info("market-data-service ready")

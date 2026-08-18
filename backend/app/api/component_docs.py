@@ -285,8 +285,6 @@ _DOCS: dict[str, dict] = {
                    "gotchas": ["Dynamic mapping locks a field's type from its FIRST value — one numeric `args` made every later string-args log line fail to index and vanish."]},
     "kibana":     {"role": "Log search UI. The System Map deep-links into it per component.", "language": "Kibana 8"},
     "mlflow":     {"role": "Model registry and experiment tracking.", "language": "MLflow"},
-    "influxdb":   {"role": "Time-series store for market data.", "language": "InfluxDB"},
-    "mongodb":    {"role": "Document store (news, unstructured).", "language": "MongoDB"},
     "ollama":     {"role": "Local LLM for trade review and post-mortems.", "language": "Ollama · llama3.1:8b"},
     "ngrok":      {"role": "Public tunnel to nginx.", "language": "ngrok"},
 }

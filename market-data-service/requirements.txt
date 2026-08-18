@@ -9,8 +9,6 @@ aio-pika==9.4.1
 # PostgreSQL / TimescaleDB
 asyncpg==0.29.0
 
-# MongoDB
-motor==3.3.2
 
 # Redis
 redis==5.0.1

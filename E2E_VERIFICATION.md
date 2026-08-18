@@ -20,7 +20,7 @@ works."
 ## 0. Environment sanity (do this first)
 
 - [ ] `docker ps` — every `stock-prediction-*` container is `Up` (postgres /
-      redis / rabbitmq / elasticsearch / influxdb / mongodb show `(healthy)`).
+      redis / rabbitmq / elasticsearch show `(healthy)`).
 - [ ] Frontend loads at the configured URL (nginx origin) with no console
       errors; basename is `/neuradex`.
 - [ ] `GET /health` on the backend returns DB + Redis connectivity OK.

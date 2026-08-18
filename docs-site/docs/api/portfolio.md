@@ -20,7 +20,7 @@ sidebar_position: 4
 **Order sizing:** the optimize/invest plans emit **protective LIMIT** orders (a price collar around the last price, tick-aligned), use each holding's exchange, and cap per-order value — placed via [`/api/orders`](orders.md).
 
 **External call:** Groww broker API via [`backend/app/utils/groww_client.py`](https://github.com/AbhinavShah421/NeuradeX/blob/main/backend/app/utils/groww_client.py) for live holdings; [Yahoo](../ai-engine/data-providers.md) for the live-price/previous-close fallback.  
-**Alerts storage:** MongoDB `alerts` collection.
+**Alerts storage:** PostgreSQL.
 
 See the [Portfolio & Predictions frontend](../frontend/portfolio-predictions.md) for the AI Optimize / AI Invest / Swap UI.
 

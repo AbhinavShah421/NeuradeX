@@ -38,31 +38,6 @@ services:
           memory: 768M
           cpus: '0.5'
 
-  mongodb:
-    image: mongo:6
-    container_name: stock-prediction-mongodb
-    restart: unless-stopped
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: stock_admin
-      MONGO_INITDB_ROOT_PASSWORD: stock_password
-      MONGO_INITDB_DATABASE: stock_prediction
-    ports:
-      - "27017:27017"
-    volumes:
-      - mongodb_data:/data/db
-    healthcheck:
-      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - stock-prediction-network
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: '0.5'
-
   redis:
     image: redis:7-alpine
     container_name: stock-prediction-redis
@@ -101,34 +76,6 @@ services:
       interval: 10s
       timeout: 10s
       retries: 10
-    networks:
-      - stock-prediction-network
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-          cpus: '0.3'
-
-  influxdb:
-    image: influxdb:2-alpine
-    container_name: stock-prediction-influxdb
-    restart: unless-stopped
-    environment:
-      DOCKER_INFLUXDB_INIT_MODE: setup
-      DOCKER_INFLUXDB_INIT_USERNAME: stock_user
-      DOCKER_INFLUXDB_INIT_PASSWORD: stock_password
-      DOCKER_INFLUXDB_INIT_ORG: stock-org
-      DOCKER_INFLUXDB_INIT_BUCKET: stock-metrics
-      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: stock-token
-    ports:
-      - "8086:8086"
-    volumes:
-      - influxdb_data:/var/lib/influxdb2
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
     networks:
       - stock-prediction-network
     deploy:
@@ -221,8 +168,8 @@ services:
           memory: 768M
           cpus: '0.3'
 
-  # phpMyAdmin-style DB browser for Postgres/TimescaleDB (also speaks MongoDB
-  # via server type dropdown). http://localhost:8080 — server: postgres,
+  # phpMyAdmin-style DB browser for Postgres/TimescaleDB.
+  # http://localhost:8080 — server: postgres,
   # user: stock_user, password: stock_password, db: stock_prediction_db.
   adminer:
     image: adminer:latest
@@ -290,10 +237,8 @@ services:
       - ./backend/.env
     environment:
       POSTGRES_HOST: postgres
-      MONGODB_HOST: mongodb
       REDIS_HOST: redis
       RABBITMQ_HOST: rabbitmq
-      INFLUXDB_HOST: influxdb
       LLM_API_URL: ${LLM_API_URL:-http://ollama:11434}
       ELASTICSEARCH_URL: http://elasticsearch:9200
       LLM_PROVIDER: ollama
@@ -327,13 +272,9 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      mongodb:
-        condition: service_healthy
       redis:
         condition: service_healthy
       rabbitmq:
-        condition: service_healthy
-      influxdb:
         condition: service_healthy
       elasticsearch:
         condition: service_healthy
@@ -362,10 +303,8 @@ services:
       - ./backend/.env
     environment:
       POSTGRES_HOST: postgres
-      MONGODB_HOST: mongodb
       REDIS_HOST: redis
       RABBITMQ_HOST: rabbitmq
-      INFLUXDB_HOST: influxdb
       LLM_API_URL: ${LLM_API_URL:-http://ollama:11434}
       ELASTICSEARCH_URL: http://elasticsearch:9200
       LLM_PROVIDER: ollama
@@ -416,7 +355,6 @@ services:
       - ./backend/.env
     environment:
       POSTGRES_HOST: postgres
-      MONGODB_HOST: mongodb
       REDIS_HOST: redis
       RABBITMQ_HOST: rabbitmq
       ELASTICSEARCH_URL: http://elasticsearch:9200
@@ -430,8 +368,6 @@ services:
       - "8001:8001"
     depends_on:
       postgres:
-        condition: service_healthy
-      mongodb:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -455,7 +391,6 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      MONGODB_HOST: mongodb
       RABBITMQ_HOST: rabbitmq
       ELASTICSEARCH_URL: http://elasticsearch:9200
       SERVICE_NAME: sentiment-agent
@@ -474,8 +409,6 @@ services:
     volumes:
       - finbert_cache:/root/.cache/huggingface
     depends_on:
-      mongodb:
-        condition: service_healthy
       rabbitmq:
         condition: service_healthy
     networks:
@@ -929,10 +862,8 @@ volumes:
   # it a restart re-ingests every container log from the beginning.
   filebeat_data:
   postgres_data:
-  mongodb_data:
   redis_data:
   rabbitmq_data:
-  influxdb_data:
   elasticsearch_data:
   mlflow_data:
   finbert_cache:

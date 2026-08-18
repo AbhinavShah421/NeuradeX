@@ -7,7 +7,6 @@ from datetime import datetime, timedelta, timezone
 from app.config import settings
 from app.sources.groww_source import GrowwSource
 from app.sources.yahoo_source import YahooSource
-from app.sources.news_source import NewsSource
 from app.services.rabbitmq_publisher import RabbitMQPublisher
 from app.services.redis_writer import RedisWriter
 from app.services.timescale_writer import TimescaleWriter
@@ -145,47 +144,7 @@ async def run_tick_loop(
         await asyncio.sleep(interval)
 
 
-async def run_news_loop(
-    news: NewsSource,
-    mongodb_url: str,
-    publisher: RabbitMQPublisher,
-    symbols: list[str],
-) -> None:
-    if not news.is_configured:
-        logger.info("NewsAPI not configured — news loop skipped")
-        return
-
-    from motor.motor_asyncio import AsyncIOMotorClient
-    client = AsyncIOMotorClient(mongodb_url)
-    db = client[settings.MONGODB_DB] if hasattr(settings, "MONGODB_DB") else client.stock_prediction
-    collection = db.news_articles
-
-    logger.info("News loop started")
-    while True:
-        try:
-            articles = await news.fetch_market_news()
-            for sym in symbols[:5]:
-                sym_articles = await news.fetch_for_symbol(sym)
-                articles.extend(sym_articles)
-
-            if articles:
-                docs = []
-                for a in articles:
-                    doc = dict(a)
-                    if isinstance(doc.get("published_at"), datetime):
-                        doc["published_at"] = doc["published_at"].isoformat()
-                    doc["ingested_at"] = datetime.now(tz=timezone.utc).isoformat()
-                    docs.append(doc)
-
-                for doc in docs:
-                    await collection.update_one(
-                        {"article_id": doc["article_id"]},
-                        {"$setOnInsert": doc},
-                        upsert=True,
-                    )
-                await publisher.publish_news_ingested(len(docs))
-                logger.info("Ingested %d news articles", len(docs))
-        except Exception as exc:
-            logger.error("News loop error: %s", exc)
-
-        await asyncio.sleep(settings.NEWS_INTERVAL_SECONDS)
+# run_news_loop was removed 2026-08-18 together with MongoDB. Its entire body
+# was "fetch headlines → upsert into db.news_articles"; nothing read that
+# collection (the sentiment agent queried a collection that never existed)
+# and the loop returned early on every boot because NEWSAPI_KEY is unset.

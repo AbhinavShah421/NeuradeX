@@ -11,7 +11,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 import socketio
 from app.config import settings
-from app.database.mongodb import init_mongodb, close_mongodb
 from app.database.postgres import init_postgres, close_postgres
 from app.utils.redis_client import init_redis, close_redis
 from app.api import stocks, predictions, portfolio, risk, orders, agent, backtest, auth, paper_trading, ai_engine, mlflow_proxy, sessions, user_settings, mutual_funds, delivery_paper, live_trading, system, recordings, monitor
@@ -38,7 +37,6 @@ async def lifespan(app: FastAPI):
 
     try:
         await init_postgres()
-        await init_mongodb()
         await init_redis()
 
         # Load Groww credentials from DB (set via the UI). Never from .env.
@@ -260,7 +258,6 @@ async def lifespan(app: FastAPI):
             if task:
                 task.cancel()
         await close_postgres()
-        await close_mongodb()
         await close_redis()
         logger.info("Cleanup complete", extra={"log_type": "app_lifecycle", "event": "shutdown_complete"})
     except Exception as e:

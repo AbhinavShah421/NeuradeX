@@ -27,10 +27,9 @@
 │                                                                                          │
 │  Groww API (LTP)  ──┐                                                                    │
 │  Yahoo Finance    ──┼──► ingestion_loop.py ──► ① Write tick   → Redis  "tick:{symbol}"   │
-│  NewsAPI          ──┘          │               ② Write OHLCV  → TimescaleDB `ohlcv`      │
+│                     │          │               ② Write OHLCV  → TimescaleDB `ohlcv`      │
 │                                │               ③ Publish tick → RabbitMQ                 │
 │                                │                  exchange: market.data (fanout)         │
-│                                └──► news_loop.py ──► MongoDB `news_articles`             │
 └──────────────────────────────────────────────────────────────────────────────────────────┘
                                          │
                     market.data (fanout) binds to 5 queues
@@ -56,7 +55,7 @@
 │  ┌─────────────────────────────────────────────────────────────────────────────────┐    │
 │  │ sentiment-agent :8003                                                           │    │
 │  │  consume market.data.sentiment                                                  │    │
-│  │  → query MongoDB news_articles for symbol                                       │    │
+│  │  → score headlines pushed in via POST /score (no queue-side news store)         │    │
 │  │  → score each article with FinBERT (ProsusAI/finbert)                           │    │
 │  │  → aggregate: Reuters×1.0, ET×0.8, Reddit×0.4                                   │    │
 │  │  → net_sentiment → BUY / SELL / HOLD + confidence                               │    │
@@ -240,14 +239,14 @@
 ┌────────────────────────────────────────────────────────────────────────────┐
 │                         SHARED INFRASTRUCTURE                              │
 │                                                                            │
-│  ┌─────────────────────┐   ┌─────────────────────┐   ┌─────────────────┐   │
-│  │  TimescaleDB :5432  │   │   MongoDB :27017    │   │  Redis :6379    │   │
-│  │  (PostgreSQL ext.)  │   │                     │   │                 │   │
-│  │  tables:            │   │  collections:       │   │  keys:          │   │
-│  │  • ohlcv            │   │  • news_articles    │   │  • tick:{sym}   │   │
-│  │    (hypertable)     │   │    (indexed by      │   │  • ensemble:{s} │   │
-│  │  • agent_weights    │   │     symbol+date)    │   │                 │   │
-│  │  • trade_records    │   │                     │   │  TTL:           │   │
+│  ┌─────────────────────┐                         ┌─────────────────┐   │
+│  │  TimescaleDB :5432  │                         │  Redis :6379    │   │
+│  │  (PostgreSQL ext.)  │                         │                 │   │
+│  │  tables:            │                         │  keys:          │   │
+│  │  • ohlcv            │                         │  • tick:{sym}   │   │
+│  │    (hypertable)     │                         │  • ensemble:{s} │   │
+│  │  • agent_weights    │                         │                 │   │
+│  │  • trade_records    │                         │  TTL:           │   │
 │  │  • session_decisions│   │                     │   │  • tick: 60s    │   │
 │  └─────────────────────┘   └─────────────────────┘   │  • ensemble:300s│   │
 │                                                      └─────────────────┘   │
@@ -309,13 +308,11 @@
 | nginx | 80 | — | Reverse proxy for frontend + API |
 | MLflow | 5000 | Python | Model registry + experiment tracking |
 | TimescaleDB | 5432 | PostgreSQL ext. | OHLCV time-series + agent weights + trade records |
-| MongoDB | 27017 | MongoDB | News articles (indexed by symbol + date) |
 | Redis | 6379 | Redis | Live tick cache + ensemble decision cache + shared Groww token |
 | RabbitMQ | 5672 | RabbitMQ | Message bus (8 exchanges, 17 queues) |
 | Elasticsearch | 9200 | — | Central log store (`neuradex-logs-YYYY.MM.DD` daily indices) |
 | Kibana | 5601 | — | Log search & dashboards over the daily indices |
 | Adminer | 8080 | — | phpMyAdmin-style DB browser (also proxied at `/neuradex/dev/db/`) — server `postgres`, user `stock_user`, db `stock_prediction_db` |
-| InfluxDB | 8086 | — | Metrics time-series |
 | Ollama | 11434 | — | Local LLM (llama3.1:8b) for the shadow entry reviewer |
 
 ---
@@ -492,7 +489,6 @@ Services must start in this sequence (handled by Docker healthchecks + `depends_
 
 ```
 1. postgres (TimescaleDB)   — healthcheck: pg_isready
-2. mongodb                  — healthcheck: mongosh ping
 3. redis                    — healthcheck: redis-cli ping
 4. rabbitmq                 — healthcheck: rabbitmq-diagnostics check_port_connectivity
 5. mlflow                   — (started after postgres)

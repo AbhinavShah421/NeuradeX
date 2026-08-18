@@ -25,7 +25,7 @@ async def lifespan(app: FastAPI):
     global _consumer_task
     logger.info("sentiment-agent starting — FinBERT model: %s", settings.FINBERT_MODEL)
     _consumer_task = asyncio.create_task(
-        start_consuming(settings.RABBITMQ_URL, settings.MONGODB_URL),
+        start_consuming(settings.RABBITMQ_URL),
         name="sentiment-consumer",
     )
     logger.info("sentiment-agent ready — consuming market.data.sentiment")
