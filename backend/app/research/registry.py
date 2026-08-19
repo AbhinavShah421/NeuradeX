@@ -183,6 +183,52 @@ BEHAVIOURS: tuple[Behaviour, ...] = (
             "Rollback: set to 0."
         ),
     ),
+    Behaviour(
+        env="NEURADEX_RISK_SIZING",
+        read_in="backend/app/services/sessions_service.py:575",
+        default="1 — risk-budget sizing; 0 restores flat 95%-of-cash",
+        affects_trades=True,
+        status="UNMEASURED",
+        measured_on=date(2026, 8, 20),
+        evidence=(
+            "Changes position SIZE, never selection — the same trades are taken, "
+            "with the rupee risk held constant instead of the deployed capital. "
+            "Shrink-only: bounded by the legacy 95%-of-cash notional, so it can "
+            "only reduce a position. Motivated by a measured mechanism rather "
+            "than an edge claim: the post-2026-08-10 universe (5 of 70 symbols "
+            "overlap with the prior one) moves 0.714% per trade against 0.569% "
+            "before, and under flat sizing that 25% larger move lands straight "
+            "on P&L. Not put through the validation gate because the gate "
+            "measures edge, and this makes no edge claim. Rollback: set to 0."
+        ),
+    ),
+    Behaviour(
+        env="NEURADEX_RISK_PCT",
+        read_in="backend/app/services/sessions_service.py:576",
+        default="0.01 — 1% of session capital risked per trade (~Rs.500 on Rs.50k)",
+        affects_trades=True,
+        status="UNMEASURED",
+        evidence=(
+            "Chosen to sit under the Phase-1 daily limit: 1% of Rs.50k is Rs.500, "
+            "so roughly three full stops reach the Rs.1,500 daily breaker. Half "
+            "the Java risk-engine's 2% (RiskValidatorService), deliberately, "
+            "while the book has no demonstrated edge."
+        ),
+    ),
+    Behaviour(
+        env="NEURADEX_MAX_POS_PCT",
+        read_in="backend/app/services/sessions_service.py:577",
+        default="0.95 — notional ceiling, identical to the legacy formula",
+        affects_trades=True,
+        status="UNMEASURED",
+        evidence=(
+            "At its default it changes nothing — 0.95 reproduces the legacy "
+            "95%-of-cash cap exactly, which is what makes risk sizing strictly "
+            "shrink-only. It is nonetheless a switch that can change position "
+            "size (raising it above 0.95 would let positions exceed the previous "
+            "behaviour), so it is not NEUTRAL."
+        ),
+    ),
 )
 
 

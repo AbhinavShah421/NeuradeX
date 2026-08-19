@@ -570,6 +570,12 @@ _WARMUP_BARS = 30           # min bars before ANY entry — RSI(14)/SMA20 return
 _MEM_VOTE_MIN_CASES = 3     # memory BUY counts toward consensus only with this many
                             # similar cases behind it (its own ensemble gate arms at 8)
 _PAPER_DROP_CANDLES = 6     # N consecutive lower closes = drop pattern (3 was triggering on normal chop)
+# Risk-based position sizing (2026-08-20). NEURADEX_RISK_SIZING=0 restores the
+# legacy 95%-of-cash formula. Registered in app/research/registry.py.
+_RISK_SIZING = os.getenv("NEURADEX_RISK_SIZING", "1").strip().lower() not in ("0", "false", "no")
+_RISK_PCT    = float(os.getenv("NEURADEX_RISK_PCT", "0.01") or 0.01)
+_MAX_POS_PCT = float(os.getenv("NEURADEX_MAX_POS_PCT", "0.95") or 0.95)
+
 _LOSS_COOLDOWN_MIN  = 10    # after a losing exit, block new entries for this many minutes
                             # (stops the system re-scalping the same chop range — the
                             #  TITAN-style 6-losing-round-trips-in-an-afternoon pattern)
@@ -1238,7 +1244,18 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
     if action == "BUY" and pos["status"] == "NONE":
         from app.utils.trade_costs import buy_fill
         fill = buy_fill(candle["close"])          # market buy fills above the close (slippage)
-        qty = max(1, int(s["cash"] * 0.95 / fill))
+        # Risk-based sizing: a stop-out costs ~capital*RISK_PCT regardless of how
+        # wide the stop is, so a volatile name and a quiet one cost the same.
+        # Flat 95%-of-cash sizing is why the more volatile post-2026-08-10
+        # universe (0.714% avg move vs 0.569%) enlarged rupee losses on its own.
+        # Bounded by the old formula, so this can only shrink a position.
+        if _RISK_SIZING:
+            from app.utils.position_sizing import risk_qty, stop_pct_for
+            qty = risk_qty(s.get("capital") or s["cash"], s["cash"], fill,
+                           stop_pct_for(ind.get("atr", 0.0), candle["close"]),
+                           risk_pct=_RISK_PCT, max_pos_pct=_MAX_POS_PCT)
+        else:
+            qty = max(1, int(s["cash"] * 0.95 / fill))
         cost = qty * fill
         if cost <= s["cash"]:
             s["cash"] -= cost
