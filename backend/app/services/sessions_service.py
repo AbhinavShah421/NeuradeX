@@ -544,7 +544,10 @@ async def _finalize_session(s: dict) -> None:
                 "tc":      len(sells),
                 "wc":      wins,
                 "pnl_abs": metrics.get("total_pnl", 0),
-                "pnl_pct": metrics.get("total_return_pct", 0),
+                # _compute_metrics emits "total_pnl_pct"; this read the non-existent
+                # "total_return_pct" until 2026-08-19, so session_metadata.total_pnl_pct
+                # was persistently 0 while the JSONB snapshot held the true value.
+                "pnl_pct": metrics.get("total_pnl_pct", 0),
                 "candles": s.get("current_idx", 0),
                 "data":    _json.dumps(metrics),
             })

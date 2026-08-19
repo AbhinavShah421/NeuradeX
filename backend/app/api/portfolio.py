@@ -170,3 +170,14 @@ async def advisor():
     """An AI advisor feed: synthesises health, sector exposure, benchmark and tax
     into a few plain-English insights + actions (LLM, with a rule-based fallback)."""
     return await service.advisor()
+
+
+@router.get("/equity-daily")
+async def equity_daily(mode: str = "paper", days: int = 120):
+    """Persistent day-over-day equity: per-day P&L, cumulative, peak, drawdown.
+
+    This series did not exist before 2026-08-19 — equity lived per-session in
+    Redis and the only dashboard curve was indexed by trade number, so a month
+    of daily bleed had no instrument that could show it."""
+    from app.services.equity_service import equity_daily as _svc
+    return {"status": "success", "data": await _svc(mode=mode, days=days)}
