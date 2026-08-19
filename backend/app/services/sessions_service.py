@@ -1218,6 +1218,21 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         action = "HOLD"
         reason = "Session trade complete — running for agent learning only."
 
+    # ── Daily loss breaker: block new entries once the day's limit is hit ─────
+    # Entries only. Stops, trails and square-off must keep firing after a halt —
+    # halting exits would strand open risk, the opposite of the intent.
+    # Paper only: replay/backtest must stay deterministic.
+    if action == "BUY" and (s.get("mode") or "").lower() == "paper":
+        try:
+            from app.services.risk_guard import entry_halted
+            halt_reason = await entry_halted()
+        except Exception:
+            halt_reason = None
+        if halt_reason:
+            action = "HOLD"
+            blocked.append(f"daily loss limit — {halt_reason}")
+            reason = f"Daily loss limit hit ({halt_reason}) — no new entries today."
+
     trade_executed = None
 
     if action == "BUY" and pos["status"] == "NONE":
@@ -1693,6 +1708,16 @@ async def session_runner_loop() -> None:
             # arrays) — each ~5 KB instead of ~150 KB — saving several MB of
             # Redis I/O per tick under heavy backtest load.
             running = await list_running_sessions()
+
+            # Daily loss breaker — evaluated here so it runs the whole trading
+            # day (autopilot's own limit stops being checked after ~12:30) and
+            # sees open positions (autopilot's counts only closed sessions).
+            # Self-throttling to ~30s; cheap when nothing is running.
+            try:
+                from app.services.risk_guard import evaluate_and_flag
+                await evaluate_and_flag()
+            except Exception:
+                logger.debug("risk guard evaluation skipped", exc_info=True)
 
             if not running:
                 _idle_ticks += 1

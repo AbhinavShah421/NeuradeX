@@ -151,6 +151,38 @@ BEHAVIOURS: tuple[Behaviour, ...] = (
             "backend reaches."
         ),
     ),
+    Behaviour(
+        env="NEURADEX_DAILY_LOSS_LIMIT_ABS",
+        read_in="backend/app/services/risk_guard.py",
+        default="1500 (rupees) — blocks new paper entries once breached",
+        affects_trades=True,
+        status="UNMEASURED",
+        measured_on=date(2026, 8, 19),
+        evidence=(
+            "A guardrail sized from the measured loss distribution, not from an "
+            "edge measurement — hence UNMEASURED rather than INCONCLUSIVE. Paper "
+            "equity fell Rs.7,338 over the 8 sessions from 2026-08-10 (mean "
+            "-Rs.917/day, worst -Rs.1,947); Rs.1,500 is ~1.6x the mean and ~3 "
+            "full stops under 1% risk sizing. It caps the downside tail; it "
+            "cannot create edge and is not claimed to. Blocks entries only — "
+            "exits keep firing. Rollback: set to 0."
+        ),
+    ),
+    Behaviour(
+        env="NEURADEX_DAILY_LOSS_LIMIT_PCT",
+        read_in="backend/app/services/risk_guard.py",
+        default="5.0 (percent of capital deployed today)",
+        affects_trades=True,
+        status="UNMEASURED",
+        measured_on=date(2026, 8, 19),
+        evidence=(
+            "Secondary leg, mirroring autopilot's existing 5% threshold. Kept "
+            "because deployed capital varies with how many sessions ran, but it "
+            "is the weaker leg: at 15 sessions x Rs.50k a Rs.1,600 loss is only "
+            "-0.21% and would sleep through. The absolute limit is primary. "
+            "Rollback: set to 0."
+        ),
+    ),
 )
 
 
