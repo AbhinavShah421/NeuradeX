@@ -69,18 +69,32 @@ BEHAVIOURS: tuple[Behaviour, ...] = (
     Behaviour(
         env="NEURADEX_TREND_FILTER",
         read_in="backend/app/services/sessions_service.py:584",
-        default="inverted — blocks buying strength, admits weakness",
+        default="legacy as of 2026-08-20 — rolled back from inverted",
         affects_trades=True,
         status="INCONCLUSIVE",
-        measured_on=date(2026, 8, 18),
+        measured_on=date(2026, 8, 20),
         evidence=(
-            "The direction is supported: every 'price is extended' feature is "
-            "negative for a long on raw forward returns as well as on cf_pnl_pct "
-            "(price_vs_vwap t=-3.53..-2.58 across 5/15/30/60m), and the one "
-            "feature with no directional story (atr) is the one that fails, so "
-            "the method discriminates. But 31 days is under the 60-day floor, so "
-            "the gate returns INCONCLUSIVE and this ships on judgement. "
-            "Rollback: NEURADEX_TREND_FILTER=legacy."
+            "Rolled back to legacy after the inversion coincided with a real "
+            "day-level equity break: paper P&L went from -Rs.1/day (14 days) to "
+            "-Rs.917/day (8 days), Welch t=-2.55 on daily P&L. "
+            "The cause was isolated by splitting the same-day baseline (mean cf "
+            "over ALL decisions, i.e. what a blind long earns) from selection "
+            "(mean cf over our BUYs). Baseline barely moved: -0.194% -> -0.233%, "
+            "t=-0.64. Selection edge over baseline collapsed: +0.260%/day -> "
+            "-0.043%/day, t=-1.65. The universe did not get worse; the picking "
+            "did — which points at the filter and away from the near-total "
+            "universe churn (only 5 of 70 traded symbols overlap the break). "
+            "Legacy is the only configuration with a measured POSITIVE selection "
+            "edge (+0.260%/day). "
+            "Caveats: 8v8 days, |t|=1.65 is under the gate's 2.0 bar, so this is "
+            "INCONCLUSIVE and ships on judgement — but it is a choice between two "
+            "live configurations, not a discovery claim. Note also that the "
+            "extension finding that originally motivated the inversion still "
+            "stands on raw forward returns; what failed was inferring an ENTRY "
+            "RULE from it. A band variant blocking both extremes was designed, "
+            "measured and NOT shipped: day-clustered, every candidate threshold "
+            "was |t|<1 and the best-looking one flipped sign. "
+            "Rollback of this rollback: NEURADEX_TREND_FILTER=inverted."
         ),
     ),
     Behaviour(
