@@ -510,6 +510,28 @@ async def _persist_session_decision(session_id: str, symbol: str, decision: dict
         logger.debug("persist_session_decision failed: %s", exc)
 
 
+async def _prior_levels_for(symbol: str, as_of: str,
+                            spot: float | None = None) -> dict:
+    """Prior-day / multi-day S/R for the chart. DISPLAY ONLY.
+
+    `as_of` is the session's own date: levels are built from days strictly
+    before it, so a replay of a past day sees exactly what was knowable that
+    morning and never the day it is replaying.
+
+    Never raises — a provider failure means no lines, not a failed session.
+    """
+    from datetime import datetime as _dt, timedelta as _td
+    from app.data.providers import fetch_daily
+    try:
+        end = _dt.strptime(as_of, "%Y-%m-%d")
+        daily, _src = await fetch_daily(symbol, end - _td(days=40), end)
+        if daily:
+            return build_levels(daily[-15:], spot=spot, today=as_of)
+    except Exception:
+        logger.debug("prior levels unavailable for %s @ %s", symbol, as_of, exc_info=True)
+    return {}
+
+
 def _session_provenance(s: dict) -> dict:
     """What data this session actually ran on.
 
@@ -1885,6 +1907,11 @@ async def start_session(req: StartSessionRequest):
             "date": req.date, "all_candles": all_candles, "current_idx": start_idx,
             "prev_day_candles": prev_day, "prev_day_date": prev_date,
             "current_time": all_candles[start_idx]["time"], "data_source": candle_src,
+            # Levels as of the replayed date — days strictly before it, so a
+            # replay never sees a level derived from the day it is replaying.
+            "prior_levels": await _prior_levels_for(
+                symbol, as_of=req.date,
+                spot=all_candles[start_idx].get("close")),
         })
         # Initial step is handled by the background session_runner_loop within 2 s.
         # Running it here would block the HTTP response for 10–30 s (LLM ensemble).
@@ -1910,19 +1937,8 @@ async def start_session(req: StartSessionRequest):
         # would stop matching the decision text that says "price above VWAP".
         # Levels are drawn as horizontal lines instead, which cannot distort any
         # indicator.
-        prior_levels = {}
-        try:
-            from datetime import timedelta as _td
-            from app.data.providers import fetch_daily
-            _end = datetime.now() - _td(days=1)
-            _daily, _src = await fetch_daily(symbol, _end - _td(days=25), _end)
-            if _daily:
-                prior_levels = build_levels(
-                    _daily[-15:], spot=candles[-1].get("close"),
-                    today=_today_str())
-        except Exception:
-            # Never block a session start on chart decoration.
-            logger.debug("levels unavailable for %s", symbol, exc_info=True)
+        prior_levels = await _prior_levels_for(
+            symbol, as_of=_today_str(), spot=candles[-1].get("close"))
 
         base.update({
             "date": _today_str(), "candles": candles, "prev_day_candles": [],

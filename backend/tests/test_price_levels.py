@@ -228,3 +228,12 @@ def test_levels_are_still_presented_nearest_first():
     for side in ("resistance", "support"):
         dists = [abs(l["distPct"]) for l in out[side]]
         assert dists == sorted(dists)
+
+
+def test_replay_levels_never_see_the_day_being_replayed():
+    """A replay of 2026-08-14 must use levels knowable that morning — days
+    strictly before it — not the 14th's own high and low."""
+    days = [_day(f"2026-08-{d:02d}", 100, 100 + d, 90 - d, 95) for d in range(1, 16)]
+    out = build_levels(days, spot=95.0, today="2026-08-14")
+    assert out["asOf"] == "2026-08-13"
+    assert all(l["price"] != 114.0 for l in out["resistance"])   # the 14th's high
