@@ -33,6 +33,7 @@ from typing import Optional
 
 from app.config import settings
 from app.utils.elk_logger import get_logger
+from app.utils.price_levels import build_levels
 from app.utils.session_store import (
     save_session, get_session, get_session_slim, delete_session,
     list_sessions, list_sessions_slim, list_running_sessions,
@@ -395,6 +396,12 @@ def _detail(s: dict) -> dict:
         "candles":          candles,
         "prev_day_candles": s.get("prev_day_candles", []),
         "prev_day_date":    s.get("prev_day_date"),
+        # Prior-day / multi-day S/R for the chart to draw. DISPLAY ONLY — never
+        # read by _step or any agent; test_price_levels.py pins that boundary.
+        # Named prior_levels, not levels: agents/levels.py already produces an
+        # INTRADAY clustered map surfaced as levels_res/levels_sup, and a live
+        # veto consumes it. Keeping the names apart stops the two being confused.
+        "prior_levels":     s.get("prior_levels", {}),
         "trades_list":      s.get("trades", []),
         "position_detail":  s.get("position", {}),
         "metrics":          s.get("metrics", {}),
@@ -1894,9 +1901,32 @@ async def start_session(req: StartSessionRequest):
         candles, src = await _fetch_candles_for_start(symbol, cur)
         if not candles:
             raise HTTPException(503, f"No live candle data for {symbol} yet. Retry shortly.")
+        # Prior-day / multi-day levels for the chart. One fetch_daily call covers
+        # the whole window, so this costs one request rather than one per day.
+        #
+        # prev_day_candles stays empty on purpose: TradingChart merges them into
+        # the main series and recomputes VWAP/SMA/BB over the merge, so loading
+        # them would silently turn the displayed VWAP into a two-day VWAP and it
+        # would stop matching the decision text that says "price above VWAP".
+        # Levels are drawn as horizontal lines instead, which cannot distort any
+        # indicator.
+        prior_levels = {}
+        try:
+            from datetime import timedelta as _td
+            from app.data.providers import fetch_daily
+            _end = datetime.now() - _td(days=1)
+            _daily, _src = await fetch_daily(symbol, _end - _td(days=25), _end)
+            if _daily:
+                prior_levels = build_levels(
+                    _daily[-15:], spot=candles[-1].get("close"),
+                    today=_today_str())
+        except Exception:
+            # Never block a session start on chart decoration.
+            logger.debug("levels unavailable for %s", symbol, exc_info=True)
+
         base.update({
             "date": _today_str(), "candles": candles, "prev_day_candles": [],
-            "current_time": cur, "data_source": src,
+            "current_time": cur, "data_source": src, "prior_levels": prior_levels,
         })
         # NOTE: paper sessions no longer arm dataset capture. Recording which stocks
         # to capture into the 1-second dataset is now a dedicated, explicit feature
