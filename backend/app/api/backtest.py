@@ -102,11 +102,14 @@ async def get_intraday_candles(
     symbol: str,
     date: str = Query(...),
     real_only: bool = Query(False, description="If true, 422 instead of simulating when Groww has no data"),
+    interval: int = Query(5, ge=1, le=60, description="Candle interval in minutes"),
 ):
-    """Return all 5-min candles for one trading day (Groww or simulated).
+    """Return one trading day's candles (Groww or simulated).
     No LLM involved — the frontend drives the progressive replay.
+    Default 5m: the progressive replay depends on it. The chart requests 1m for
+    scroll-back history, falling back to 5m outside the provider's 1m window.
     With real_only=true the endpoint refuses to simulate."""
-    return await service.get_intraday_candles(symbol, date, real_only)
+    return await service.get_intraday_candles(symbol, date, real_only, interval)
 
 
 @router.post("/agent-step")

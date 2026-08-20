@@ -301,7 +301,10 @@ const TradingChart: React.FC<Props> = ({
           // throws — that means "no session on this date", NOT "stop looking",
           // so it is caught per attempt and the walk-back continues. Catching
           // it around the whole loop would end history at the first weekend.
-          const r: any = await apiService.getIntradayCandles(symbol, cursor, true);
+          // 1-minute so history matches today's granularity. Providers only
+          // keep 1m for ~a month; the backend falls back to 5m beyond that,
+          // which is why a scrolled-back day can look coarser.
+          const r: any = await apiService.getIntradayCandles(symbol, cursor, true, 1);
           cs = r?.data?.candles ?? [];
         } catch {
           continue;           // holiday, weekend, or no provider data — step back

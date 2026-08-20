@@ -1304,10 +1304,18 @@ def _no_real_intraday_msg(symbol: str, date: str) -> str:
     )
 
 
-async def get_intraday_candles(symbol: str, date: str, real_only: bool) -> dict:
-    """Return all 5-min candles for one trading day (Groww or simulated).
-    No LLM involved — the frontend drives the progressive replay.
-    With real_only=true the endpoint refuses to simulate."""
+async def get_intraday_candles(symbol: str, date: str, real_only: bool,
+                               interval: int = 5) -> dict:
+    """Return one trading day's candles (Groww or simulated).
+
+    `interval` defaults to 5 minutes because the progressive replay is built
+    around 75 five-minute steps — do not change that default. The chart asks for
+    1-minute when loading scroll-back history so older days match today's
+    granularity; providers only keep 1-minute data for roughly the last month,
+    so an empty result falls back to 5-minute rather than showing nothing.
+
+    With real_only=true the endpoint refuses to simulate.
+    """
     symbol = symbol.upper()
     try:
         datetime.strptime(date, "%Y-%m-%d")
@@ -1316,7 +1324,11 @@ async def get_intraday_candles(symbol: str, date: str, real_only: bool) -> dict:
 
     # Try every configured provider (Groww → Yahoo → Alpha Vantage)
     from app.data.providers import fetch_intraday
-    candles, data_source = await fetch_intraday(symbol, date, 5)
+    candles, data_source = await fetch_intraday(symbol, date, interval)
+    if not candles and interval != 5:
+        # Beyond the provider's fine-granularity window — coarser is better than
+        # a blank day.
+        candles, data_source = await fetch_intraday(symbol, date, 5)
 
     if not candles:
         if real_only:

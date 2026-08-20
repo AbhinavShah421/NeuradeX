@@ -666,13 +666,14 @@ class ApiService {
     }
   }
 
-  async getIntradayCandles(symbol: string, date: string, realOnly = false): Promise<ApiResponse<any>> {
+  async getIntradayCandles(symbol: string, date: string, realOnly = false,
+                           interval = 5): Promise<ApiResponse<any>> {
     try {
       // real_only=true makes the endpoint 422 instead of returning simulated
       // candles — used when loading scroll-back history, so synthetic bars can
       // never be prepended onto a chart of real trading.
       const response = await this.api.get(`/api/backtest/intraday-candles/${symbol}`,
-        { params: { date, real_only: realOnly } });
+        { params: { date, real_only: realOnly, interval } });
       return response.data;
     } catch (error) {
       console.error('Error fetching intraday candles:', error);
