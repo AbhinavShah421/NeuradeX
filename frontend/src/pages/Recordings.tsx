@@ -466,6 +466,7 @@ const Recordings: React.FC = () => {
                   </div>
                 )}
                 <TradingChart candles={chart.candles}
+                  symbol={chart.symbol} date={chart.coverage?.date}
                   height={narrow ? Math.max(300, Math.round(window.innerHeight * 0.45)) : 460} />
               </>
             ) : null}

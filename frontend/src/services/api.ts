@@ -666,6 +666,15 @@ class ApiService {
     }
   }
 
+  async getPriorLevels(symbol: string, date: string): Promise<ApiResponse<any>> {
+    try {
+      const response = await this.api.get(`/api/backtest/levels/${symbol}`, { params: { date } });
+      return response.data;
+    } catch {
+      return { status: 'error', data: {} } as any;   // no lines is a fine outcome
+    }
+  }
+
   async getIntradayCandles(symbol: string, date: string, realOnly = false,
                            interval = 5): Promise<ApiResponse<any>> {
     try {

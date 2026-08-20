@@ -222,9 +222,6 @@ const TradingChart: React.FC<Props> = ({
   });
   const levelLinesRef = useRef<Array<{ host: ISeriesApi<any>; line: any }>>([]);
 
-  const hasLevels = Boolean((priorLevels?.resistance?.length ?? 0)
-                         || (priorLevels?.support?.length ?? 0));
-
   const [overlays, setOverlays] = useState({ vwap: true, sma: true, bb: false });
   const [chartType, setChartType] = useState<'candles' | 'line'>('candles');
   const [legend, setLegend] = useState<Legend>(null);
@@ -340,6 +337,23 @@ const TradingChart: React.FC<Props> = ({
     else if (first) oldestDateRef.current = new Date((first.timestamp + IST_OFFSET) * 1000)
       .toISOString().slice(0, 10);
   }, [candles, fetched, date]);
+
+  // Levels: use the prop when a session supplies them, otherwise self-serve
+  // from symbol+date. This is what makes the LEVELS chip work on pages that
+  // have no session behind them, such as the Orders execution trace.
+  const [fetchedLevels, setFetchedLevels] = useState<PriorLevels | undefined>();
+  useEffect(() => {
+    if (priorLevels || !symbol || !date) return;
+    let alive = true;
+    (async () => {
+      const r: any = await apiService.getPriorLevels(symbol, date);
+      if (alive && r?.data && Object.keys(r.data).length) setFetchedLevels(r.data);
+    })();
+    return () => { alive = false; };
+  }, [priorLevels, symbol, date]);
+  const effLevels = priorLevels ?? fetchedLevels;
+  const hasLevels = Boolean((effLevels?.resistance?.length ?? 0)
+                         || (effLevels?.support?.length ?? 0));
 
   const effCandlesRaw = candles !== undefined ? candles : fetched;
   const effCandles = useMemo(
@@ -622,11 +636,11 @@ const TradingChart: React.FC<Props> = ({
     // Solid for prices the market actually traded, dashed for derived ones —
     // the same hierarchy the backend ranks slots by.
     const styleFor = (k: string) => (k === 'priorDay' || k === 'swing' ? 0 : 2);
-    (priorLevels?.resistance ?? []).forEach(lv => draw(lv, '#ef5350', styleFor(lv.kind)));
-    (priorLevels?.support ?? []).forEach(lv => draw(lv, '#26a69a', styleFor(lv.kind)));
+    (effLevels?.resistance ?? []).forEach(lv => draw(lv, '#ef5350', styleFor(lv.kind)));
+    (effLevels?.support ?? []).forEach(lv => draw(lv, '#26a69a', styleFor(lv.kind)));
 
     return teardown;
-  }, [priorLevels, showLevels, chartType, rows.length, isDark, height, isNarrow, panesOn]);
+  }, [effLevels, showLevels, chartType, rows.length, isDark, height, isNarrow, panesOn]);
 
   // ── Push RSI / MACD data into the sub-panes ────────────────────────────────
   useEffect(() => {
