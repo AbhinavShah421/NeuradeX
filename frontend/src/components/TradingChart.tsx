@@ -37,6 +37,22 @@ export interface RoundTripTrade {
 }
 
 const IST_OFFSET = 19800; // seconds — render timestamps in IST
+
+// Scroll-back history: one trading day per left-edge hit, bounded so a long
+// scroll cannot balloon the in-memory series or hammer the data providers.
+const MAX_HISTORY_DAYS = 10;
+// Consecutive empty days tolerated while walking back before giving up —
+// covers weekends plus a Diwali-length holiday cluster.
+const MAX_EMPTY_STEPS = 8;
+// Bars remaining to the left of the viewport that trigger the next load.
+const HISTORY_TRIGGER_BARS = 12;
+
+/** YYYY-MM-DD one calendar day earlier. */
+function prevDateStr(d: string): string {
+  const t = new Date(`${d}T00:00:00Z`);
+  t.setUTCDate(t.getUTCDate() - 1);
+  return t.toISOString().slice(0, 10);
+}
 const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const p2 = (n: number) => String(n).padStart(2, '0');
 
@@ -76,11 +92,24 @@ function bollinger(closes: number[], period = 20, mult = 2) {
   }
   return { mid, upper, lower };
 }
+/** IST calendar day for a bar, used to reset day-scoped indicators. */
+function istDay(timestamp: number): number {
+  return Math.floor((timestamp + IST_OFFSET) / 86400);
+}
+
 function vwapSeries(rows: ChartCandle[]): (number | null)[] {
   const out: (number | null)[] = new Array(rows.length).fill(null);
   let cumPV = 0, cumV = 0, cumTP = 0, n = 0;
+  let day: number | null = null;
   for (let i = 0; i < rows.length; i++) {
     const c = rows[i];
+    // VWAP is volume-weighted average price FOR THE SESSION — it restarts at
+    // every open. Without this reset the accumulation ran across every day in
+    // `rows`, so any chart holding more than one day (replay/backtest, and now
+    // anything scrolled back through history) drew a multi-day average while
+    // the decision text still said "price above VWAP" about today's.
+    const d = istDay(c.timestamp);
+    if (day === null || d !== day) { cumPV = 0; cumV = 0; cumTP = 0; n = 0; day = d; }
     const tp = (c.high + c.low + c.close) / 3;
     const v = c.volume || 0;
     cumPV += tp * v; cumV += v; cumTP += tp; n += 1;
@@ -216,6 +245,17 @@ const TradingChart: React.FC<Props> = ({
   });
 
   // ── Candle source ──────────────────────────────────────────────────────────
+  // ── Scroll-back history ───────────────────────────────────────────────────
+  // Reaching the left edge loads the previous trading day and prepends it.
+  const [history, setHistory] = useState<ChartCandle[]>([]);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [historyDone, setHistoryDone] = useState(false);
+  // Earliest session date loaded so far; the next fetch walks back from it.
+  const oldestDateRef = useRef<string | null>(null);
+  const daysLoadedRef = useRef(0);
+  // Guards re-entry: the range handler fires many times per gesture.
+  const loadingRef = useRef(false);
+
   const [fetched, setFetched] = useState<ChartCandle[]>([]);
   const [loading, setLoading] = useState(false);
   const [note, setNote] = useState<string | null>(null);
@@ -240,6 +280,58 @@ const TradingChart: React.FC<Props> = ({
     })();
     return () => { alive = false; };
   }, [shouldFetch, symbol, date]);
+
+  const loadOlderDay = React.useCallback(async () => {
+    if (loadingRef.current || historyDone || !symbol) return;
+    if (daysLoadedRef.current >= MAX_HISTORY_DAYS) { setHistoryDone(true); return; }
+    loadingRef.current = true;
+    setLoadingMore(true);
+    try {
+      // Walk back a day at a time. A weekend or NSE holiday simply returns no
+      // candles, so keep stepping until something comes back — that is cheaper
+      // and more correct than shipping a holiday calendar to the browser.
+      let cursor = oldestDateRef.current;
+      if (!cursor) { setHistoryDone(true); return; }
+      for (let attempt = 0; attempt < MAX_EMPTY_STEPS; attempt++) {
+        cursor = prevDateStr(cursor);
+        let cs: ChartCandle[] = [];
+        try {
+          // real_only: never prepend simulated candles onto a real chart. A
+          // non-trading day 422s (verified: a Sunday returns 422), which axios
+          // throws — that means "no session on this date", NOT "stop looking",
+          // so it is caught per attempt and the walk-back continues. Catching
+          // it around the whole loop would end history at the first weekend.
+          const r: any = await apiService.getIntradayCandles(symbol, cursor, true);
+          cs = r?.data?.candles ?? [];
+        } catch {
+          continue;           // holiday, weekend, or no provider data — step back
+        }
+        if (cs.length) {
+          oldestDateRef.current = cursor;
+          daysLoadedRef.current += 1;
+          setHistory(h => [...cs, ...h]);
+          if (daysLoadedRef.current >= MAX_HISTORY_DAYS) setHistoryDone(true);
+          return;
+        }
+      }
+      setHistoryDone(true);   // nothing tradeable within the walk-back window
+    } catch {
+      setHistoryDone(true);   // unexpected failure — do not retry every frame
+    } finally {
+      loadingRef.current = false;
+      setLoadingMore(false);
+    }
+  }, [symbol, historyDone]);
+
+  // Seed the walk-back cursor from the earliest bar we hold, so the first
+  // left-edge hit asks for the day before whatever is on screen.
+  useEffect(() => {
+    if (oldestDateRef.current) return;
+    const first = (candles !== undefined ? candles : fetched)?.[0];
+    if (date) oldestDateRef.current = date;
+    else if (first) oldestDateRef.current = new Date((first.timestamp + IST_OFFSET) * 1000)
+      .toISOString().slice(0, 10);
+  }, [candles, fetched, date]);
 
   const effCandlesRaw = candles !== undefined ? candles : fetched;
   const effCandles = useMemo(
@@ -271,7 +363,7 @@ const TradingChart: React.FC<Props> = ({
   // Sorted/deduped rows + indicator series (memoised; legend uses these).
   const { rows, ind } = useMemo(() => {
     const seen = new Set<number>();
-    const rows = [...effPrevDay, ...effCandles]
+    const rows = [...history, ...effPrevDay, ...effCandles]
       .sort((a, b) => a.timestamp - b.timestamp)
       .filter(c => { if (seen.has(c.timestamp)) return false; seen.add(c.timestamp); return true; });
     const closes = rows.map(c => c.close);
@@ -280,7 +372,7 @@ const TradingChart: React.FC<Props> = ({
     const byTime: Record<number, { vwap: number | null; sma5: number | null; sma20: number | null; rsi: number | null; macd: number | null }> = {};
     rows.forEach((c, i) => { byTime[c.timestamp + IST_OFFSET] = { vwap: vw[i], sma5: s5[i], sma20: s20[i], rsi: rsi[i], macd: isFinite(mac.macd[i]) ? mac.macd[i] : null }; });
     return { rows, ind: { s5, s20, bb, vw, rsi, mac, byTime } };
-  }, [effCandles, effPrevDay]);
+  }, [effCandles, effPrevDay, history]);
 
   // ── Create chart once ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -399,6 +491,10 @@ const TradingChart: React.FC<Props> = ({
         // A range change that is NOT our own sync and not our own fitContent is
         // the user zooming or panning — stop auto-fitting so their view sticks.
         if (!fittingRef.current) userZoomedRef.current = true;
+        // Scrolled to (or past) the left edge — pull in the previous day.
+        if (src === chartRef.current && range.from <= HISTORY_TRIGGER_BARS) {
+          void loadOlderDay();
+        }
         syncingRef.current = true;
         charts.forEach(dst => { if (dst !== src) dst.timeScale().setVisibleLogicalRange(range); });
         syncingRef.current = false;
@@ -448,7 +544,12 @@ const TradingChart: React.FC<Props> = ({
     // ran on whatever data existed at first paint — often a handful of bars, or
     // before the modal had laid out — and never corrected, which is what left
     // the candles clustered on the right with an empty left half.
-    if (rows.length && !userZoomedRef.current && rows.length !== lastFitLenRef.current) {
+    // A prepend changes rows.length but must NOT re-fit: the user is reading
+    // history, and fitContent would snap the whole multi-day range into view.
+    // userZoomedRef is already true by then (scrolling set it), so this is
+    // belt-and-braces for the case where history arrives before any gesture.
+    if (rows.length && !userZoomedRef.current && !history.length
+        && rows.length !== lastFitLenRef.current) {
       fittingRef.current = true;
       chart.timeScale().fitContent();
       lastFitLenRef.current = rows.length;
@@ -456,7 +557,7 @@ const TradingChart: React.FC<Props> = ({
       // Cleared after the range-change events this fit triggers have flushed.
       setTimeout(() => { fittingRef.current = false; }, 0);
     }
-  }, [rows, ind, effMarkers, overlays, chartType]);
+  }, [rows, ind, effMarkers, overlays, chartType, history.length]);
 
   // ── Prior-day / multi-day S/R lines ───────────────────────────────────────
   // createPriceLine rather than flat line series: price lines take no part in
@@ -616,6 +717,21 @@ const TradingChart: React.FC<Props> = ({
         )}
 
         {!isNarrow && controls}
+
+        {/* Scroll-back status: a small left-edge badge, not a blocking overlay —
+            the chart stays readable and interactive while a day loads. */}
+        {(loadingMore || (historyDone && daysLoadedRef.current > 0)) && (
+          <div style={{
+            position: 'absolute', top: 6, left: 8, zIndex: 3, pointerEvents: 'none',
+            fontSize: 10, fontWeight: 600, padding: '2px 7px', borderRadius: 6,
+            background: 'var(--nd-surface)', border: '1px solid var(--nd-border)',
+            color: 'var(--nd-text-3)',
+          }}>
+            {loadingMore
+              ? 'Loading previous day…'
+              : `${daysLoadedRef.current} earlier day${daysLoadedRef.current > 1 ? 's' : ''} loaded`}
+          </div>
+        )}
 
         {(loading || effCandles.length === 0) && (
           <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--nd-text-3)', fontSize: 13, pointerEvents: 'none', textAlign: 'center', padding: 12 }}>
