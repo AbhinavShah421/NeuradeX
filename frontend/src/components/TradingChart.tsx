@@ -255,6 +255,10 @@ const TradingChart: React.FC<Props> = ({
   const daysLoadedRef = useRef(0);
   // Guards re-entry: the range handler fires many times per gesture.
   const loadingRef = useRef(false);
+  // Holds the newest loadOlderDay so the main chart's range subscription can be
+  // set up once, at chart creation, without depending on the callback identity.
+  const loadOlderRef = useRef<null | (() => void)>(null);
+  const historyUnsubRef = useRef<null | (() => void)>(null);
 
   const [fetched, setFetched] = useState<ChartCandle[]>([]);
   const [loading, setLoading] = useState(false);
@@ -325,6 +329,7 @@ const TradingChart: React.FC<Props> = ({
       setLoadingMore(false);
     }
   }, [symbol, historyDone]);
+  loadOlderRef.current = loadOlderDay;
 
   // Seed the walk-back cursor from the earliest bar we hold, so the first
   // left-edge hit asks for the day before whatever is on screen.
@@ -417,6 +422,21 @@ const TradingChart: React.FC<Props> = ({
       height,
     });
     chartRef.current = chart;
+
+    // History trigger lives here, on the main chart, NOT in the pane-sync
+    // effect: that effect early-returns unless the RSI·MACD panes are open, so
+    // hooking the trigger there made scroll-back dead by default — which is
+    // exactly how it shipped and why nothing loaded when scrolling left.
+    {
+      const ts = chart.timeScale();
+      historyUnsubRef.current?.();
+      const onRange = (range: any) => {
+        if (!range) return;
+        if (range.from <= HISTORY_TRIGGER_BARS) loadOlderRef.current?.();
+      };
+      ts.subscribeVisibleLogicalRangeChange(onRange);
+      historyUnsubRef.current = () => ts.unsubscribeVisibleLogicalRangeChange(onRange);
+    }
     csRef.current = chart.addCandlestickSeries({
       upColor: '#26a69a', downColor: '#ef5350',
       borderUpColor: '#26a69a', borderDownColor: '#ef5350',
@@ -457,7 +477,10 @@ const TradingChart: React.FC<Props> = ({
       }
     });
     ro.observe(containerRef.current);
-    return () => { ro.disconnect(); chart.remove(); chartRef.current = null; };
+    return () => {
+      historyUnsubRef.current?.(); historyUnsubRef.current = null;
+      ro.disconnect(); chart.remove(); chartRef.current = null;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isDark, height, isNarrow]);
 
@@ -494,10 +517,6 @@ const TradingChart: React.FC<Props> = ({
         // A range change that is NOT our own sync and not our own fitContent is
         // the user zooming or panning — stop auto-fitting so their view sticks.
         if (!fittingRef.current) userZoomedRef.current = true;
-        // Scrolled to (or past) the left edge — pull in the previous day.
-        if (src === chartRef.current && range.from <= HISTORY_TRIGGER_BARS) {
-          void loadOlderDay();
-        }
         syncingRef.current = true;
         charts.forEach(dst => { if (dst !== src) dst.timeScale().setVisibleLogicalRange(range); });
         syncingRef.current = false;
