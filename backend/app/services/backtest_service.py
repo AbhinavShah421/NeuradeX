@@ -29,6 +29,7 @@ import json
 import math
 import os
 import random
+import zlib
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -721,10 +722,28 @@ _INTRADAY_BASE = {
 }
 
 
+def simulation_seed(symbol: str, date_str: str) -> int:
+    """Stable seed for the synthetic-candle fallback.
+
+    This used `hash()`, which Python randomises per process unless
+    PYTHONHASHSEED is set — and it is not set here. So the same symbol and date
+    produced different prices in different processes: two runs on 2026-08-19
+    gave 962242101 and 1512940436. Any backtest that fell back to simulation was
+    therefore unreproducible while the docstring called it deterministic.
+
+    crc32 over the same key is stable across processes and machines.
+    """
+    return zlib.crc32(f"{symbol}{date_str}".encode("utf-8")) % (2 ** 31)
+
+
 def _simulate_intraday_5min(symbol: str, date_str: str) -> list[dict]:
-    """Generate 75 realistic 5-min candles (09:15–15:25 IST) for a trading day."""
-    seed = hash(f"{symbol}{date_str}") % (2 ** 31)
-    rng = random.Random(seed)
+    """Generate 75 realistic 5-min candles (09:15–15:25 IST) for a trading day.
+
+    Fallback only — used when no provider returns real candles for the date.
+    Callers record `data_source="simulated"`, which is now persisted with the
+    session (see sessions_service._session_provenance).
+    """
+    rng = random.Random(simulation_seed(symbol, date_str))
 
     base = _INTRADAY_BASE.get(symbol, 500.0) * rng.uniform(0.88, 1.12)
     gap_pct = rng.uniform(-0.010, 0.015)

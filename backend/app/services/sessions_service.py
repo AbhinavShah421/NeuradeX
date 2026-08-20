@@ -503,6 +503,44 @@ async def _persist_session_decision(session_id: str, symbol: str, decision: dict
         logger.debug("persist_session_decision failed: %s", exc)
 
 
+def _session_provenance(s: dict) -> dict:
+    """What data this session actually ran on.
+
+    Until 2026-08-20 none of this was persisted. `data_source` was set on the
+    in-memory session and shown in the list view, but never written to
+    session_metadata — 0 of 2,363 rows carried it — so after the fact there was
+    no way to tell whether a backtest had run on real candles or on the seeded
+    random walk `_simulate_intraday_5min` substitutes when providers return
+    nothing. Silent synthetic data in a results table can invalidate months of
+    conclusions retroactively.
+
+    `bar_interval_min` matters for the same reason: backtests run on 5-minute
+    bars for dates the own candle dataset does not cover and 1-minute bars for
+    those it does (the boundary is 2026-08-10), and results either side are not
+    comparable.
+    """
+    candles = s.get("candles") or []
+
+    interval = None
+    times = [c.get("time") for c in candles[:12] if c.get("time")]
+    mins = []
+    for t in times:
+        try:
+            hh, mm = str(t).split(":")[:2]
+            mins.append(int(hh) * 60 + int(mm))
+        except (ValueError, TypeError):
+            continue
+    gaps = [b - a for a, b in zip(mins, mins[1:]) if b > a]
+    if gaps:
+        interval = min(gaps)
+
+    return {
+        "data_source": s.get("data_source"),
+        "bar_interval_min": interval,
+        "bars_loaded": len(candles),
+    }
+
+
 async def _finalize_session(s: dict) -> None:
     """Persist session summary to session_metadata. Called once when session reaches a terminal state."""
     if s.get("_finalized"):
@@ -549,7 +587,9 @@ async def _finalize_session(s: dict) -> None:
                 # was persistently 0 while the JSONB snapshot held the true value.
                 "pnl_pct": metrics.get("total_pnl_pct", 0),
                 "candles": s.get("current_idx", 0),
-                "data":    _json.dumps(metrics),
+                # Provenance travels with the metrics so real-vs-simulated and
+                # bar size are auditable after the fact, without a schema change.
+                "data":    _json.dumps({**metrics, **_session_provenance(s)}),
             })
         logger.info("Session finalized to DB", extra={
             "log_type": "session_event", "event": "session_finalized",
