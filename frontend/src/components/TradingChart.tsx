@@ -20,6 +20,15 @@ export interface ChartCandle {
   time?: string; timestamp: number;
   open: number; high: number; low: number; close: number; volume?: number;
 }
+/** Prior-day / multi-day S/R from the backend (session detail `priorLevels`).
+ *  Display only — these never influence what the system trades. */
+export interface PriceLevel {
+  label: string; price: number; kind: string; distPct: number;
+}
+export interface PriorLevels {
+  asOf?: string; days?: number; ref?: number;
+  resistance?: PriceLevel[]; support?: PriceLevel[];
+}
 export interface TradeMarker {
   timestamp: number; action: 'BUY' | 'SELL'; price?: number; text?: string;
 }
@@ -110,6 +119,7 @@ function macdSeries(closes: number[]) {
 interface Props {
   candles?: ChartCandle[];
   prevDayCandles?: ChartCandle[];
+  priorLevels?: PriorLevels;
   symbol?: string;
   date?: string;
   markers?: TradeMarker[];
@@ -127,7 +137,7 @@ type Legend = {
 } | null;
 
 const TradingChart: React.FC<Props> = ({
-  candles, prevDayCandles = [], symbol, date, markers, trades,
+  candles, prevDayCandles = [], priorLevels, symbol, date, markers, trades,
   height = 420, isDark = true, showControls = true, subPanes = true,
 }) => {
   // Phone-sized layout: chips move into a flow row (no overlay collisions),
@@ -169,6 +179,22 @@ const TradingChart: React.FC<Props> = ({
   // Set while WE call fitContent, so the range-change handler can tell our
   // own adjustment apart from a real user gesture.
   const fittingRef = useRef(false);
+
+  // Prior-day / multi-day S/R lines. Opt-in and remembered: this is reference
+  // information, and ten unrequested horizontal lines on every chart in the app
+  // is not a change anyone asked for.
+  const [showLevels, setShowLevels] = useState<boolean>(() => {
+    try { const v = localStorage.getItem('nd-chart-levels'); if (v != null) return v === '1'; } catch { /* private mode */ }
+    return false;
+  });
+  const toggleLevels = () => setShowLevels(v => {
+    try { localStorage.setItem('nd-chart-levels', v ? '0' : '1'); } catch { /* private mode */ }
+    return !v;
+  });
+  const levelLinesRef = useRef<Array<{ host: ISeriesApi<any>; line: any }>>([]);
+
+  const hasLevels = Boolean((priorLevels?.resistance?.length ?? 0)
+                         || (priorLevels?.support?.length ?? 0));
 
   const [overlays, setOverlays] = useState({ vwap: true, sma: true, bb: false });
   const [chartType, setChartType] = useState<'candles' | 'line'>('candles');
@@ -432,6 +458,53 @@ const TradingChart: React.FC<Props> = ({
     }
   }, [rows, ind, effMarkers, overlays, chartType]);
 
+  // ── Prior-day / multi-day S/R lines ───────────────────────────────────────
+  // createPriceLine rather than flat line series: price lines take no part in
+  // autoscale (an R3 two ranges away would otherwise squash today's candles),
+  // and they carry a native title + axis tag for free.
+  //
+  // They are hosted on whichever series is CURRENTLY VISIBLE. lightweight-charts
+  // hides a price line when its host series is invisible, and line mode sets the
+  // candlestick series invisible — so hosting on `cs` unconditionally makes the
+  // levels silently disappear the moment the user switches to a line chart.
+  useEffect(() => {
+    const teardown = () => {
+      for (const { host, line } of levelLinesRef.current) {
+        // The chart-creation effect is declared earlier, so on a theme/size
+        // change React runs chart.remove() before this cleanup — the series is
+        // already destroyed by then.
+        try { host.removePriceLine(line); } catch { /* series already gone */ }
+      }
+      levelLinesRef.current = [];
+    };
+    teardown();
+    if (!chartRef.current || !showLevels || !rows.length) return;
+
+    const host = chartType === 'candles' ? csRef.current : lineRef.current;
+    if (!host) return;
+
+    const draw = (lv: PriceLevel, color: string, style: number) => {
+      try {
+        levelLinesRef.current.push({
+          host,
+          line: host.createPriceLine({
+            price: lv.price, color, lineWidth: 1, lineStyle: style,
+            axisLabelVisible: true,
+            title: `${lv.label} ${lv.distPct > 0 ? '+' : ''}${lv.distPct.toFixed(2)}%`,
+          } as any),
+        });
+      } catch { /* out of range or series not ready */ }
+    };
+
+    // Solid for prices the market actually traded, dashed for derived ones —
+    // the same hierarchy the backend ranks slots by.
+    const styleFor = (k: string) => (k === 'priorDay' || k === 'swing' ? 0 : 2);
+    (priorLevels?.resistance ?? []).forEach(lv => draw(lv, '#ef5350', styleFor(lv.kind)));
+    (priorLevels?.support ?? []).forEach(lv => draw(lv, '#26a69a', styleFor(lv.kind)));
+
+    return teardown;
+  }, [priorLevels, showLevels, chartType, rows.length, isDark, height, isNarrow, panesOn]);
+
   // ── Push RSI / MACD data into the sub-panes ────────────────────────────────
   useEffect(() => {
     if (!panesOn) return;
@@ -488,6 +561,17 @@ const TradingChart: React.FC<Props> = ({
       {chip(overlays.vwap, '#ab47bc', 'VWAP', 'vwap')}
       {chip(overlays.sma, '#42a5f5', 'SMA', 'sma')}
       {chip(overlays.bb, '#78909c', 'BB', 'bb')}
+      {hasLevels && (
+        <button onClick={toggleLevels}
+          title={showLevels ? 'Hide prior-day support & resistance' : 'Show prior-day support & resistance'}
+          style={{
+            fontSize: 10, fontWeight: 600, padding: isNarrow ? '4px 10px' : '2px 8px',
+            borderRadius: 6, cursor: 'pointer',
+            border: `1px solid ${showLevels ? '#ffa726' : 'var(--nd-border)'}`,
+            background: showLevels ? '#ffa72622' : 'transparent',
+            color: showLevels ? '#ffa726' : 'var(--nd-text-3)',
+          }}>LEVELS</button>
+      )}
       {subPanes && (
         <button onClick={togglePanes} title={showPanes ? 'Hide RSI & MACD panes' : 'Show RSI & MACD panes'} style={{
           fontSize: 10, fontWeight: 600, padding: isNarrow ? '4px 10px' : '2px 8px',

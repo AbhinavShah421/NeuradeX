@@ -183,6 +183,7 @@ const SessionModal: React.FC<{ id: string; onClose: () => void }> = ({ id, onClo
                 <TradingChart
                   candles={d?.candles}
                   prevDayCandles={d?.prevDayCandles}
+                  priorLevels={d?.priorLevels}
                   symbol={d?.symbol}
                   date={d?.date}
                   markers={markers}

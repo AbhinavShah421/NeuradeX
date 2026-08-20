@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../stores/appStore';
 import apiService from '../services/api';
-import TradingChart, { TradeMarker, ChartCandle } from './TradingChart';
+import TradingChart, { TradeMarker, ChartCandle, PriorLevels } from './TradingChart';
 import StockPicker from './StockPicker';
 import { getErrorMessage } from '../utils/errors';
 
@@ -64,6 +64,7 @@ interface SessionDetail {
   tradesList?: SessionTrade[];
   candles?: ChartCandle[];
   prevDayCandles?: ChartCandle[];
+  priorLevels?: PriorLevels;
 }
 
 /**
@@ -347,7 +348,7 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
           </div>
 
           <div style={{ border: '1px solid var(--nd-border)', borderRadius: 10, overflow: 'hidden', marginBottom: 12 }}>
-            <TradingChart candles={detail.candles ?? []} prevDayCandles={detail.prevDayCandles ?? []} markers={markers} height={400} isDark={isDark} />
+            <TradingChart candles={detail.candles ?? []} prevDayCandles={detail.prevDayCandles ?? []} priorLevels={detail.priorLevels} markers={markers} height={400} isDark={isDark} />
           </div>
 
           {/* ── Live AI decision — why it is / isn't trading right now ── */}
