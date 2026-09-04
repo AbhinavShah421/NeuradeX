@@ -736,7 +736,15 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
     elif pos_status == "NONE":
         # Entry is governed by the selected trade gate (strict / gentle / loose).
         gate_mode = await get_trade_gate()
-        gate = TRADE_GATES[gate_mode]
+        # Runtime overrides from the control page layer over the shipped preset.
+        # Merged (not replaced) so an override only has to name the one field it
+        # changes, and a preset gaining a new field keeps its shipped value.
+        gate = dict(TRADE_GATES[gate_mode])
+        try:
+            from app.services.controls import gate_overrides
+            gate.update(await gate_overrides(gate_mode))
+        except Exception:
+            logger.debug("gate overrides unavailable; using shipped preset", exc_info=True)
         blocked: list[str] = []
         # Genuine BUY support: which agents independently voted BUY, and whether
         # any of them is a high-precision agent (sentiment/pattern/memory/gbm).

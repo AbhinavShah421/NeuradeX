@@ -1109,6 +1109,24 @@ class ApiService {
     return response.data;
   }
 
+  /** Every gate and ensemble knob, with defaults, bounds and evidence. */
+  async getControls(): Promise<any> {
+    const response = await this.api.get('/api/ai-engine/controls');
+    return response.data;
+  }
+
+  /** Bounds are enforced server-side; a rejection comes back as a 400. */
+  async setControl(id: string, value: any): Promise<any> {
+    const response = await this.api.post(`/api/ai-engine/controls/${id}`, { value });
+    return response.data;
+  }
+
+  /** Pass "all" to clear every override. */
+  async resetControl(id: string): Promise<any> {
+    const response = await this.api.post(`/api/ai-engine/controls/${id}/reset`);
+    return response.data;
+  }
+
   /** Corpus-wide per-agent BUY-lift. Not session-scoped. */
   async agentCulpability(): Promise<any> {
     const response = await this.api.get('/api/sessions/agent-culpability');

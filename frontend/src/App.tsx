@@ -22,6 +22,7 @@ import Orders from './pages/Orders';
 import AgentDetail from './pages/AgentDetail';
 import Settings from './pages/Settings';
 import SystemMap from './pages/SystemMap';
+import Controls from './pages/Controls';
 import './styles/globals.css';
 
 const App: React.FC = () => {
@@ -68,6 +69,7 @@ const App: React.FC = () => {
                   <Route path="/orders" element={<Orders />} />
                   <Route path="/settings" element={<Settings />} />
                   <Route path="/system-map" element={<SystemMap />} />
+                  <Route path="/controls" element={<Controls />} />
                 </Routes>
               </Layout>
             </ProtectedRoute>

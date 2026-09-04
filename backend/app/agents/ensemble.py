@@ -270,15 +270,40 @@ class EnsembleEngine:
         confidence = 0.30 + 0.65 * (0.6 * vote_pct[action] + 0.4 * agreement)
 
         # ── Directional contest (entry-side only — see constants above) ────────
+        # Resolved once per decision from the runtime control plane, which
+        # layers Redis overrides over the shipped constants (services/controls.py).
+        # Its own 10s cache keeps this from becoming a Redis read per candle per
+        # symbol; on any failure the shipped constants stand.
+        _dom, _minv, _mode = _DIR_DOMINANCE, _DIR_MIN_VOTERS, _VOTE_MODE
+        _mem_n, _mem_gate, _mem_strong = _MEM_MIN_SAMPLES, _MEM_GATE_WINRATE, _MEM_STRONG_WINRATE
+        try:
+            from app.services.controls import ensemble_setting
+
+            async def _ctl(name, cast, fallback):
+                # `or` is wrong here: mem_min_samples allows 0 and the win-rate
+                # gates allow 0.0, all of which are falsy and would silently
+                # snap back to the shipped default.
+                v = await ensemble_setting(name)
+                return fallback if v is None else cast(v)
+
+            _dom = await _ctl("dir_dominance", float, _dom)
+            _minv = await _ctl("dir_min_voters", int, _minv)
+            _mode = await _ctl("vote_mode", str, _mode)
+            _mem_n = await _ctl("mem_min_samples", int, _mem_n)
+            _mem_gate = await _ctl("mem_gate_winrate", float, _mem_gate)
+            _mem_strong = await _ctl("mem_strong_winrate", float, _mem_strong)
+        except Exception:
+            logger.debug("runtime controls unavailable; using shipped constants", exc_info=True)
+
         vote_mode = "legacy"
-        if _VOTE_MODE == "directional" and context.get("position", "NONE") in (None, "", "NONE"):
+        if _mode == "directional" and context.get("position", "NONE") in (None, "", "NONE"):
             vote_mode = "directional"
             buy_n  = sum(1 for s in signals if s.action == "BUY")
             sell_n = sum(1 for s in signals if s.action == "SELL")
             bm, sm, hm = vote["BUY"], vote["SELL"], vote["HOLD"]
-            if bm > 0 and bm >= _DIR_DOMINANCE * sm and buy_n >= _DIR_MIN_VOTERS:
+            if bm > 0 and bm >= _dom * sm and buy_n >= _minv:
                 action = "BUY"
-            elif sm > 0 and sm >= _DIR_DOMINANCE * bm and sell_n >= _DIR_MIN_VOTERS:
+            elif sm > 0 and sm >= _dom * bm and sell_n >= _minv:
                 action = "SELL"
             else:
                 action = "HOLD"
@@ -341,14 +366,14 @@ class EnsembleEngine:
                 # lets the other agents decide unimpeded.
                 n_action = int(mi.get(f"n_{action}", 0))
                 intended_action = action
-                if n_action >= _MEM_MIN_SAMPLES:
+                if n_action >= _mem_n:
                     wr = mi.get(f"wr_{action}")
                     if wr is None:
                         action = "HOLD"
                         confidence = 0.55
                         memory_note = f"memory veto: no similar {intended_action} precedent"
                         veto = memory_note
-                    elif wr < _MEM_GATE_WINRATE:
+                    elif wr < _mem_gate:
                         action = "HOLD"
                         confidence = 0.55
                         memory_note = f"memory veto: similar {intended_action} setups won only {wr:.0%}"
@@ -357,7 +382,7 @@ class EnsembleEngine:
                         # Scale confidence by how well this action did historically
                         boost = 0.85 + 0.45 * max(0.0, wr - 0.5)
                         confidence = min(0.95, confidence * boost)
-                        if wr >= _MEM_STRONG_WINRATE:
+                        if wr >= _mem_strong:
                             memory_note = f"memory confirms: {wr:.0%} {intended_action} win-rate ({n_action} cases)"
                         else:
                             memory_note = f"memory ok: {wr:.0%} {intended_action} win-rate ({n_action} cases)"
