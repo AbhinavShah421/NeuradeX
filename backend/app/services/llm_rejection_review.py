@@ -325,35 +325,60 @@ async def rejection_review_report(days: int = 30) -> dict:
         return {"by_verdict": {}, "edge_pts": None, "verdict": "error"}
 
 
-def _seconds_until_hour_ist(hour: int) -> float:
-    now = datetime.now(IST)
-    target = now.replace(hour=hour % 24, minute=0, second=0, microsecond=0)
-    if target <= now:
-        target += timedelta(days=1)
-    return (target - now).total_seconds()
+async def _day_has_cf_labels(day: str | None) -> bool:
+    """Has the counterfactual labeller reached `day` yet? Errs towards True so a
+    DB hiccup cannot wedge the review loop into permanent deferral."""
+    if not day:
+        return True
+    try:
+        from sqlalchemy import text
+        from app.database.postgres import engine
+        async with engine.begin() as conn:
+            row = (await conn.execute(text("""
+                SELECT 1 FROM session_decisions d
+                LEFT JOIN session_metadata sm ON sm.session_id = d.session_id
+                WHERE d.cf_labeled_at IS NOT NULL
+                  AND COALESCE(sm.date,
+                               (d.created_at AT TIME ZONE 'Asia/Kolkata')::date::text) = :day
+                LIMIT 1
+            """), {"day": day})).fetchone()
+        return row is not None
+    except Exception as exc:
+        logger.warning("cf-label readiness probe failed for %s: %s", day, exc)
+        return True
 
 
 async def rejection_review_loop() -> None:
-    """Nightly sweep at 04:00 IST — after counterfactual labelling has run, so
-    the day's rejections already carry the outcomes this scores against."""
-    import asyncio
+    """Daily sweep, due from 04:00 IST — after counterfactual labelling has run,
+    so the day's rejections already carry the outcomes this scores against.
+
+    Due-time, not fire-time: 04:00 is inside the window the host is powered
+    down, so the old sleep-to-the-hour form never fired. `nightly_loop` also
+    serialises the catch-up, which keeps this behind the 03:00 post-mortems it
+    is meant to follow. See app/utils/nightly.py."""
     from app.config import settings
+    from app.utils.nightly import nightly_loop, NotReady
     if not getattr(settings, "LLM_REJECTION_REVIEW_ENABLED", True):
         logger.info("LLM rejection review disabled via config")
         return
-    while True:
-        try:
-            wait = _seconds_until_hour_ist(
-                int(getattr(settings, "LLM_REJECTION_REVIEW_HOUR_IST", _SWEEP_HOUR_IST)))
-            logger.info("Next LLM rejection review in %.0f min", wait / 60)
-            await asyncio.sleep(wait)
-            res = await review_rejections(
-                limit=int(getattr(settings, "LLM_REJECTION_REVIEW_CAP", _DAILY_CAP)))
-            logger.info("LLM rejection review done: %s", res,
-                        extra={"log_type": "ai_engine",
-                               "event": "llm_rejection_review_done", **res})
-        except asyncio.CancelledError:
-            break
-        except Exception as exc:
-            logger.error("LLM rejection review loop error: %s", exc)
-            await asyncio.sleep(3600)
+
+    async def _run() -> object:
+        res = await review_rejections(
+            limit=int(getattr(settings, "LLM_REJECTION_REVIEW_CAP", _DAILY_CAP)))
+        # Nothing reviewed can mean two very different things: the day really
+        # had no near-miss rejections, or the counterfactual labeller has not
+        # reached that day yet — it only sweeps outside market hours and only
+        # touches days that are already over. Treating the second as success
+        # burns the slot and the day is never reviewed (observed 2026-09-01:
+        # the boot catch-up ran at 09:20 IST and returned reviewed=0 for
+        # 2026-08-31, which had 1,368 decisions and 0 labels at that moment).
+        if not res.get("reviewed") and not await _day_has_cf_labels(res.get("day")):
+            raise NotReady(f"no counterfactual labels for {res.get('day')} yet")
+        logger.info("LLM rejection review done: %s", res,
+                    extra={"log_type": "ai_engine",
+                           "event": "llm_rejection_review_done", **res})
+        return res
+
+    await nightly_loop("llm_rejection_review",
+                       int(getattr(settings, "LLM_REJECTION_REVIEW_HOUR_IST", _SWEEP_HOUR_IST)),
+                       _run, label="LLM rejection review")

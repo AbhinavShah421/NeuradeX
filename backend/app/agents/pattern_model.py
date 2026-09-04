@@ -558,42 +558,36 @@ async def train_gbm_intraday(days: int = 10, horizon_min: int = 30, stride: int 
 _LABEL_UP_INTRADAY = 0.05
 
 
-def _seconds_until_hour_ist(hour: int) -> float:
-    from datetime import timezone
-    ist = timezone(timedelta(hours=5, minutes=30))
-    now = datetime.now(ist)
-    target = now.replace(hour=hour % 24, minute=0, second=0, microsecond=0)
-    if target <= now:
-        target += timedelta(days=1)
-    return (target - now).total_seconds()
-
-
 async def gbm_autotrain_loop() -> None:
     """Background task: retrain the GBM once daily, advancing the universe offset so
-    it covers the whole market over successive nights and keeps strengthening."""
+    it covers the whole market over successive nights and keeps strengthening.
+
+    Driven by `nightly_loop`, so GBM_AUTOTRAIN_HOUR_IST is when the day's
+    retrain becomes *due*, not an instant it must be alive for — this box is
+    powered down at 03:00 IST and the loop had fired on 5 of 15 nights. See
+    app/utils/nightly.py."""
     from app.config import settings
     if not getattr(settings, "GBM_AUTOTRAIN_ENABLED", True):
         logger.info("GBM auto-retrain disabled via config")
         return
-    while True:
+    async def _run() -> object:
+        daily = await train_gbm_model(
+            max_symbols=getattr(settings, "GBM_AUTOTRAIN_MAX_SYMBOLS", 250),
+            trigger="scheduled")
+        # The intraday slot retrains nightly too — the tick store grows
+        # every live session, so the model keeps absorbing fresh regimes.
+        # It is scored separately, so a failure here must not cost the daily
+        # slot the run it just completed.
         try:
-            wait = _seconds_until_hour_ist(getattr(settings, "GBM_AUTOTRAIN_HOUR_IST", 3))
-            logger.info("Next GBM auto-retrain in %.0f min", wait / 60)
-            await asyncio.sleep(wait)
-            await train_gbm_model(
-                max_symbols=getattr(settings, "GBM_AUTOTRAIN_MAX_SYMBOLS", 250),
-                trigger="scheduled")
-            # The intraday slot retrains nightly too — the tick store grows
-            # every live session, so the model keeps absorbing fresh regimes.
-            try:
-                await train_gbm_intraday(trigger="scheduled")
-            except Exception as exc:
-                logger.error("Scheduled intraday GBM retrain error: %s", exc)
-        except asyncio.CancelledError:
-            break
+            await train_gbm_intraday(trigger="scheduled")
         except Exception as exc:
-            logger.error("Scheduled GBM retrain error: %s", exc)
-            await asyncio.sleep(3600)  # back off an hour on failure
+            logger.error("Scheduled intraday GBM retrain error: %s", exc)
+        return daily
+
+    from app.utils.nightly import nightly_loop
+    await nightly_loop("gbm_autotrain",
+                       getattr(settings, "GBM_AUTOTRAIN_HOUR_IST", 3),
+                       _run, label="GBM auto-retrain")
 
 
 async def pattern_autotrain_loop() -> None:
@@ -609,26 +603,26 @@ async def pattern_autotrain_loop() -> None:
 
     Training a model must not depend on an unrelated feature being switched on,
     so this mirrors gbm_autotrain_loop: same rotating-universe design, same
-    back-off, its own hour so the two never contend."""
+    back-off, its own hour so the two never contend.
+
+    The 2026-08-17 rewrite still assumed the process would be alive at 01:00
+    IST. It is not — the host sleeps — so training froze again on 2026-08-25
+    for the same observable reason (a trainer that never runs) but a different
+    cause. `nightly_loop` makes the hour a due-time with catch-up on boot."""
     from app.config import settings
     if not getattr(settings, "PATTERN_AUTOTRAIN_ENABLED", True):
         logger.info("Pattern-model auto-retrain disabled via config")
         return
-    while True:
-        try:
-            wait = _seconds_until_hour_ist(getattr(settings, "PATTERN_AUTOTRAIN_HOUR_IST", 1))
-            logger.info("Next pattern-model auto-retrain in %.0f min", wait / 60)
-            await asyncio.sleep(wait)
-            res = await train_pattern_model(
-                lookback_days=getattr(settings, "PATTERN_AUTOTRAIN_LOOKBACK_DAYS", 365),
-                horizon=3,
-                stride=1,
-                max_symbols=getattr(settings, "PATTERN_AUTOTRAIN_MAX_SYMBOLS", 400),
-                trigger="scheduled",
-            )
-            logger.info("Scheduled pattern-model retrain done: %s", res)
-        except asyncio.CancelledError:
-            break
-        except Exception as exc:
-            logger.error("Scheduled pattern-model retrain error: %s", exc)
-            await asyncio.sleep(3600)  # back off an hour on failure
+    async def _run() -> object:
+        return await train_pattern_model(
+            lookback_days=getattr(settings, "PATTERN_AUTOTRAIN_LOOKBACK_DAYS", 365),
+            horizon=3,
+            stride=1,
+            max_symbols=getattr(settings, "PATTERN_AUTOTRAIN_MAX_SYMBOLS", 400),
+            trigger="scheduled",
+        )
+
+    from app.utils.nightly import nightly_loop
+    await nightly_loop("pattern_autotrain",
+                       getattr(settings, "PATTERN_AUTOTRAIN_HOUR_IST", 1),
+                       _run, label="Pattern-model auto-retrain")

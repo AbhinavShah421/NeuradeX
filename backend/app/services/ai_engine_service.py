@@ -812,39 +812,40 @@ def _seconds_until_hour_ist(hour: int) -> float:
 
 
 async def loss_learning_loop() -> None:
-    """Run the loss post-mortems once daily at LOSS_LEARNING_HOUR_IST.
+    """Run the loss post-mortems once per day, due from LOSS_LEARNING_HOUR_IST.
 
     loss_learning_run was only ever reachable through its manual endpoint, so it
     ran when somebody remembered to call it — last on 2026-06-18. Losing trades
     kept accruing while the post-mortem table and the active-lessons cache the
-    entry prompts read from both went stale. Same shape as the memory sweep and
-    GBM auto-retrain loops: sleep to the target hour, run, back off an hour on
-    failure.
+    entry prompts read from both went stale.
+
+    Wrapping it in a sleep-to-03:00-IST loop did not fix that, it just changed
+    who forgot: the host is powered down at 03:00, so post-mortems stopped again
+    after 2026-08-25 with 0 written in the following week. `nightly_loop` treats
+    the hour as a due-time and catches up on the next boot instead.
     """
     from app.config import settings
     if not getattr(settings, "LOSS_LEARNING_ENABLED", True):
         logger.info("Loss learning disabled via config")
         return
-    while True:
-        try:
-            wait = _seconds_until_hour_ist(int(getattr(settings, "LOSS_LEARNING_HOUR_IST", 3)))
-            logger.info("Next loss-learning run in %.0f min", wait / 60)
-            await asyncio.sleep(wait)
-            res = await loss_learning_run(
-                limit=int(getattr(settings, "LOSS_LEARNING_LIMIT", 200)),
-                max_new=int(getattr(settings, "LOSS_LEARNING_MAX_NEW", 25)),
-            )
-            data = (res or {}).get("data", {})
-            logger.info("loss-learning run: %s losing trades, %s new post-mortems, %s lessons",
-                        data.get("losing_trades"), data.get("newly_analyzed"), data.get("lessons"),
-                        extra={"log_type": "ai_engine", "event": "loss_learning_run",
-                               "newly_analyzed": data.get("newly_analyzed"),
-                               "lessons": data.get("lessons")})
-        except asyncio.CancelledError:
-            break
-        except Exception as exc:
-            logger.error("Scheduled loss-learning error: %s", exc)
-            await asyncio.sleep(3600)
+
+    async def _run() -> object:
+        res = await loss_learning_run(
+            limit=int(getattr(settings, "LOSS_LEARNING_LIMIT", 200)),
+            max_new=int(getattr(settings, "LOSS_LEARNING_MAX_NEW", 25)),
+        )
+        data = (res or {}).get("data", {})
+        logger.info("loss-learning run: %s losing trades, %s new post-mortems, %s lessons",
+                    data.get("losing_trades"), data.get("newly_analyzed"), data.get("lessons"),
+                    extra={"log_type": "ai_engine", "event": "loss_learning_run",
+                           "newly_analyzed": data.get("newly_analyzed"),
+                           "lessons": data.get("lessons")})
+        return data
+
+    from app.utils.nightly import nightly_loop
+    await nightly_loop("loss_learning",
+                       int(getattr(settings, "LOSS_LEARNING_HOUR_IST", 3)),
+                       _run, label="Loss post-mortems")
 
 
 async def loss_learning_postmortems(limit: int = 50):

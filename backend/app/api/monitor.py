@@ -476,6 +476,37 @@ async def _learning_loops() -> list[dict]:
         "session decisions written",
         "The runner should write decisions on every bar during market hours.",
     ))
+
+    # Three nightly loops had no panel entry at all, so when they stopped on
+    # 2026-08-25 nothing said so — the loss post-mortems in particular went a
+    # full week writing zero rows while the entry prompts kept reading a stale
+    # lessons cache. nightly_run_state is written only on a successful run, so
+    # its age is the honest "when did this last do something" number.
+    try:
+        from app.utils.nightly import states as _nightly_states
+        ns = await _nightly_states()
+    except Exception as exc:
+        logger.debug("nightly state probe failed: %s", exc)
+        ns = {}
+
+    for key, label, why in (
+        ("loss_learning", "Loss post-mortems",
+         "Explains each losing trade and refreshes the active-lessons cache the "
+         "entry prompts read. Due daily from 03:00 IST, with catch-up on boot."),
+        ("memory_sweep", "Pattern-memory sweep",
+         "Replays real backtests after the close to refresh the case bank. "
+         "Due daily from 02:00 IST."),
+        ("llm_rejection_review", "LLM rejection review",
+         "Scores the decisions the gates declined, after counterfactual "
+         "labelling has supplied their outcomes. Due daily from 04:00 IST."),
+    ):
+        st = ns.get(key) or {}
+        err = st.get("last_error")
+        detail = st.get("detail") or "never run"
+        if err:
+            detail = f"{detail} — last attempt failed: {err[:120]}"
+        out.append(_loop(key, label, _age_hours(st.get("last_run_at")), 48, detail, why))
+
     return out
 
 

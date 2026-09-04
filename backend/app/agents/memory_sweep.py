@@ -134,27 +134,17 @@ async def run_memory_sweep(
         return _last_sweep
 
 
-def _seconds_until_hour_ist(hour: int) -> float:
-    now = datetime.now(IST)
-    target = now.replace(hour=hour % 24, minute=0, second=0, microsecond=0)
-    if target <= now:
-        target += timedelta(days=1)
-    return (target - now).total_seconds()
-
-
 async def scheduled_sweep_loop() -> None:
-    """Background task: run the sweep once daily at MEMORY_SWEEP_HOUR_IST."""
+    """Background task: run the sweep once per day, due from MEMORY_SWEEP_HOUR_IST.
+
+    Due-time rather than fire-time: the host is powered down at 02:00 IST, so
+    the old sleep-to-the-hour form simply never fired. See app/utils/nightly.py.
+    """
     if not settings.MEMORY_SWEEP_ENABLED:
         logger.info("Memory sweep disabled via config")
         return
-    while True:
-        try:
-            wait = _seconds_until_hour_ist(settings.MEMORY_SWEEP_HOUR_IST)
-            logger.info("Next pattern-memory sweep in %.0f min", wait / 60)
-            await asyncio.sleep(wait)
-            await run_memory_sweep(trigger="scheduled")
-        except asyncio.CancelledError:
-            break
-        except Exception as exc:
-            logger.error("Scheduled memory sweep error: %s", exc)
-            await asyncio.sleep(3600)  # back off an hour on failure
+
+    from app.utils.nightly import nightly_loop
+    await nightly_loop("memory_sweep", settings.MEMORY_SWEEP_HOUR_IST,
+                       lambda: run_memory_sweep(trigger="scheduled"),
+                       label="Pattern-memory sweep")
