@@ -81,9 +81,12 @@ interface ExecStep {
   icon: string;
   color: string;
   data: Record<string, any>;
+  /** Set when the step has nothing real to show, so the UI can say so
+   *  instead of rendering placeholder values that look like data. */
+  note?: 'unrecorded';
 }
 
-function buildExecutionSteps(trade: TradeRecord): ExecStep[] {
+function buildExecutionSteps(trade: TradeRecord, rich?: AgentDecision[]): ExecStep[] {
   const steps: ExecStep[] = [];
 
   steps.push({
@@ -101,10 +104,18 @@ function buildExecutionSteps(trade: TradeRecord): ExecStep[] {
   });
 
   const agentSignals = trade.agentSignals ?? {};
-  // Show every agent the ensemble actually recorded for this trade. Older trades
-  // only stored a synthetic 5-agent set, so fall back to that when nothing richer
-  // was persisted.
   const agentEntries = Object.entries(agentSignals).filter(([, v]) => v != null && v !== '');
+  // Fall back to the per-bar votes from session_decisions, which carry weight,
+  // confidence and each agent's reasoning. Only when BOTH are empty do we say
+  // so — the previous fallback invented a five-agent set
+  // (technical/sentiment/macro/pattern/rl) and showed a dash against each, which
+  // read as "the agents had no opinion". They are not even the right agents:
+  // "macro" is not an agent in this system. Every LIVE trade hits this path
+  // (77 of 77 carry no agent_signals and no session_id), so the placeholder was
+  // showing fabricated names on exactly the trades that matter most.
+  const fromDecisions = Object.fromEntries(
+    (rich ?? []).filter(a => a?.agent && a?.action).map(a => [a.agent, a.action]));
+  const haveAny = agentEntries.length > 0 || Object.keys(fromDecisions).length > 0;
   steps.push({
     step: 2,
     name: 'Agent Decisions',
@@ -112,7 +123,10 @@ function buildExecutionSteps(trade: TradeRecord): ExecStep[] {
     color: '#8b5cf6',
     data: agentEntries.length > 0
       ? Object.fromEntries(agentEntries)
-      : Object.fromEntries(['technical', 'sentiment', 'macro', 'pattern', 'rl'].map(a => [a, '—'])),
+      : Object.keys(fromDecisions).length > 0
+        ? fromDecisions
+        : { 'not recorded': 'no per-agent votes were saved for this trade' },
+    ...(haveAny ? {} : { note: 'unrecorded' }),
   });
 
   const mc = trade.marketContext ?? {};
@@ -230,7 +244,6 @@ interface AgentDecision { agent: string; action: string; weight: number; confide
 interface AgentAcc { weight?: number; by_action?: Array<{ action: string; rate: number; total: number; avg_pnl: number }>; }
 
 function ExecutionModal({ trade, allTrades = [], onClose }: { trade: TradeRecord; allTrades?: TradeRecord[]; onClose: () => void }) {
-  const steps = buildExecutionSteps(trade);
   const sessionId = trade.marketContext?.sessionId;
   const sessionCount = sessionId
     ? allTrades.filter(t => t.marketContext?.sessionId === sessionId).length
@@ -243,6 +256,9 @@ function ExecutionModal({ trade, allTrades = [], onClose }: { trade: TradeRecord
   const [openAgent, setOpenAgent]   = useState<string | null>(null);
   // "trace" is what the system did; "postmortem" is why it ended that way.
   const [tab, setTab] = useState<'trace' | 'postmortem'>('trace');
+  // Built after richAgents so the Agent Decisions step can fall back to the
+  // per-bar votes when the trade record carries none.
+  const steps = buildExecutionSteps(trade, richAgents);
   useEffect(() => {
     if (!sessionId) return;
     apiService.getTradeAgentDetail(sessionId)
@@ -327,7 +343,15 @@ function ExecutionModal({ trade, allTrades = [], onClose }: { trade: TradeRecord
                   Step {step.step} — {step.name}
                 </div>
 
-                {step.step === 2 ? (
+                {step.note === 'unrecorded' ? (
+                  // Say nothing was saved, rather than rendering placeholders
+                  // that read as "the agents had no opinion".
+                  <div style={{ fontSize: 12, color: 'var(--nd-text-3)', lineHeight: 1.55, fontStyle: 'italic' }}>
+                    No per-agent votes were saved for this trade. Live trades are written without
+                    a session link, so the panel's reasoning is not recoverable for them — paper,
+                    replay and backtest trades do carry it.
+                  </div>
+                ) : step.step === 2 ? (
                   // Agent decisions grid — each card shows the agent's vote + its
                   // weight at decision time; click to expand full detail.
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
