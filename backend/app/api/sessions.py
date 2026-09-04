@@ -79,6 +79,23 @@ async def set_paper_trading_config(req: PaperConfigRequest, user: dict = Depends
     return await service.set_paper_trading_config(req)
 
 
+@router.get("/agent-culpability")
+async def agent_culpability(force: bool = False):
+    """Which agents systematically push BUY into losers, across the whole
+    counterfactual corpus. Measured on session_decisions (executed AND
+    rejected) so the entry gate cannot bias the ranking, base-rate corrected,
+    and day-clustered. See app.services.session_postmortem."""
+    from app.services.session_postmortem import agent_culpability_baseline
+    return await agent_culpability_baseline(force=force)
+
+
+@router.get("/{session_id}/postmortem")
+async def session_postmortem(session_id: str):
+    """Why this session's trades lost, and what the agents voted at each entry."""
+    from app.services.session_postmortem import session_postmortem as _pm
+    return await _pm(session_id)
+
+
 @router.get("/{session_id}")
 async def get_one_session(session_id: str):
     return await service.get_one_session(session_id)
