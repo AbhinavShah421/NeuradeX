@@ -89,6 +89,15 @@ async def agent_culpability(force: bool = False):
     return await agent_culpability_baseline(force=force)
 
 
+@router.get("/trade-postmortem/{trade_id}")
+async def trade_postmortem(trade_id: str):
+    """Why one trade ended the way it did: the setup and indicators at entry,
+    every agent's vote with its own stated reasoning, the price path between
+    entry and exit (how far it went each way), and the exit that booked it."""
+    from app.services.session_postmortem import trade_postmortem as _tpm
+    return await _tpm(trade_id)
+
+
 @router.get("/{session_id}/postmortem")
 async def session_postmortem(session_id: str, narrative: bool = False,
                              force_narrative: bool = False):

@@ -43,8 +43,12 @@ which is a far more useful thing for the panel to say than a name.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+from datetime import timedelta, timezone
 from typing import Any, Optional
+
+IST = timezone(timedelta(hours=5, minutes=30))
 
 from app.utils.elk_logger import get_logger
 
@@ -142,6 +146,11 @@ SETUP_EDGE_PP: dict[str, float] = {
 SETUP_ESTABLISHED: frozenset[str] = frozenset({
     "momentum_into_resistance", "strength_drift",
 })
+
+# Round-trip cost on this universe. Used as the threshold for "was there ever a
+# real gain here" — a peak below it could never have been banked, so a trade
+# that only reached it is an entry failure, not an exit failure.
+_ROUND_TRIP_COST_PCT = 0.125
 
 
 def _loss_reason(exit_reason: Optional[str], pnl_pct: Optional[float],
@@ -256,6 +265,183 @@ def _verdict(lift: float, t: Optional[float]) -> str:
     if t <= -1.8:
         return "leans protective (not significant)"
     return "no signal"
+
+
+async def trade_postmortem(trade_id: str) -> dict:
+    """Everything known about why ONE trade ended the way it did.
+
+    Assembled from three sources because no single one has the whole picture:
+      • trade_records  — prices, P&L, exit_reason, the gate-time agent map
+      • session_decisions — the rich per-agent vote at the entry bar (weight,
+        confidence and the agent's own stated reasoning), plus entry indicators
+      • the 1-second candle store — the price PATH between entry and exit
+
+    The path is what turns "it lost" into a cause. A trade that went +0.8% and
+    round-tripped is a different failure from one that never traded green, and
+    the trade record alone cannot tell them apart — it only holds the endpoints.
+    """
+    from sqlalchemy import text
+    from app.database.postgres import engine
+
+    async with engine.begin() as conn:
+        tr = (await conn.execute(text("""
+            SELECT trade_id, symbol, action, entry_price, exit_price, pnl_pct,
+                   pnl_abs, duration_minutes, timestamp_open, timestamp_close,
+                   market_context, agent_signals, session_id, ensemble_confidence,
+                   trade_source, outcome
+            FROM trade_records WHERE trade_id = :t
+        """), {"t": trade_id})).fetchone()
+
+    if not tr:
+        return {"error": f"no trade {trade_id}"}
+
+    def _d(v):
+        return v if isinstance(v, dict) else (json.loads(v) if v else {})
+
+    mc, sig = _d(tr[10]), _d(tr[11])
+    session_id, symbol = tr[12], (tr[1] or "").upper()
+    entry_price, exit_price = tr[3], tr[4]
+    pnl_pct = float(tr[5]) * 100.0 if tr[5] is not None else None
+    opened, closed = tr[8], tr[9]
+
+    # ── Rich agent votes at the entry bar ────────────────────────────────────
+    # trade_records.agent_signals is a flat {agent: action} map written at the
+    # gate. session_decisions holds the same vote WITH its weight, confidence
+    # and the agent's own reasoning — which is the part that actually explains
+    # anything. Match on the entry minute.
+    agents: list[dict] = []
+    indicators: dict = {}
+    entry_reason = None
+    entry_hhmm = opened.astimezone(IST).strftime("%H:%M") if opened else None
+    if session_id and entry_hhmm:
+        async with engine.begin() as conn:
+            row = (await conn.execute(text("""
+                SELECT agents, indicators, reason, price
+                FROM session_decisions
+                WHERE session_id = :s AND candle_time = :c
+                LIMIT 1
+            """), {"s": session_id, "c": entry_hhmm})).fetchone()
+        if row:
+            raw = row[0] if isinstance(row[0], list) else (json.loads(row[0]) if row[0] else [])
+            agents = [{"agent": a.get("agent"), "action": a.get("action"),
+                       "weight": a.get("weight"), "confidence": a.get("confidence"),
+                       "reasoning": a.get("reasoning")} for a in raw]
+            indicators = _d(row[1])
+            entry_reason = row[2]
+
+    if not agents and sig:
+        # Session detail pruned — fall back to the flat gate-time map, with the
+        # reasoning fields absent rather than invented.
+        agents = [{"agent": k, "action": v, "weight": None,
+                   "confidence": None, "reasoning": None}
+                  for k, v in sorted(sig.items())]
+
+    setup = classify_setup(indicators, entry_price) if indicators else None
+
+    # ── Price path between entry and exit ────────────────────────────────────
+    path: dict = {}
+    try:
+        from app.data.candle_store import read_bars
+        day = opened.astimezone(IST).date().isoformat() if opened else None
+        if day and entry_price:
+            bars = await asyncio.to_thread(read_bars, symbol, day, 60)
+            o_hhmm = entry_hhmm
+            c_hhmm = closed.astimezone(IST).strftime("%H:%M") if closed else None
+            window = [b for b in bars
+                      if (not o_hhmm or str(b.get("time", ""))[:5] >= o_hhmm)
+                      and (not c_hhmm or str(b.get("time", ""))[:5] <= c_hhmm)]
+            highs = [b["high"] for b in window if b.get("high") is not None]
+            lows = [b["low"] for b in window if b.get("low") is not None]
+            if highs and lows:
+                mfe = (max(highs) - entry_price) / entry_price * 100.0
+                mae = (min(lows) - entry_price) / entry_price * 100.0
+                path = {
+                    "bars": len(window),
+                    "best_pct": round(mfe, 3),      # max favourable excursion
+                    "worst_pct": round(mae, 3),     # max adverse excursion
+                    "ever_green": mfe > 0,
+                    # Did it hand back a gain it actually had?
+                    "gave_back_pct": (round(mfe - (pnl_pct or 0.0), 3)
+                                      if pnl_pct is not None and mfe > 0 else None),
+                }
+    except Exception as exc:
+        logger.debug("price path unavailable for %s: %s", trade_id, exc)
+
+    exit_reason = mc.get("exit_reason")
+    held = tr[7]
+    is_loss = pnl_pct is not None and pnl_pct < 0
+
+    # ── Plain-language cause, built from the path, not guessed ───────────────
+    causes: list[str] = []
+    if is_loss:
+        causes.append(_loss_reason(exit_reason, pnl_pct, held))
+        if path:
+            best = path["best_pct"]
+            if not path["ever_green"]:
+                causes.append(
+                    f"It never traded above the entry — best was {best}%. "
+                    "The entry was wrong from the first bar, so no exit rule could have saved it.")
+            elif best < _ROUND_TRIP_COST_PCT:
+                # The gate is the cost, not an arbitrary number: a gain smaller
+                # than the round trip was never bankable, so calling it "a move
+                # the exit failed to keep" blames the wrong half of the system.
+                causes.append(
+                    f"It only ever reached {best}%, below the {_ROUND_TRIP_COST_PCT}% "
+                    "round-trip cost, so there was never a gain that could have been "
+                    "banked. This is an entry that did not work, not an exit that let "
+                    f"one go; it then ran to {path['worst_pct']}%.")
+            elif path.get("gave_back_pct") and path["gave_back_pct"] > 0.3:
+                causes.append(
+                    f"It was up {best}% at best and gave back "
+                    f"{path['gave_back_pct']} points before exiting — the entry found a "
+                    "real move, the exit did not keep it.")
+            else:
+                causes.append(
+                    f"It reached {best}% at best and {path['worst_pct']}% at worst.")
+        if setup and SETUP_EDGE_PP.get(setup, 0) < 0:
+            est = "measured" if setup in SETUP_ESTABLISHED else "directional, not established"
+            causes.append(
+                f"The entry sits in '{setup}', a setup that returns "
+                f"{SETUP_EDGE_PP[setup]}pp versus the same day's other entries ({est}).")
+
+    baseline = await agent_culpability_baseline()
+    by_agent = {a["agent"]: a for a in baseline.get("agents", [])}
+    for a in agents:
+        b = by_agent.get(a["agent"]) or {}
+        a["baseline_verdict"] = b.get("verdict")
+        a["baseline_lift"] = b.get("lift")
+        a["baseline_t"] = b.get("t_stat")
+
+    voted_buy = [a["agent"] for a in agents if (a.get("action") or "").upper() == "BUY"]
+    return {
+        "trade_id": tr[0], "symbol": symbol, "action": tr[2],
+        "source": tr[14], "outcome": tr[15], "session_id": session_id,
+        "entry_price": entry_price, "exit_price": exit_price,
+        "pnl_pct": round(pnl_pct, 3) if pnl_pct is not None else None,
+        "pnl_abs": tr[6], "held_minutes": held,
+        "opened_at": str(opened) if opened else None,
+        "closed_at": str(closed) if closed else None,
+        "is_loss": is_loss,
+        "ensemble_confidence": tr[13],
+        "entry_reason": entry_reason,
+        "setup": setup,
+        "setup_edge_pp": SETUP_EDGE_PP.get(setup) if setup else None,
+        "setup_established": setup in SETUP_ESTABLISHED if setup else False,
+        "indicators": indicators,
+        "price_path": path,
+        "exit_reason": exit_reason,
+        "loss_reason": _loss_reason(exit_reason, pnl_pct, held) if is_loss else None,
+        "causes": causes,
+        "agents": agents,
+        "voted_buy": sorted(voted_buy),
+        "n_agents": len(agents),
+        "culprit_note": (
+            "Agent verdicts are corpus-wide and day-clustered; they say nothing "
+            "about this trade. A single trade cannot implicate an agent, and a "
+            "ranking taken from executed trades is biased by the gate that "
+            "allowed them."
+        ),
+    }
 
 
 _NARRATIVE_KEY = "ai_engine:session_narrative:{}"

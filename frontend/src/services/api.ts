@@ -1101,6 +1101,14 @@ class ApiService {
     return response.data;
   }
 
+  /** Why ONE trade ended the way it did: setup and indicators at entry, every
+   *  agent's vote with its stated reasoning, the price path between entry and
+   *  exit, and the exit that booked it. */
+  async tradePostmortem(tradeId: string): Promise<any> {
+    const response = await this.api.get(`/api/sessions/trade-postmortem/${tradeId}`);
+    return response.data;
+  }
+
   /** Corpus-wide per-agent BUY-lift. Not session-scoped. */
   async agentCulpability(): Promise<any> {
     const response = await this.api.get('/api/sessions/agent-culpability');

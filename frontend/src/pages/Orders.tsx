@@ -21,6 +21,8 @@ interface MarketContext {
 
 // NOTE: the axios response interceptor converts all snake_case API fields to
 // camelCase, so these interfaces (and every access below) use camelCase.
+import TradePostmortem from '../components/TradePostmortem';
+
 interface TradeRecord {
   tradeId: string;
   symbol: string;
@@ -239,6 +241,8 @@ function ExecutionModal({ trade, allTrades = [], onClose }: { trade: TradeRecord
   const [richAgents, setRichAgents] = useState<AgentDecision[]>([]);
   const [agentAcc, setAgentAcc]     = useState<Record<string, AgentAcc>>({});
   const [openAgent, setOpenAgent]   = useState<string | null>(null);
+  // "trace" is what the system did; "postmortem" is why it ended that way.
+  const [tab, setTab] = useState<'trace' | 'postmortem'>('trace');
   useEffect(() => {
     if (!sessionId) return;
     apiService.getTradeAgentDetail(sessionId)
@@ -273,7 +277,27 @@ function ExecutionModal({ trade, allTrades = [], onClose }: { trade: TradeRecord
           </button>
         </div>
 
+        {/* Tabs */}
+        <div style={{ display: 'flex', gap: 4, padding: '0 24px', borderBottom: '1px solid var(--nd-border)' }}>
+          {([['trace', 'Execution trace'], ['postmortem', trade.pnlPct != null && trade.pnlPct < 0 ? 'Why it lost' : 'Post-mortem']] as const).map(([k, lbl]) => (
+            <button key={k} onClick={() => setTab(k)}
+              style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '10px 12px', fontSize: 12.5,
+                fontWeight: tab === k ? 700 : 500,
+                color: tab === k ? 'var(--nd-accent)' : 'var(--nd-text-3)',
+                borderBottom: `2px solid ${tab === k ? 'var(--nd-accent)' : 'transparent'}`, marginBottom: -1 }}>
+              {lbl}
+            </button>
+          ))}
+        </div>
+
+        {tab === 'postmortem' && (
+          <div style={{ overflowY: 'auto', padding: '16px 24px 20px' }}>
+            <TradePostmortem tradeId={trade.tradeId} />
+          </div>
+        )}
+
         {/* Steps timeline */}
+        {tab === 'trace' && (
         <div style={{ overflowY: 'auto', padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: 0 }}>
 
           {/* Price chart with entry/exit markers */}
@@ -380,6 +404,7 @@ function ExecutionModal({ trade, allTrades = [], onClose }: { trade: TradeRecord
             </div>
           ))}
         </div>
+        )}
       </div>
     </div>
   );
