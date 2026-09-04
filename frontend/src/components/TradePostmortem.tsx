@@ -26,6 +26,23 @@ const ACTION_COLOR: Record<string, string> = {
   BUY: 'var(--nd-green)', SELL: 'var(--nd-red)', HOLD: 'var(--nd-text-3)',
 };
 
+/** Naming the half of the system at fault is the point of the panel. "Entry"
+ *  and "exit" are the only two that lead anywhere: one says stop taking this
+ *  kind of trade, the other says stop closing it like this. */
+const BLAME_LABEL: Record<string, string> = {
+  entry: 'THE ENTRY',
+  exit: 'THE EXIT',
+  unclear: 'NO SINGLE CAUSE',
+  unknown: 'NOT ENOUGH DATA',
+};
+
+const BLAME_COLOR: Record<string, string> = {
+  entry: 'var(--nd-red)',
+  exit: '#f59e0b',
+  unclear: 'var(--nd-text-3)',
+  unknown: 'var(--nd-text-3)',
+};
+
 const card: React.CSSProperties = {
   background: 'var(--nd-surface)',
   border: '1px solid var(--nd-border)',
@@ -80,15 +97,59 @@ const TradePostmortem: React.FC<{ tradeId: string }> = ({ tradeId }) => {
   if (!d) return <div style={{ fontSize: 12, color: 'var(--nd-text-3)', padding: 12 }}>Analysing…</div>;
 
   const path = d.pricePath ?? {};
+  const blame = d.blame ?? {};
+  const blameColor = BLAME_COLOR[blame.target] ?? 'var(--nd-text-3)';
   const agents: any[] = d.agents ?? [];
   const buyers = agents.filter(a => (a.action || '').toUpperCase() === 'BUY');
   const others = agents.filter(a => (a.action || '').toUpperCase() !== 'BUY');
 
   return (
     <div>
-      {/* ── The answer, first ── */}
+      {/* ── The verdict, first and unmissable ──
+          The previous version listed facts and left the reader to work out what
+          was at fault. The whole point of a post-mortem is to name it. */}
+      {blame.target && (
+        <div style={{ ...card, borderColor: `${blameColor}66`, background: `${blameColor}0f`, borderLeft: `3px solid ${blameColor}` }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: 0.6, color: blameColor }}>
+              BLAME: {BLAME_LABEL[blame.target] ?? blame.target.toUpperCase()}
+            </span>
+            {blame.hindsight && (
+              <span style={{ fontSize: 9, color: 'var(--nd-text-3)', border: '1px solid var(--nd-border)', borderRadius: 4, padding: '0 5px' }}>
+                with hindsight
+              </span>
+            )}
+          </div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--nd-text-1)', marginBottom: 6 }}>
+            {blame.headline}
+          </div>
+          <div style={{ fontSize: 12.5, color: 'var(--nd-text-2)', lineHeight: 1.6 }}>
+            {blame.detail}
+          </div>
+          {blame.contributing && (
+            <div style={{ fontSize: 12, color: 'var(--nd-text-3)', lineHeight: 1.55, marginTop: 8, paddingTop: 8, borderTop: '1px solid var(--nd-border)' }}>
+              <strong style={{ color: 'var(--nd-text-2)' }}>Also against it: </strong>{blame.contributing}
+            </div>
+          )}
+          {(blame.agentsImplicated ?? []).length > 0 && (
+            <div style={{ fontSize: 12, marginTop: 8, paddingTop: 8, borderTop: '1px solid var(--nd-border)' }}>
+              <span style={{ color: 'var(--nd-text-3)' }}>Voted to take this entry: </span>
+              {(blame.agentsImplicated as string[]).map(a => (
+                <span key={a} style={{ display: 'inline-block', background: `${blameColor}22`, color: blameColor, borderRadius: 4, padding: '1px 7px', marginRight: 5, fontWeight: 600, textTransform: 'capitalize' }}>{a}</span>
+              ))}
+              <div style={{ fontSize: 10.5, color: 'var(--nd-text-3)', marginTop: 5, lineHeight: 1.5 }}>
+                These agents argued for this specific entry. That is a fact about this trade —
+                it is not evidence any of them is systematically at fault. See the corpus
+                verdicts below.
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Supporting detail ── */}
       <div style={{ ...card, borderColor: d.isLoss ? 'var(--nd-red)55' : 'var(--nd-green)55' }}>
-        <div style={label}>{d.isLoss ? 'Why this trade lost' : 'How this trade closed'}</div>
+        <div style={label}>{d.isLoss ? 'What happened, step by step' : 'How this trade closed'}</div>
         {(d.causes ?? []).length > 0
           ? (d.causes as string[]).map((c, i) => (
             <div key={i} style={{ display: 'flex', gap: 8, fontSize: 12.5, color: 'var(--nd-text-1)', lineHeight: 1.55, marginBottom: 6 }}>

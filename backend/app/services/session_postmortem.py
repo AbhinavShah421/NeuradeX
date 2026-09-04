@@ -355,6 +355,13 @@ async def trade_postmortem(trade_id: str) -> dict:
             if highs and lows:
                 mfe = (max(highs) - entry_price) / entry_price * 100.0
                 mae = (min(lows) - entry_price) / entry_price * 100.0
+                # What the price did AFTER we were out. This is the only way to
+                # separate "the entry was wrong" from "the stop was too tight":
+                # both look like a loss, but only one of them was recoverable.
+                after = [b for b in bars if c_hhmm and str(b.get("time", ""))[:5] > c_hhmm]
+                after_highs = [b["high"] for b in after if b.get("high") is not None]
+                rebound = ((max(after_highs) - entry_price) / entry_price * 100.0
+                           if after_highs else None)
                 path = {
                     "bars": len(window),
                     "best_pct": round(mfe, 3),      # max favourable excursion
@@ -363,6 +370,12 @@ async def trade_postmortem(trade_id: str) -> dict:
                     # Did it hand back a gain it actually had?
                     "gave_back_pct": (round(mfe - (pnl_pct or 0.0), 3)
                                       if pnl_pct is not None and mfe > 0 else None),
+                    "bars_after_exit": len(after),
+                    "best_after_exit_pct": round(rebound, 3) if rebound is not None else None,
+                    # Hindsight, and labelled as such in the UI: would simply
+                    # holding have cleared the round trip?
+                    "recovered_after_exit": (rebound is not None
+                                             and rebound > _ROUND_TRIP_COST_PCT),
                 }
     except Exception as exc:
         logger.debug("price path unavailable for %s: %s", trade_id, exc)
@@ -404,6 +417,72 @@ async def trade_postmortem(trade_id: str) -> dict:
                 f"The entry sits in '{setup}', a setup that returns "
                 f"{SETUP_EDGE_PP[setup]}pp versus the same day's other entries ({est}).")
 
+    # ── Who is to blame ─────────────────────────────────────────────────────
+    # One target, in plain words, because "here are the facts, you decide" is
+    # what the panel already did and it left the reader to do the reasoning.
+    # The split that matters is entry vs exit, and the price path decides it:
+    #   never had a bankable gain      -> the ENTRY. No exit rule saves this.
+    #   had a real gain, ended down    -> the EXIT. The entry found the move.
+    #   lost, but recovered after out  -> the STOP. It was right, just too tight.
+    voted_buy_names = sorted(a["agent"] for a in agents
+                             if (a.get("action") or "").upper() == "BUY")
+    blame: dict = {}
+    if is_loss:
+        best = path.get("best_pct")
+        if not path:
+            blame = {"target": "unknown", "headline": "Not enough price history to attribute this loss",
+                     "detail": "The 1-minute bars for this day are not in the store, so how far the "
+                               "trade went in each direction cannot be reconstructed."}
+        elif path.get("recovered_after_exit"):
+            # Checked BEFORE the entry test, and for every exit rule rather than
+            # just stops. If the name went on to clear the round trip while we
+            # were out, the direction was right and the exit was early — calling
+            # that a bad entry blames the wrong half, whichever rule fired.
+            stopped = "stop" in (exit_reason or "").lower()
+            blame = {
+                "target": "exit",
+                "headline": "The stop was too tight" if stopped else "It was closed too early",
+                "detail": (
+                    f"We came out at {pnl_pct}%, and the price then reached "
+                    f"{path['best_after_exit_pct']}% above the entry over the following "
+                    f"{path['bars_after_exit']} minutes. The direction was right; the trade "
+                    "was not given room." if stopped else
+                    f"We came out at {pnl_pct}% on the {_loss_reason(exit_reason, pnl_pct, held)}, "
+                    f"and the price then reached {path['best_after_exit_pct']}% above the entry "
+                    f"over the following {path['bars_after_exit']} minutes. The entry was "
+                    "vindicated; the exit fired first."),
+                "hindsight": True,
+            }
+        elif best is not None and best < _ROUND_TRIP_COST_PCT:
+            blame = {
+                "target": "entry",
+                "headline": "The entry was wrong",
+                "detail": (f"It never got further than {best}% above the entry — less than the "
+                           f"{_ROUND_TRIP_COST_PCT}% it costs to round-trip a position. There was "
+                           "never a profit here to protect, so no exit rule could have rescued it."),
+                "agents_implicated": voted_buy_names,
+            }
+        elif path.get("gave_back_pct") and path["gave_back_pct"] > 0.3:
+            blame = {
+                "target": "exit",
+                "headline": "The exit gave back a real gain",
+                "detail": (f"It was up {best}% at best and still closed at {pnl_pct}% — "
+                           f"{path['gave_back_pct']} points handed back. The entry found the move; "
+                           "the exit did not keep it."),
+            }
+        else:
+            blame = {
+                "target": "unclear",
+                "headline": "No single cause stands out",
+                "detail": (f"It reached {best}% at best and {path.get('worst_pct')}% at worst, "
+                           "then closed near the middle. Small enough that this is the cost floor "
+                           "rather than a mistake."),
+            }
+        if setup and SETUP_EDGE_PP.get(setup, 0) < 0 and setup in SETUP_ESTABLISHED:
+            blame["contributing"] = (
+                f"The setup was '{setup}', which is measured at {SETUP_EDGE_PP[setup]}pp against "
+                "the same day's other entries — a cell known to do worse than average.")
+
     baseline = await agent_culpability_baseline()
     by_agent = {a["agent"]: a for a in baseline.get("agents", [])}
     for a in agents:
@@ -431,6 +510,7 @@ async def trade_postmortem(trade_id: str) -> dict:
         "price_path": path,
         "exit_reason": exit_reason,
         "loss_reason": _loss_reason(exit_reason, pnl_pct, held) if is_loss else None,
+        "blame": blame,
         "causes": causes,
         "agents": agents,
         "voted_buy": sorted(voted_buy),
