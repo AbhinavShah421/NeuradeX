@@ -90,10 +90,16 @@ async def agent_culpability(force: bool = False):
 
 
 @router.get("/{session_id}/postmortem")
-async def session_postmortem(session_id: str):
-    """Why this session's trades lost, and what the agents voted at each entry."""
+async def session_postmortem(session_id: str, narrative: bool = False,
+                             force_narrative: bool = False):
+    """Why this session's trades lost, and what the agents voted at each entry.
+
+    `narrative=true` adds an LLM write-up of the computed facts (cached 7 days;
+    `force_narrative=true` regenerates). It is off by default because it costs
+    an 8B call and the report is complete without it — the model narrates, it
+    does not judge."""
     from app.services.session_postmortem import session_postmortem as _pm
-    return await _pm(session_id)
+    return await _pm(session_id, narrative=narrative, force_narrative=force_narrative)
 
 
 @router.get("/{session_id}")

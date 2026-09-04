@@ -258,7 +258,180 @@ def _verdict(lift: float, t: Optional[float]) -> str:
     return "no signal"
 
 
-async def session_postmortem(session_id: str) -> dict:
+_NARRATIVE_KEY = "ai_engine:session_narrative:{}"
+_NARRATIVE_TTL = 7 * 24 * 3600
+
+_NARRATIVE_SYSTEM = (
+    "You are a trading analyst writing a short post-mortem for one session. "
+    "You are given facts that have already been computed and verified. "
+    "Explain them. Do NOT compute, estimate or invent any number, and do NOT "
+    "decide which agent is at fault — the culpability verdicts are given to "
+    "you and are the only ones you may state.\n"
+    "Use the supplied glossary for every technical term; do not infer what a "
+    "term means from its name.\n"
+    "The agent verdicts are corpus-wide statistics. NEVER claim an agent "
+    "caused, worsened or softened anything that happened in THIS session — "
+    "the verdicts say nothing about individual trades.\n"
+    "If a field is null or a note says something was not retained, you must "
+    "say it is unknown. Do not reason about it, and do not conclude anything "
+    "about it either way.\n"
+    "If the facts do not support a conclusion, say so plainly. Prefer 'the "
+    "evidence does not say' over a plausible guess. Write 4-8 sentences of "
+    "plain prose, no headings, no bullet points, no markdown."
+)
+
+# The model does not get to infer what these words mean. Left to itself it read
+# "protective" as "made this session's losses less severe" — a causal claim
+# about individual trades from a corpus-wide rate difference, which is exactly
+# the reasoning the measurement is built to prevent.
+_GLOSSARY = {
+    "setup": "A rule-based label for market conditions at entry. Never uses the outcome.",
+    "setup_edge_vs_other_entries_pp": (
+        "How this setup performed against the SAME DAY's other entries, in "
+        "percentage points, averaged across days. Positive means it lost LESS "
+        "than average. It never means profitable."),
+    "setup_edge_is_statistically_established": (
+        "True only if the day-clustered t-statistic clears correction for "
+        "multiple testing. False means directional at best — do not treat it "
+        "as a finding."),
+    "verdict 'culprit'": (
+        "Across the whole corpus this agent votes BUY more often before losing "
+        "decisions than before winning ones. It is a statistical tendency over "
+        "many days, NOT a statement that it caused any particular trade."),
+    "verdict 'protective'": (
+        "Across the whole corpus this agent votes BUY more often before WINNING "
+        "decisions than before losing ones, i.e. its BUY vote discriminates. It "
+        "does NOT mean the agent reduced, softened or limited any loss, and it "
+        "says nothing about this session's trades."),
+    "verdict 'leans ...'": (
+        "Directional only, below the significance bar. Report it as not "
+        "established."),
+    "is_statistically_established": (
+        "Whether this verdict clears correction for multiple testing. Use this "
+        "field verbatim — do NOT judge significance yourself from the t value. "
+        "A verdict of 'culprit' or 'protective' is established; anything "
+        "'leans ...' is not."),
+    "how_it_exited": "The mechanical exit rule that closed the trade. A fact, not a diagnosis.",
+}
+
+
+def _narrative_facts(report: dict) -> dict:
+    """The strictly-factual subset handed to the model.
+
+    Everything here was computed by rules or by a day-clustered measurement.
+    The model gets no raw prices, no P&L it could total up differently, and no
+    invitation to rank the agents — only the verdicts already established.
+    """
+    trades = []
+    for t in report.get("trades", []):
+        trades.append({
+            "outcome": "loss" if t.get("is_loss") else "win",
+            "pnl_pct": t.get("pnl_pct"),
+            "setup": t.get("setup"),
+            "setup_note": t.get("setup_note"),
+            "setup_edge_vs_other_entries_pp": t.get("setup_edge_pp"),
+            "setup_edge_is_statistically_established": t.get("setup_established"),
+            "how_it_exited": t.get("loss_reason"),
+            "agents_that_voted_buy": t.get("voted_buy"),
+        })
+    return {
+        "glossary": _GLOSSARY,
+        "symbol": report.get("symbol"),
+        "date": report.get("date"),
+        "n_trades": report.get("n_trades"),
+        "n_losses": report.get("n_losses"),
+        "trades": trades,
+        # `is_statistically_established` is stated, not implied by the t. Asked
+        # to judge significance itself the model got it backwards, calling
+        # meanrev (t=-3.15, clears correction) "not significant" while the
+        # taxonomy already encodes the answer in the verdict string.
+        "agent_culpability_verdicts": [
+            {"agent": a["agent"], "verdict": a["verdict"],
+             "lift": a["baseline_lift"], "t": a["baseline_t"],
+             "is_statistically_established":
+                 a["verdict"] in ("culprit", "protective")}
+            for a in report.get("agent_attribution", [])
+            if a.get("verdict") not in (None, "no signal")
+        ],
+        "overall_culprit_finding": report.get("culprit_verdict"),
+        "context_every_reader_needs": (
+            "Every setup edge below is RELATIVE to the same day's other entries. "
+            "All absolute cells are negative and already net of the 0.125% "
+            "round-trip cost, so a positive edge means 'lost less', never "
+            "'profitable'. A single session cannot establish which agent is at "
+            "fault; the verdicts given are measured across the whole corpus."
+        ),
+    }
+
+
+async def session_narrative(report: dict, force: bool = False) -> Optional[str]:
+    """LLM prose over the computed facts. Never on the trading path.
+
+    The model is deliberately downstream of every judgement. Measured
+    2026-09-03/04, this 8B put 74% of trades into a single setup tag where the
+    deterministic rule spread the same corpus across nine, and its free-text
+    loss labels fragmented into paraphrases ("chased" vs "chasing" momentum
+    counted as two failure modes). It is poor at deciding and fine at
+    explaining, so it is given the decisions and asked only to narrate them.
+
+    Returns None when the LLM is off or unreachable — the post-mortem is fully
+    usable without it.
+    """
+    from app.utils.redis_client import cache_get, cache_set
+    from app.utils.llm_client import llm_chat
+
+    sid = report.get("session_id") or ""
+    key = _NARRATIVE_KEY.format(sid)
+    if not force:
+        try:
+            cached = await cache_get(key)
+            if cached:
+                return cached
+        except Exception:
+            logger.debug("narrative cache read failed", exc_info=True)
+
+    if not report.get("trades"):
+        return None
+
+    facts = _narrative_facts(report)
+    # Only ask about setups when at least one trade has one. Left in
+    # unconditionally, the "where setup is not null" clause invited a vacuous
+    # sentence about a non-existent trade on sessions where none were retained.
+    has_setup = any(t.get("setup") for t in facts["trades"])
+    setup_ask = (
+        " Say whether each trade's setup sits in a cell measured as worse than "
+        "average."
+        if has_setup else
+        " No setup was retained for this session, so state that the entry "
+        "conditions are unknown and draw no conclusion about them."
+    )
+    prompt = (
+        "Write the post-mortem for this trading session using ONLY these facts.\n\n"
+        + json.dumps(facts, indent=2, default=str)
+        + "\n\nCover: what the session did and how each losing trade actually "
+          "ended." + setup_ask +
+        " Then state what the agent evidence does and does not establish, "
+        "remembering it is corpus-wide and says nothing about these particular "
+        "trades. State plainly if no agent is implicated."
+    )
+    try:
+        txt = await llm_chat(prompt, system=_NARRATIVE_SYSTEM,
+                             temperature=0.2, max_tokens=520, timeout=60.0)
+    except Exception:
+        logger.debug("session narrative call failed for %s", sid, exc_info=True)
+        return None
+    if not txt or not txt.strip():
+        return None
+    txt = txt.strip()
+    try:
+        await cache_set(key, txt, expire=_NARRATIVE_TTL)
+    except Exception:
+        logger.debug("narrative cache write failed", exc_info=True)
+    return txt
+
+
+async def session_postmortem(session_id: str, narrative: bool = False,
+                             force_narrative: bool = False) -> dict:
     """Full post-mortem for one session."""
     from sqlalchemy import text
     from app.database.postgres import engine
@@ -410,7 +583,7 @@ async def session_postmortem(session_id: str) -> dict:
         })
 
     culprits = [a for a in attribution if a["verdict"] == "culprit"]
-    return {
+    report = {
         "session_id": session_id,
         "symbol": (meta[0] if meta else None) or (fallback[0] if fallback else None),
         "mode": meta[1] if meta else None,
@@ -429,3 +602,14 @@ async def session_postmortem(session_id: str) -> dict:
         ),
         "method": baseline.get("method"),
     }
+
+    if narrative:
+        # Narrative last, and additive: it reads the finished report and cannot
+        # change a single field of it.
+        report["narrative"] = await session_narrative(report, force=force_narrative)
+        report["narrative_note"] = (
+            "LLM prose over the computed facts above. It assigns no tag, ranks "
+            "no agent and produces no number — those are all measured. Absent "
+            "when the LLM is unavailable."
+        )
+    return report

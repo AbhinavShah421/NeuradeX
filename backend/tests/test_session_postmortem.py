@@ -82,6 +82,69 @@ def test_only_a_bonferroni_clearing_t_names_a_culprit():
     assert _verdict(0.0, None) == "no signal"
 
 
+def _report():
+    return {
+        "session_id": "abc", "symbol": "ACME", "date": "2026-09-04",
+        "n_trades": 2, "n_losses": 2,
+        "trades": [
+            {"is_loss": True, "pnl_pct": -0.9, "setup": "strength_drift",
+             "setup_edge_pp": -0.072, "setup_established": True,
+             "loss_reason": "stopped out", "voted_buy": ["technical"],
+             "entry_price": 101.5, "exit_price": 99.2, "indicators": {"rsi": 60}},
+        ],
+        "agent_attribution": [
+            {"agent": "technical", "verdict": "leans culprit (not significant)",
+             "baseline_lift": 0.0136, "baseline_t": 1.83},
+            {"agent": "memory", "verdict": "protective",
+             "baseline_lift": -0.0186, "baseline_t": -3.48},
+            {"agent": "rl", "verdict": "no signal",
+             "baseline_lift": -0.0017, "baseline_t": -0.42},
+        ],
+        "culprit_verdict": "No agent is a statistically established culprit.",
+    }
+
+
+def test_narrative_facts_state_significance_rather_than_implying_it():
+    # Asked to judge significance from a raw t, the 8B got it backwards —
+    # calling memory (t=-3.48, clears correction) "not significant". The flag
+    # is now supplied, so the model never has to infer it.
+    from app.services.session_postmortem import _narrative_facts
+
+    verdicts = {v["agent"]: v for v in _narrative_facts(_report())["agent_culpability_verdicts"]}
+    assert verdicts["memory"]["is_statistically_established"] is True
+    assert verdicts["technical"]["is_statistically_established"] is False
+    # "no signal" agents are not worth prose at all.
+    assert "rl" not in verdicts
+
+
+def test_narrative_facts_define_every_term_they_use():
+    # Left to infer, the model read "protective" as "made this session's losses
+    # less severe" — a causal claim about individual trades from a corpus-wide
+    # rate difference. Every loaded term must ship with its meaning.
+    from app.services.session_postmortem import _narrative_facts
+
+    facts = _narrative_facts(_report())
+    g = facts["glossary"]
+    assert "verdict 'protective'" in g and "verdict 'culprit'" in g
+    assert "does NOT mean" in g["verdict 'protective'"]
+    # A positive edge means "lost less", and the glossary has to say so — every
+    # absolute cell is negative and already net of costs.
+    assert "never means profitable" in g["setup_edge_vs_other_entries_pp"]
+    assert "corpus" in facts["context_every_reader_needs"]
+
+
+def test_narrative_facts_withhold_raw_prices_the_model_could_recompute():
+    # The model is told never to compute a number. Not handing it entry/exit
+    # prices removes the temptation and the possibility.
+    import json as _json
+    from app.services.session_postmortem import _narrative_facts
+
+    blob = _json.dumps(_narrative_facts(_report()))
+    assert "101.5" not in blob and "99.2" not in blob
+    for t in _narrative_facts(_report())["trades"]:
+        assert "entry_price" not in t and "exit_price" not in t
+
+
 def test_loss_reason_reports_the_mechanism_not_a_theory():
     assert "stopped out" in _loss_reason("stop_loss", -1.5, 20)
     assert "stagnation" in _loss_reason("stagnation", -0.3, 60)
