@@ -190,7 +190,15 @@ def _backtest_allowed() -> bool:
     return (m < BT_MORNING_CUTOFF) or (m >= BT_EVENING_RESUME)
 
 
-def _prev_trading_day(date_str: str) -> str:
+def _prev_trading_day(date_str: str | None) -> str:
+    # Defensive: a None or malformed cursor used to raise straight out of
+    # _do_backtest_step, and because the loop retries every BT_POLL seconds
+    # without ever persisting state, one bad value crash-looped the backtest
+    # walk for eleven days. Degrading to "yesterday" keeps the walk moving and
+    # leaves the mistake visible in the log rather than in a silent stall.
+    if not date_str:
+        logger.warning("_prev_trading_day called with %r — falling back to today", date_str)
+        date_str = _today()
     d = datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=1)
     while d.weekday() >= 5:
         d -= timedelta(days=1)
@@ -684,31 +692,48 @@ async def _do_backtest_step() -> None:
         if pending:
             await _save_bt_state(st)
             return
-
-        # Batch done — start the next one if symbols remain.
-        if syms_remaining:
-            ids = await _start_batch(syms_remaining, cursor)
-            remaining = syms_remaining[bs:]
-            batch_idx += 1
-            total = st.get("queue_total", len(_BT_UNIVERSE))
-            n_batches = -(-total // bs)
-            st.update({
-                "queue": ids, "queue_pending": len(ids),
-                "symbols_remaining": remaining, "batch_idx": batch_idx,
-            })
-            await _save_bt_state(st)
-            logger.info(
-                "backtest %s — batch %d/%d started (%d sessions, %d remaining)",
-                cursor, batch_idx, n_batches, len(ids), len(remaining),
-            )
-            return
-
-        # All batches for this date done → advance cursor.
         st["queue"] = []
         st["queue_pending"] = 0
 
+    # ── No live batch, symbols still pending → start the next batch ───────────
+    # This used to be nested inside `if queue:`, so it was only reachable when a
+    # batch finished on its own. The morning cutoff also empties `queue` (via
+    # _stop_backtest_queue) while leaving `symbols_remaining` populated, and that
+    # state fell straight through to the "day complete" branch below with
+    # queue_date=None — crashing the loop every 15s, all evening, from
+    # 2026-08-21 until 2026-09-01. Resuming here is also the correct behaviour
+    # on its own terms: a day interrupted at batch 2 of 3 must finish its
+    # symbols, not be written off as a completed day.
+    if syms_remaining:
+        day = st.get("queue_date") or cursor
+        ids = await _start_batch(syms_remaining, day)
+        remaining = syms_remaining[bs:]
+        if not ids:
+            # Nothing would start (no data for these symbols on this date).
+            # Drop them rather than spin — the day-complete branch takes over.
+            logger.warning("backtest %s — no sessions started for %d symbols, dropping",
+                           day, len(syms_remaining))
+            st["symbols_remaining"] = []
+            await _save_bt_state(st)
+            return
+        batch_idx += 1
+        total = st.get("queue_total", len(_BT_UNIVERSE))
+        n_batches = -(-total // bs)
+        st.update({
+            "queue": ids, "queue_date": day, "queue_pending": len(ids),
+            "symbols_remaining": remaining, "batch_idx": batch_idx,
+        })
+        await _save_bt_state(st)
+        logger.info(
+            "backtest %s — batch %d/%d started (%d sessions, %d remaining)",
+            day, batch_idx, n_batches, len(ids), len(remaining),
+        )
+        return
+
     # ── All batches complete → step back to previous trading day ──────────────
-    done_date = st.get("queue_date", cursor)
+    # `.get(key, default)` is not enough: _stop_backtest_queue writes an explicit
+    # None, and an existing key never falls back to the default.
+    done_date = st.get("queue_date") or cursor
     days_back = st.get("days_back", 0) + 1
     next_cursor = _prev_trading_day(done_date)
     if days_back >= BT_DAYS_BACK:
