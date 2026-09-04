@@ -616,23 +616,85 @@ async def scan_status():
 
 _ACTIVE_LESSONS_KEY = "ai_engine:active_lessons"
 
-_POSTMORTEM_DDL = """
-CREATE TABLE IF NOT EXISTS trade_postmortems (
-    id            SERIAL PRIMARY KEY,
-    trade_key     TEXT UNIQUE,
-    symbol        TEXT,
-    action        TEXT,
-    source        TEXT,
-    pnl_pct       DOUBLE PRECISION,
-    root_cause    TEXT,
-    failure_mode  TEXT,
-    factors       JSONB,
-    lesson        TEXT,
-    avoid_when    TEXT,
-    confidence    DOUBLE PRECISION,
-    created_at    TIMESTAMPTZ DEFAULT NOW()
-);
-"""
+# asyncpg prepares every statement, so a multi-statement string is rejected —
+# these are executed one at a time by _ensure_postmortem_table().
+_POSTMORTEM_DDL: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS trade_postmortems (
+        id            SERIAL PRIMARY KEY,
+        trade_key     TEXT UNIQUE,
+        symbol        TEXT,
+        action        TEXT,
+        source        TEXT,
+        pnl_pct       DOUBLE PRECISION,
+        root_cause    TEXT,
+        failure_mode  TEXT,
+        factors       JSONB,
+        lesson        TEXT,
+        avoid_when    TEXT,
+        confidence    DOUBLE PRECISION,
+        created_at    TIMESTAMPTZ DEFAULT NOW()
+    )
+    """,
+    "ALTER TABLE trade_postmortems ADD COLUMN IF NOT EXISTS setup_tag TEXT",
+    "ALTER TABLE trade_postmortems ADD COLUMN IF NOT EXISTS is_win BOOLEAN",
+    "CREATE INDEX IF NOT EXISTS idx_postmortems_tag ON trade_postmortems (setup_tag, is_win)",
+)
+
+
+async def _ensure_postmortem_table(conn) -> None:
+    from sqlalchemy import text
+    for stmt in _POSTMORTEM_DDL:
+        await conn.execute(text(stmt))
+
+# ── Blinded setup taxonomy ───────────────────────────────────────────────────
+# Until 2026-09-03 the only label on a trade was `failure_mode`: free text, from
+# an LLM that had been told "this trade LOST money, explain why", applied ONLY
+# to losing trades, and aggregated by `COUNT(*) DESC`. That cannot produce a
+# usable lesson, for two independent reasons.
+#
+# 1. No control group. 240 of 294 losers carried "chased momentum into
+#    resistance" or "ignored bearish regime" — but winners were never labelled,
+#    so nothing could reveal whether those phrases describe winners just as
+#    often. Ranking by frequency-among-losers is a base-rate error, and it is
+#    the same selection-on-outcome trap `review_rejections` already documents.
+# 2. Free text fragments. "chased momentum into resistance" (130) and
+#    "chasing momentum into resistance" (12) are one mode split by tense, and
+#    three more paraphrases of "chasing a trend without considering market
+#    context" each held their own row — so six of the twelve lesson slots were
+#    restatements of two ideas, and the counts driving the ranking were wrong.
+#
+# The fix is a tag that is (a) drawn from a CLOSED list, so it aggregates, and
+# (b) assigned BLIND — from entry-time evidence only, with no P&L, exit price,
+# hold time or outcome word anywhere in the prompt — so the same tagger runs
+# over winners and losers and the two are actually comparable. Lessons then
+# rank by LIFT (rate among losers minus rate among winners), which is the only
+# form of this that can be wrong in a detectable way.
+#
+# Keep this list short, mutually exclusive, and decidable from entry evidence.
+# Adding a tag resets the comparison for that tag only; renaming one silently
+# splits its history, so treat these strings as stable identifiers.
+_SETUP_TAGS: tuple[str, ...] = (
+    "momentum_into_resistance",   # buying strength into an overhead level
+    "counter_regime",             # long while the broad market regime is bearish
+    "overbought_entry",           # RSI stretched at entry
+    "oversold_bounce",            # buying a washed-out reading
+    "range_breakout",             # entry on a break of a established range
+    "pullback_in_trend",          # buying a dip inside an established uptrend
+    "low_volatility_drift",       # nothing much happening either way
+    "gap_or_news_driven",         # entry dominated by a gap / event move
+    "mean_reversion_fade",        # fading an extended move
+    "no_clear_setup",             # evidence does not support any of the above
+)
+
+# A tag needs this many tagged trades before it can appear at all, and BOTH
+# classes need this many overall before any lift is quoted. These are guards
+# against the obvious failure of the new design — reading a lift off three
+# trades — not a claim that clearing them makes a lesson significant. Given
+# day-clustering ([feature-edge-audit-aug11]) even a cleared bar is weak
+# evidence; the numbers travel with the lesson so that stays visible.
+_LESSON_MIN_SAMPLES = 8
+_LESSON_MIN_CLASS = 25
 
 
 def _trade_key(t: dict) -> str:
@@ -709,6 +771,106 @@ Respond with ONLY valid JSON:
     return parsed if parsed and parsed.get("root_cause") else None
 
 
+# Entry-time keys of `market_context` that may reach the blinded tagger.
+#
+# An ALLOW-list, not a block-list, and that distinction is the whole point.
+# The first version of this passed `market_context` through wholesale, having
+# checked it against a synthetic fixture — while the real dict shipped by the
+# feedback-service carries `exit_reason` and `held_minutes` on 49 of every 50
+# trades. "exit_reason: stop_loss" states the outcome outright, so the tagger
+# was not blind at all and the first 23 tags had to be thrown away. A block-list
+# would have had the same hole the next time a field was added upstream.
+#
+# Adding a key here is a decision that it was knowable AT ENTRY. If unsure,
+# leave it out: a thinner prompt costs discrimination, a leaky one costs the
+# entire experiment.
+_ENTRY_CONTEXT_KEYS: frozenset[str] = frozenset({
+    "rsi", "vwap", "regime", "market_regime", "momentum_pct", "mom5",
+    "sma5", "sma20", "atr", "volume_ratio", "gap_pct", "day_structure",
+})
+
+
+def _entry_evidence(t: dict) -> dict:
+    """Exactly the fields that existed BEFORE the trade resolved.
+
+    The whole validity of the winners control rests on this function. Anything
+    that leaks the outcome — exit_price, pnl_pct, duration_minutes, exit_reason,
+    held_minutes, the word 'lost' — turns the tag back into a restatement of the
+    result, which is the defect being fixed. See [llm-reviewer-ignores-evidence]:
+    this 8B tracks prompt framing far more reliably than it tracks evidence, so
+    framing is the thing that must be identical across the two classes.
+    """
+    mc = t.get("market_context") or {}
+    return {
+        "symbol": t.get("symbol"),
+        "action": t.get("action"),
+        "entry_price": t.get("entry_price"),
+        "market_context": {k: v for k, v in mc.items() if k in _ENTRY_CONTEXT_KEYS},
+        "agent_signals": t.get("agent_signals") or {},
+        "ensemble_confidence": t.get("ensemble_confidence"),
+    }
+
+
+def _rule_setup_tag(t: dict) -> str:
+    """Deterministic tag when the LLM is unavailable or returns nonsense.
+
+    Uses the same entry-only evidence, so a run that falls back mid-way does
+    not bias one class relative to the other.
+    """
+    mc = t.get("market_context") or {}
+    rsi = mc.get("rsi")
+    regime = mc.get("market_regime") or mc.get("regime")
+    mom = mc.get("momentum_pct") if mc.get("momentum_pct") is not None else mc.get("mom5")
+    if regime == "bearish":
+        return "counter_regime"
+    if isinstance(rsi, (int, float)):
+        if rsi > 70:
+            return "overbought_entry"
+        if rsi < 30:
+            return "oversold_bounce"
+    if isinstance(mom, (int, float)):
+        if mom > 0.5:
+            return "momentum_into_resistance"
+        if mom < -0.5:
+            return "mean_reversion_fade"
+        return "low_volatility_drift"
+    return "no_clear_setup"
+
+
+async def _llm_setup_tag(t: dict) -> str:
+    """Tag the SETUP from entry evidence only, blind to how the trade resolved."""
+    import json as _json
+    from app.utils.llm_client import llm_chat
+
+    ev = _entry_evidence(t)
+    prompt = f"""Classify the SETUP of a stock trade at the moment it was entered.
+You are shown only what was known at entry. Do not speculate about the result.
+
+Symbol: {ev['symbol']} · Direction: {ev['action']} · Entry price: {ev['entry_price']}
+Ensemble confidence at entry: {ev['ensemble_confidence']}
+Market context at entry: {_json.dumps(ev['market_context'])[:700]}
+Agent signals at entry: {_json.dumps(ev['agent_signals'])[:700]}
+
+Choose EXACTLY ONE tag from this list, the one that best describes the setup:
+{chr(10).join('  - ' + x for x in _SETUP_TAGS)}
+
+Respond with ONLY valid JSON:
+{{"setup_tag": "<one tag from the list above>", "confidence": number 0..1}}"""
+    try:
+        txt = await llm_chat(
+            prompt,
+            system="You classify trade setups from entry-time evidence. Output only valid JSON.",
+            temperature=0.0, max_tokens=120, timeout=30.0)
+    except Exception:
+        logger.debug("LLM setup tag failed for %s", t.get("symbol"), exc_info=True)
+        return _rule_setup_tag(t)
+    parsed = _extract_json(txt) or {}
+    tag = str(parsed.get("setup_tag") or "").strip().lower().replace(" ", "_")
+    # A tag outside the closed list is exactly the fragmentation this replaces,
+    # so it is rejected rather than stored.
+    return tag if tag in _SETUP_TAGS else _rule_setup_tag(t)
+
+
 async def _refresh_active_lessons() -> list[dict]:
     """Aggregate stored post-mortems into ranked lessons and cache a compact text
     version for the decision prompts."""
@@ -717,14 +879,44 @@ async def _refresh_active_lessons() -> list[dict]:
     lessons: list[dict] = []
     try:
         async with engine.begin() as conn:
-            await conn.execute(text(_POSTMORTEM_DDL))
+            await _ensure_postmortem_table(conn)
+            # Rank by LIFT, not frequency. `loss_rate - win_rate` asks the only
+            # question a lesson can act on: does this setup show up MORE among
+            # losers than among winners? A tag that is common in both is common,
+            # not informative — and under the old COUNT(*) ordering it went
+            # straight to the top of the prompt.
             rows = (await conn.execute(text("""
-                SELECT failure_mode, COUNT(*) AS n, AVG(pnl_pct) AS avg_loss,
-                       MAX(lesson) AS lesson, MAX(avoid_when) AS avoid_when
-                FROM trade_postmortems
-                WHERE failure_mode IS NOT NULL AND failure_mode <> ''
-                GROUP BY failure_mode ORDER BY n DESC, avg_loss ASC LIMIT 12
-            """))).fetchall()
+                WITH tagged AS (
+                    SELECT setup_tag, is_win, pnl_pct
+                    FROM trade_postmortems
+                    WHERE setup_tag IS NOT NULL AND is_win IS NOT NULL
+                ), totals AS (
+                    SELECT COUNT(*) FILTER (WHERE NOT is_win) AS n_loss,
+                           COUNT(*) FILTER (WHERE is_win)     AS n_win
+                    FROM tagged
+                )
+                SELECT t.setup_tag,
+                       COUNT(*) FILTER (WHERE NOT t.is_win)                 AS losses,
+                       COUNT(*) FILTER (WHERE t.is_win)                     AS wins,
+                       AVG(t.pnl_pct) FILTER (WHERE NOT t.is_win)           AS avg_loss,
+                       CASE WHEN totals.n_loss > 0
+                            THEN COUNT(*) FILTER (WHERE NOT t.is_win)::float / totals.n_loss
+                            ELSE 0 END                                      AS loss_rate,
+                       CASE WHEN totals.n_win > 0
+                            THEN COUNT(*) FILTER (WHERE t.is_win)::float / totals.n_win
+                            ELSE 0 END                                      AS win_rate,
+                       totals.n_loss, totals.n_win
+                FROM tagged t CROSS JOIN totals
+                GROUP BY t.setup_tag, totals.n_loss, totals.n_win
+                HAVING COUNT(*) >= :min_n
+                ORDER BY (CASE WHEN totals.n_loss > 0
+                               THEN COUNT(*) FILTER (WHERE NOT t.is_win)::float / totals.n_loss
+                               ELSE 0 END)
+                       - (CASE WHEN totals.n_win > 0
+                               THEN COUNT(*) FILTER (WHERE t.is_win)::float / totals.n_win
+                               ELSE 0 END) DESC
+                LIMIT 12
+            """), {"min_n": _LESSON_MIN_SAMPLES})).fetchall()
         for r in rows:
             # pnl_pct is stored as a FRACTION here (it is copied straight from
             # the feedback-service, which reports trade_records.pnl_pct — e.g.
@@ -732,33 +924,61 @@ async def _refresh_active_lessons() -> list[dict]:
             # every lesson read "avg -0.0%", so the decision prompts were told
             # each past mistake had cost nothing. Convert to percent first.
             lessons.append({
-                "failure_mode": r[0], "occurrences": int(r[1]),
-                "avg_loss_pct": round(float(r[2] or 0) * 100.0, 2),
-                "lesson": r[3], "avoid_when": r[4],
+                "setup_tag": r[0], "losses": int(r[1]), "wins": int(r[2]),
+                "avg_loss_pct": round(float(r[3] or 0) * 100.0, 2),
+                "loss_rate": round(float(r[4]), 3), "win_rate": round(float(r[5]), 3),
+                "lift": round(float(r[4]) - float(r[5]), 3),
+                "n_loss_total": int(r[6]), "n_win_total": int(r[7]),
             })
     except Exception as exc:
         logger.warning("lessons aggregation failed: %s", exc)
     try:
         from app.utils.redis_client import cache_set
-        if lessons:
-            txt = "LESSONS FROM PAST LOSING TRADES (avoid repeating these):\n" + "\n".join(
-                f"- {l['failure_mode']} ({l['occurrences']}× · avg {l['avg_loss_pct']}%): {l.get('avoid_when') or l.get('lesson') or ''}"
-                for l in lessons[:8])
-            await cache_set(_ACTIVE_LESSONS_KEY, txt, expire=86400 * 14)
+        # Only tags that are genuinely OVER-represented among losers reach the
+        # prompt, and the control counts travel with them so a reader (human or
+        # model) can see how thin the evidence is. If nothing has positive lift
+        # the honest cache entry is an empty one — the previous version always
+        # had twelve confident-sounding lessons to offer, no matter what.
+        useful = [l for l in lessons
+                  if l["lift"] > 0 and min(l["n_loss_total"], l["n_win_total"]) >= _LESSON_MIN_CLASS]
+        if useful:
+            txt = ("SETUPS OVER-REPRESENTED IN LOSING TRADES (tagged blind to outcome; "
+                   "lift = share of losers minus share of winners):\n" + "\n".join(
+                       f"- {l['setup_tag']}: lift +{l['lift']:.2f} "
+                       f"({l['losses']}/{l['n_loss_total']} losers vs {l['wins']}/{l['n_win_total']} winners"
+                       f" · avg {l['avg_loss_pct']}% when it lost)"
+                       for l in useful[:8]))
+        else:
+            txt = ("No setup tag is yet over-represented in losing trades at the "
+                   "required sample size — treat past-loss patterns as unproven.")
+        await cache_set(_ACTIVE_LESSONS_KEY, txt, expire=86400 * 14)
     except Exception:
         logger.debug("Failed to persist active lessons cache", exc_info=True)
     return lessons
 
 
+def _is_win(t: dict) -> bool:
+    if t.get("outcome") in ("WIN", "LOSS"):
+        return t["outcome"] == "WIN"
+    return float(t.get("pnl_pct") or 0.0) > 0
+
+
 async def loss_learning_run(limit: int = 60, max_new: int = 15):
-    """Analyse recent losing trades that don't yet have a post-mortem, store the
-    AI explanations, and refresh the aggregated lessons."""
+    """Tag recent trades by setup and post-mortem the losers, then refresh the
+    aggregated lessons.
+
+    Both classes are sampled. Until 2026-09-03 only losers were, and the
+    lessons were ranked by how often a failure_mode appeared among them — which
+    cannot distinguish "this setup loses" from "this setup is common". Winners
+    get the same blinded setup tag and no narrative (there is no failure to
+    explain); losers get both. `_refresh_active_lessons` then ranks by lift.
+    """
     import httpx, json as _json
     from sqlalchemy import text
     from app.database.postgres import engine
     from app.config import settings
 
-    # 1. Pull losing trades from the feedback-service.
+    # 1. Pull recent closed trades from the feedback-service.
     try:
         async with httpx.AsyncClient(timeout=10.0) as c:
             r = await c.get(f"{settings.FEEDBACK_SERVICE_URL}/trades", params={"limit": limit})
@@ -766,49 +986,67 @@ async def loss_learning_run(limit: int = 60, max_new: int = 15):
     except Exception as exc:
         logger.warning("loss-learning: could not read feedback trades: %s", exc)
         trades = []
-    losses = [t for t in trades
-              if t.get("outcome") == "LOSS" or (t.get("pnl_pct") is not None and float(t.get("pnl_pct")) < 0)]
+    resolved = [t for t in trades if t.get("outcome") in ("WIN", "LOSS") or t.get("pnl_pct") is not None]
+    losses = [t for t in resolved if not _is_win(t)]
+    wins = [t for t in resolved if _is_win(t)]
 
-    analyzed = 0
+    # Interleave so a run that hits max_new part-way through does not fill the
+    # table with one class. The win rate is ~1:2, so alternating drains the
+    # smaller class first and then continues with losers — still balanced far
+    # better than taking either list in order.
+    queue: list[dict] = []
+    for i in range(max(len(losses), len(wins))):
+        if i < len(losses):
+            queue.append(losses[i])
+        if i < len(wins):
+            queue.append(wins[i])
+
+    analyzed = tagged_wins = tagged_losses = 0
     try:
         async with engine.begin() as conn:
-            await conn.execute(text(_POSTMORTEM_DDL))
-            existing = {row[0] for row in (await conn.execute(text("SELECT trade_key FROM trade_postmortems"))).fetchall()}
-            for t in losses:
+            await _ensure_postmortem_table(conn)
+            existing = {row[0] for row in (await conn.execute(
+                text("SELECT trade_key FROM trade_postmortems WHERE setup_tag IS NOT NULL"))).fetchall()}
+            for t in queue:
                 if analyzed >= max_new:
                     break
                 key = _trade_key(t)
                 if key in existing:
                     continue
-                pm = await _llm_postmortem(t) or _rule_postmortem(t)
+                win = _is_win(t)
+                tag = await _llm_setup_tag(t)
+                # Only losers carry a narrative — there is nothing to explain
+                # about a winner, and asking for one would reintroduce exactly
+                # the outcome-aware framing the tag is designed to avoid.
+                pm = ({} if win else (await _llm_postmortem(t) or _rule_postmortem(t)))
                 await conn.execute(text("""
                     INSERT INTO trade_postmortems
-                      (trade_key, symbol, action, source, pnl_pct, root_cause, failure_mode, factors, lesson, avoid_when, confidence)
-                    VALUES (:k,:sym,:act,:src,:pnl,:rc,:fm,:fac,:les,:aw,:conf)
-                    ON CONFLICT (trade_key) DO NOTHING
+                      (trade_key, symbol, action, source, pnl_pct, root_cause, failure_mode,
+                       factors, lesson, avoid_when, confidence, setup_tag, is_win)
+                    VALUES (:k,:sym,:act,:src,:pnl,:rc,:fm,:fac,:les,:aw,:conf,:tag,:win)
+                    ON CONFLICT (trade_key) DO UPDATE
+                      SET setup_tag = EXCLUDED.setup_tag,
+                          is_win    = EXCLUDED.is_win
                 """), {
                     "k": key, "sym": t.get("symbol"), "act": t.get("action"), "src": t.get("trade_source"),
                     "pnl": t.get("pnl_pct"), "rc": pm.get("root_cause"), "fm": pm.get("failure_mode"),
                     "fac": _json.dumps(pm.get("factors") or []), "les": pm.get("lesson"),
                     "aw": pm.get("avoid_when"), "conf": pm.get("confidence"),
+                    "tag": tag, "win": win,
                 })
                 analyzed += 1
+                if win:
+                    tagged_wins += 1
+                else:
+                    tagged_losses += 1
     except Exception as exc:
         logger.warning("loss-learning persist failed: %s", exc)
 
     lessons = await _refresh_active_lessons()
-    return {"status": "success", "data": {"losing_trades": len(losses), "newly_analyzed": analyzed, "lessons": len(lessons)}}
-
-
-def _seconds_until_hour_ist(hour: int) -> float:
-    """Seconds until the next occurrence of `hour` in IST."""
-    from datetime import datetime, timedelta, timezone
-    ist = timezone(timedelta(hours=5, minutes=30))
-    now = datetime.now(ist)
-    target = now.replace(hour=hour % 24, minute=0, second=0, microsecond=0)
-    if target <= now:
-        target += timedelta(days=1)
-    return (target - now).total_seconds()
+    return {"status": "success", "data": {
+        "losing_trades": len(losses), "winning_trades": len(wins),
+        "newly_analyzed": analyzed, "tagged_wins": tagged_wins,
+        "tagged_losses": tagged_losses, "lessons": len(lessons)}}
 
 
 async def loss_learning_loop() -> None:
@@ -856,7 +1094,7 @@ async def loss_learning_postmortems(limit: int = 50):
     items = []
     try:
         async with engine.begin() as conn:
-            await conn.execute(text(_POSTMORTEM_DDL))
+            await _ensure_postmortem_table(conn)
             rows = (await conn.execute(text("""
                 SELECT symbol, action, source, pnl_pct, root_cause, failure_mode, factors, lesson, avoid_when, confidence, created_at
                 FROM trade_postmortems ORDER BY created_at DESC LIMIT :lim
