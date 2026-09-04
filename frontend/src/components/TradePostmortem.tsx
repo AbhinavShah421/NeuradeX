@@ -99,9 +99,8 @@ const TradePostmortem: React.FC<{ tradeId: string }> = ({ tradeId }) => {
   const path = d.pricePath ?? {};
   const blame = d.blame ?? {};
   const blameColor = BLAME_COLOR[blame.target] ?? 'var(--nd-text-3)';
-  const agents: any[] = d.agents ?? [];
-  const buyers = agents.filter(a => (a.action || '').toUpperCase() === 'BUY');
-  const others = agents.filter(a => (a.action || '').toUpperCase() !== 'BUY');
+  const vote = d.vote ?? {};
+  const dp = d.decisionPath ?? {};
 
   return (
     <div>
@@ -207,34 +206,95 @@ const TradePostmortem: React.FC<{ tradeId: string }> = ({ tradeId }) => {
         )}
       </div>
 
-      {/* ── Who argued for it, and what they said ── */}
-      <div style={card}>
-        <div style={label}>Who voted to enter ({buyers.length} of {d.nAgents})</div>
-        {[...buyers, ...others].map((a) => (
-          <div key={a.agent} style={{ borderTop: '1px solid var(--nd-border)', padding: '7px 0' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-              <span style={{ fontSize: 12, color: 'var(--nd-text-1)', textTransform: 'capitalize', minWidth: 92 }}>{a.agent}</span>
-              <span style={{ fontSize: 12, fontWeight: 700, color: ACTION_COLOR[(a.action || '').toUpperCase()] ?? 'var(--nd-text-3)' }}>{a.action}</span>
-              {a.weight != null && <span style={{ fontSize: 10, color: 'var(--nd-text-3)' }}>w {Number(a.weight).toFixed(2)}</span>}
-              {a.confidence != null && <span style={{ fontSize: 10, color: 'var(--nd-text-3)' }}>{(Number(a.confidence) * 100).toFixed(0)}%</span>}
-              {/* Corpus verdict, only when it clears the bar. */}
-              {(a.baselineVerdict === 'culprit' || a.baselineVerdict === 'protective') && (
-                <span style={{ fontSize: 9, fontWeight: 700, padding: '1px 5px', borderRadius: 4, marginLeft: 'auto',
-                  background: a.baselineVerdict === 'culprit' ? 'var(--nd-red)1f' : 'var(--nd-green)1f',
-                  color: a.baselineVerdict === 'culprit' ? 'var(--nd-red)' : 'var(--nd-green)' }}>
-                  {a.baselineVerdict} (t {a.baselineT})
-                </span>
-              )}
+      {/* ── How the trade came to be taken at all ── */}
+      {dp.notes?.length > 0 && (
+        <div style={card}>
+          <div style={label}>How this trade got taken</div>
+          {dp.ensembleAbstained && (
+            <div style={{ display: 'inline-block', fontSize: 10, fontWeight: 800, letterSpacing: 0.5, color: '#f59e0b', background: '#f59e0b1f', border: '1px solid #f59e0b55', borderRadius: 4, padding: '2px 7px', marginBottom: 8 }}>
+              THE ENSEMBLE VOTED HOLD — THE SCORED GATE OVERRODE IT
             </div>
-            {a.reasoning && (
-              <div style={{ fontSize: 11, color: 'var(--nd-text-2)', lineHeight: 1.5, marginTop: 3 }}>{a.reasoning}</div>
-            )}
-          </div>
-        ))}
-        <div style={{ fontSize: 10, color: 'var(--nd-text-3)', marginTop: 10, lineHeight: 1.5 }}>
-          {d.culpritNote}
+          )}
+          {dp.score != null && (
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 8, flexWrap: 'wrap' }}>
+              <span style={{ fontSize: 22, fontWeight: 800, color: (dp.margin ?? 99) <= 5 ? '#f59e0b' : 'var(--nd-text-1)' }}>{dp.score}</span>
+              <span style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>entry score, needed {dp.scoreMin}</span>
+              <span style={{ fontSize: 11, color: (dp.margin ?? 0) <= 5 ? '#f59e0b' : 'var(--nd-text-3)' }}>
+                cleared by {dp.margin}
+              </span>
+            </div>
+          )}
+          {(dp.notes as string[]).map((n, i) => (
+            <div key={i} style={{ display: 'flex', gap: 8, fontSize: 12, color: 'var(--nd-text-2)', lineHeight: 1.55, marginBottom: 5 }}>
+              <span style={{ color: 'var(--nd-text-3)', flexShrink: 0 }}>•</span><span>{n}</span>
+            </div>
+          ))}
         </div>
-      </div>
+      )}
+
+      {/* ── The panel vote, reconstructed ── */}
+      {vote.summary && (
+        <div style={card}>
+          <div style={label}>What the agents found</div>
+          <div style={{ fontSize: 12, color: 'var(--nd-text-2)', lineHeight: 1.55, marginBottom: 10 }}>{vote.summary}</div>
+
+          {/* Conviction split — BUY mass vs SELL mass vs abstentions */}
+          <div style={{ display: 'flex', height: 7, borderRadius: 4, overflow: 'hidden', border: '1px solid var(--nd-border)', marginBottom: 4 }}>
+            {[['buyMass', 'var(--nd-green)'], ['sellMass', 'var(--nd-red)'], ['holdMass', 'var(--nd-text-3)']].map(([k, c]) => {
+              const total = (vote.buyMass ?? 0) + (vote.sellMass ?? 0) + (vote.holdMass ?? 0) || 1;
+              return <div key={k as string} style={{ width: `${((vote[k as string] ?? 0) / total) * 100}%`, background: c as string, opacity: 0.75 }} />;
+            })}
+          </div>
+          <div style={{ display: 'flex', gap: 12, fontSize: 10, color: 'var(--nd-text-3)', marginBottom: 10 }}>
+            <span style={{ color: 'var(--nd-green)' }}>buy {vote.buyMass}</span>
+            <span style={{ color: 'var(--nd-red)' }}>sell {vote.sellMass}</span>
+            <span>abstained {vote.holdMass} ({vote.abstained} agents)</span>
+          </div>
+
+          {(vote.agents as any[] ?? []).map((a) => {
+            const act = (a.action || '').toUpperCase();
+            return (
+              <div key={a.agent} style={{ borderTop: '1px solid var(--nd-border)', padding: '7px 0' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 12, color: 'var(--nd-text-1)', textTransform: 'capitalize', minWidth: 92 }}>{a.agent}</span>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: ACTION_COLOR[act] ?? 'var(--nd-text-3)' }}>{a.action}</span>
+                  {a.contribution != null && (
+                    <span style={{ fontSize: 10, color: 'var(--nd-text-3)' }}>
+                      pull {a.contribution}
+                      {a.shareOfSide != null ? ` · ${(a.shareOfSide * 100).toFixed(0)}% of its side` : ''}
+                    </span>
+                  )}
+                  {/* Was this agent right, on this trade? HOLD is an abstention,
+                      not a correct call — scoring it as one is how SELL became
+                      unlearnable on a long-only system. */}
+                  {a.wasRight === true && <span style={{ fontSize: 9, fontWeight: 700, color: 'var(--nd-green)' }}>RIGHT</span>}
+                  {a.wasRight === false && <span style={{ fontSize: 9, fontWeight: 700, color: 'var(--nd-red)' }}>WRONG</span>}
+                  {a.decisive && (
+                    <span style={{ fontSize: 9, fontWeight: 800, padding: '1px 5px', borderRadius: 4, background: 'var(--nd-red)22', color: 'var(--nd-red)' }}>DECISIVE</span>
+                  )}
+                  {(a.baselineVerdict === 'culprit' || a.baselineVerdict === 'protective') && (
+                    <span style={{ fontSize: 9, fontWeight: 700, padding: '1px 5px', borderRadius: 4, marginLeft: 'auto',
+                      background: a.baselineVerdict === 'culprit' ? 'var(--nd-red)1f' : 'var(--nd-green)1f',
+                      color: a.baselineVerdict === 'culprit' ? 'var(--nd-red)' : 'var(--nd-green)' }}>
+                      {a.baselineVerdict} (t {a.baselineT})
+                    </span>
+                  )}
+                </div>
+                {a.reasoning && (
+                  <div style={{ fontSize: 11, color: 'var(--nd-text-2)', lineHeight: 1.5, marginTop: 3 }}>
+                    <span style={{ color: 'var(--nd-text-3)' }}>found: </span>{a.reasoning}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          <div style={{ fontSize: 10, color: 'var(--nd-text-3)', marginTop: 10, lineHeight: 1.5 }}>
+            “Pull” is the agent's confidence times its effective weight — exactly what the
+            ensemble tallies. “Decisive” means the entry would not have fired without it.
+            HOLD is an abstention, so it is scored neither right nor wrong. {d.culpritNote}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

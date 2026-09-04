@@ -267,6 +267,186 @@ def _verdict(lift: float, t: Optional[float]) -> str:
     return "no signal"
 
 
+def _vote_breakdown(agents: list[dict], was_loss: bool) -> dict:
+    """Reconstruct the entry vote exactly as the ensemble computed it.
+
+    This is not an approximation. `session_decisions.agents` persists each
+    agent's EFFECTIVE weight — already scaled by that agent's accuracy for the
+    action it voted (`ensemble.py`: `s.weight = round(effective_w, 3)`) — and
+    the tally is `vote[action] += confidence * effective_weight`. Both numbers
+    are stored, so the contest can be replayed from the row.
+
+    On the entry side the contest is BUY vs SELL only; HOLD is an abstention
+    and carries no directional signal. BUY wins if its mass beats SELL's by the
+    dominance margin AND at least two distinct agents voted it — the rule
+    exists because a single flooding agent used to decide alone.
+
+    `decisive` answers the question the panel is really for: if this one agent
+    had stayed out, would the trade have happened at all?
+    """
+    try:
+        from app.agents.ensemble import _DIR_DOMINANCE, _DIR_MIN_VOTERS
+    except Exception:                                   # keep the panel alive
+        _DIR_DOMINANCE, _DIR_MIN_VOTERS = 1.3, 2
+
+    def mass(rows: list[dict], act: str) -> float:
+        return sum((r.get("confidence") or 0) * (r.get("weight") or 0)
+                   for r in rows if (r.get("action") or "").upper() == act)
+
+    def n_voters(rows: list[dict], act: str) -> int:
+        return sum(1 for r in rows if (r.get("action") or "").upper() == act)
+
+    def wins_buy(rows: list[dict]) -> bool:
+        bm, sm = mass(rows, "BUY"), mass(rows, "SELL")
+        return bm > 0 and bm >= _DIR_DOMINANCE * sm and n_voters(rows, "BUY") >= _DIR_MIN_VOTERS
+
+    buy_mass, sell_mass, hold_mass = mass(agents, "BUY"), mass(agents, "SELL"), mass(agents, "HOLD")
+    buy_n, sell_n = n_voters(agents, "BUY"), n_voters(agents, "SELL")
+
+    per: list[dict] = []
+    for a in agents:
+        act = (a.get("action") or "").upper()
+        contrib = (a.get("confidence") or 0) * (a.get("weight") or 0)
+        side = {"BUY": buy_mass, "SELL": sell_mass, "HOLD": hold_mass}.get(act, 0.0)
+        # Would the entry still have fired without this agent?
+        without = [x for x in agents if x is not a]
+        decisive = wins_buy(agents) and not wins_buy(without)
+        per.append({
+            **a,
+            "contribution": round(contrib, 3),
+            "share_of_side": round(contrib / side, 3) if side else None,
+            "decisive": decisive,
+            # HOLD is an abstention here, not a correct call — scoring it as one
+            # is how SELL became unlearnable on a long-only system.
+            "stance": ("argued for the trade" if act == "BUY"
+                       else "argued against it" if act == "SELL"
+                       else "abstained"),
+            "was_right": (not was_loss) if act == "BUY" else (was_loss if act == "SELL" else None),
+        })
+
+    ratio = (buy_mass / sell_mass) if sell_mass else None
+    return {
+        "buy_mass": round(buy_mass, 3), "sell_mass": round(sell_mass, 3),
+        "hold_mass": round(hold_mass, 3),
+        "buy_voters": buy_n, "sell_voters": sell_n,
+        "abstained": n_voters(agents, "HOLD"),
+        "dominance_ratio": round(ratio, 2) if ratio else None,
+        "dominance_needed": _DIR_DOMINANCE,
+        "min_voters": _DIR_MIN_VOTERS,
+        "buy_won": wins_buy(agents),
+        "agents": sorted(per, key=lambda r: -(r["contribution"] or 0)),
+        # The first version asserted "clearing the margin" unconditionally, and
+        # said it on a 1.1x contest that had not cleared 1.3x at all — the panel
+        # would have been stating the opposite of what happened.
+        "summary": (
+            f"{buy_n} agents argued to buy with {round(buy_mass, 2)} of weighted conviction, "
+            f"against {round(sell_mass, 2)} from {sell_n} arguing not to"
+            + ("" if not ratio else
+               f" — {round(ratio, 1)}x, clearing the {_DIR_DOMINANCE}x the ensemble needs."
+               if wins_buy(agents) else
+               f" — only {round(ratio, 1)}x, short of the {_DIR_DOMINANCE}x the ensemble "
+               "needs, so the ensemble itself abstained.")
+            + ("" if ratio else ". Nothing argued against it.")
+        ),
+    }
+
+
+def _decision_path(entry_reason: Optional[str], agents: list[dict]) -> dict:
+    """How this trade came to be taken at all.
+
+    The finding that motivated this: on a real losing trade the entry reason
+    read "Entry [score 80/78]: 2 agents voted BUY (ensemble HOLD 69%)". The
+    ENSEMBLE ABSTAINED. The trade was taken by a separate 0-100 scored gate
+    that cleared its threshold by two points. A panel that only showed agent
+    votes would leave the reader assuming the panel decided — it did not, and
+    that is the single most useful thing to say about how the trade happened.
+
+    Consensus quality is recomputed from the stored votes because the gate's
+    own deductions are only persisted when it BLOCKS. When it lets a trade
+    through, the reasons it nearly did not are discarded, so they are rebuilt
+    here from the same constants the gate uses.
+    """
+    import re
+
+    out: dict = {"entry_reason": entry_reason}
+    if entry_reason:
+        m = re.search(r"score\s+(\d+(?:\.\d+)?)\s*/\s*(\d+)", entry_reason)
+        if m:
+            out["score"] = float(m.group(1))
+            out["score_min"] = float(m.group(2))
+            out["margin"] = round(out["score"] - out["score_min"], 1)
+        e = re.search(r"ensemble\s+(BUY|SELL|HOLD)\s+(\d+)%", entry_reason)
+        if e:
+            out["ensemble_action"] = e.group(1)
+            out["ensemble_confidence_pct"] = int(e.group(2))
+            out["ensemble_abstained"] = e.group(1) == "HOLD"
+
+    try:
+        from app.services.sessions_service import (
+            _RELIABLE_BUY_AGENTS, _DISCOUNTED_SELLERS)
+    except Exception:
+        _RELIABLE_BUY_AGENTS = frozenset({"gbm", "meanrev", "memory", "day_structure"})
+        _DISCOUNTED_SELLERS = frozenset({"day_structure", "meanrev"})
+
+    def act(a):
+        return (a.get("action") or "").upper()
+
+    buys = [a["agent"] for a in agents if act(a) == "BUY"]
+    # Structural sellers are discounted by the gate itself: day_structure and
+    # meanrev sell BY CONSTRUCTION where the entry band opens, so their SELL is
+    # a statement about position in range, not directional dissent.
+    sells = [a["agent"] for a in agents
+             if act(a) == "SELL" and a["agent"] not in _DISCOUNTED_SELLERS]
+    reliable = [b for b in buys if b in _RELIABLE_BUY_AGENTS]
+    net = len(buys) - len(sells)
+
+    discounted = [a["agent"] for a in agents
+                  if act(a) == "SELL" and a["agent"] in _DISCOUNTED_SELLERS]
+
+    out["buy_voters"] = sorted(buys)
+    out["counted_sell_voters"] = sorted(sells)
+    out["discounted_sell_voters"] = sorted(discounted)
+    out["net_consensus"] = net
+    out["reliable_cosigners"] = sorted(reliable)
+    notes: list[str] = []
+    if discounted:
+        # Without this the panel contradicts itself: the vote table shows N
+        # agents arguing against, while the gate's net consensus counted none
+        # of them. Both are true, and the reason is the point.
+        notes.append(
+            f"{', '.join(discounted)} voted SELL but {'was' if len(discounted) == 1 else 'were'} "
+            "not counted as dissent — the gate discounts these agents by design, either "
+            "because they sell structurally wherever the entry band opens, or because "
+            "their SELL was measured as anti-predictive.")
+    if net <= 0:
+        notes.append(
+            f"The panel was divided — {len(buys)} for, {len(sells)} against, net {net}. "
+            "Divided panels historically lose, and the gate docks points for it rather "
+            "than refusing outright.")
+    elif net == 1:
+        notes.append(
+            f"Thin consensus: {len(buys)} for against {len(sells)}, net 1. The gate treats "
+            "this as a 25%-win class and deducts accordingly.")
+    if not reliable:
+        notes.append(
+            "No agent with a demonstrated BUY edge (gbm, meanrev, memory or day_structure) "
+            "backed this entry — the consensus was made of agents with no proven edge on "
+            "the buy side.")
+    else:
+        notes.append(f"Backed by a proven BUY voter: {', '.join(reliable)}.")
+    if out.get("ensemble_abstained"):
+        notes.insert(0,
+            f"The ensemble itself did NOT want this trade — it voted HOLD at "
+            f"{out.get('ensemble_confidence_pct')}%. The entry came from the scored gate, "
+            f"which reached {out.get('score')} against a {out.get('score_min')} threshold.")
+    if out.get("margin") is not None and 0 <= out["margin"] <= 5:
+        notes.append(
+            f"It cleared the threshold by {out['margin']} points. Anything that shaved a "
+            "few more would have blocked it.")
+    out["notes"] = notes
+    return out
+
+
 async def trade_postmortem(trade_id: str) -> dict:
     """Everything known about why ONE trade ended the way it did.
 
@@ -513,6 +693,8 @@ async def trade_postmortem(trade_id: str) -> dict:
         "blame": blame,
         "causes": causes,
         "agents": agents,
+        "vote": _vote_breakdown(agents, is_loss) if agents else None,
+        "decision_path": _decision_path(entry_reason, agents) if agents else None,
         "voted_buy": sorted(voted_buy),
         "n_agents": len(agents),
         "culprit_note": (
