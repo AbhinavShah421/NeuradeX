@@ -3,6 +3,7 @@ import { useAppStore } from '../stores/appStore';
 import apiService from '../services/api';
 import TradingChart, { TradeMarker, ChartCandle, PriorLevels } from './TradingChart';
 import StockPicker from './StockPicker';
+import SessionPostmortem from './SessionPostmortem';
 import { getErrorMessage } from '../utils/errors';
 
 // ── Session data shapes (server-side trading session state) ───────────────────
@@ -410,6 +411,10 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
               </div>
             </details>
           )}
+
+          {/* Post-mortem sits above the raw trade list: the trade list says
+              what was done, this says why it lost and who argued for it. */}
+          <SessionPostmortem sessionId={detail.id} />
 
           {(detail.tradesList ?? []).length > 0 && (
             <div style={{ overflowX: 'auto' }}>

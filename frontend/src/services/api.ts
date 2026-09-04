@@ -1092,6 +1092,21 @@ class ApiService {
     return response.data;
   }
 
+  /** Why this session's trades lost, and what the agents voted at each entry.
+   *  `narrative` adds an LLM write-up of the computed facts and costs an 8B
+   *  call, so the UI loads the facts first and asks for prose on demand. */
+  async sessionPostmortem(id: string, narrative = false): Promise<any> {
+    const response = await this.api.get(`/api/sessions/${id}/postmortem`,
+      { params: narrative ? { narrative: true } : {} });
+    return response.data;
+  }
+
+  /** Corpus-wide per-agent BUY-lift. Not session-scoped. */
+  async agentCulpability(): Promise<any> {
+    const response = await this.api.get('/api/sessions/agent-culpability');
+    return response.data;
+  }
+
   async sessionStop(id: string): Promise<ApiResponse<any>> {
     const response = await this.api.post(`/api/sessions/${id}/stop`);
     return response.data;
