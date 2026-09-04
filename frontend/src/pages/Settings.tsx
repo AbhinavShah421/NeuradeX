@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import apiService from '../services/api';
 
 interface ProviderRow {
@@ -220,6 +221,33 @@ const Settings: React.FC = () => {
             {saving ? 'Saving…' : 'Save Changes'}
           </button>
           {msg && <span style={{ fontSize: 13, color: msg.startsWith('✓') ? 'var(--nd-green)' : 'var(--nd-red)' }}>{msg}</span>}
+        </div>
+      </div>
+
+      {/* Advanced — kept off the main settings flow. These change what the
+          system trades, not how it is configured, so they get their own page
+          and an explicit warning rather than sitting beside the data-provider
+          toggles. */}
+      <div style={{ ...card, marginTop: 16 }}>
+        <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--nd-text-1)', marginBottom: 4 }}>Advanced</div>
+        <Link to="/controls" style={{ textDecoration: 'none', display: 'block' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px', marginTop: 10,
+            background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 10, cursor: 'pointer' }}>
+            <span className="material-icons" style={{ color: 'var(--nd-accent)', fontSize: 22 }}>tune</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--nd-text-1)' }}>Trading Controls</div>
+              <div style={{ fontSize: 12, color: 'var(--nd-text-2)', lineHeight: 1.5, marginTop: 2 }}>
+                Entry-gate thresholds, the ensemble vote and the pattern-memory gate — 27 knobs,
+                editable live. Changes take effect on the next candle.
+              </div>
+            </div>
+            <span className="material-icons" style={{ color: 'var(--nd-text-3)', fontSize: 18 }}>chevron_right</span>
+          </div>
+        </Link>
+        <div style={{ fontSize: 11.5, color: 'var(--nd-text-3)', lineHeight: 1.55, marginTop: 10 }}>
+          These decide whether a trade happens. Values are bounds-checked on the server and every
+          control can be reset to what ships; where a knob has already been measured, the result is
+          shown next to it.
         </div>
       </div>
 
