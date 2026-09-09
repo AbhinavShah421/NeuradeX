@@ -582,8 +582,14 @@ const Orders: React.FC = () => {
     const totalPnl = trades.reduce((s, t) => s + (t.pnlAbs ?? 0), 0);
     const closed = trades.filter(t => t.outcome === 'WIN' || t.outcome === 'LOSS').length;
     const wins = trades.filter(t => (t.pnlAbs ?? 0) > 0).length;
+    // A row where nothing has closed is an OPEN POSITION, not a session that
+    // did nothing. Rendering it as "₹0.00 · —" made five live executor entries
+    // read as five empty sessions on a day that had two real trades, and it
+    // inflated the session count. The trade-executor publishes an entry and
+    // never a close, so these never resolve on their own.
+    const allOpen = closed === 0 && trades.length > 0;
     return {
-      key, isSession: key.startsWith('s:'),
+      key, isSession: key.startsWith('s:'), allOpen,
       symbol: trades[0].symbol,
       source: trades[0].tradeSource ?? (trades[0].paperTrade ? 'PAPER' : 'LIVE'),
       mode: (trades[0].marketContext?.sessionMode as string) || '',
@@ -868,7 +874,16 @@ const Orders: React.FC = () => {
           <button onClick={clearFilters} style={{ padding: '5px 10px', borderRadius: 20, border: '1px solid var(--nd-border)', cursor: 'pointer', fontSize: 12, background: 'var(--nd-surface)', color: 'var(--nd-text-3)' }}>Clear</button>
         )}
         <span style={{ marginLeft: 4, fontSize: 12, color: 'var(--nd-text-3)', alignSelf: 'center' }}>
-          {visibleSessions.length} session{visibleSessions.length !== 1 ? 's' : ''}
+          {/* Counted separately: an open position is not a session that
+              happened, and folding the two together is what made today's two
+              real trades look like seven. */}
+          {visibleSessions.filter(s => !s.allOpen).length} session
+          {visibleSessions.filter(s => !s.allOpen).length !== 1 ? 's' : ''}
+          {visibleSessions.filter(s => s.allOpen).length > 0 && (
+            <span style={{ color: 'var(--nd-orange)' }}>
+              {' · '}{visibleSessions.filter(s => s.allOpen).length} open
+            </span>
+          )}
         </span>
         {!listLoading && (
           <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
@@ -970,8 +985,17 @@ const Orders: React.FC = () => {
                         <span style={{ fontSize: 10, padding: '2px 7px', borderRadius: 4, fontWeight: 600, background: `${modeColor[s.source] ?? '#888'}18`, color: modeColor[s.source] ?? 'var(--nd-text-3)' }}>{s.source}</span>
                       </td>
                       <td style={{ padding: '10px 14px', color: 'var(--nd-text-2)' }}>{s.count}{s.isSession ? ' · session' : ''}</td>
-                      <td style={{ padding: '10px 14px', fontWeight: 600, color: pnlColor(s.totalPnl) }}>₹{s.totalPnl.toFixed(2)}</td>
-                      <td style={{ padding: '10px 14px', color: 'var(--nd-text-2)' }}>{s.closed ? `${Math.round(s.wins / s.closed * 100)}% (${s.wins}/${s.closed})` : '—'}</td>
+                      <td style={{ padding: '10px 14px', fontWeight: 600, color: s.allOpen ? 'var(--nd-text-3)' : pnlColor(s.totalPnl) }}>
+                        {/* ₹0.00 is a claim about a result. An open position has
+                            no result yet, and saying it does is worse than
+                            saying nothing. */}
+                        {s.allOpen ? '—' : `₹${s.totalPnl.toFixed(2)}`}
+                      </td>
+                      <td style={{ padding: '10px 14px', color: 'var(--nd-text-2)' }}>
+                        {s.allOpen
+                          ? <span className="nd-chip-tag" style={{ color: 'var(--nd-orange)' }}>open</span>
+                          : s.closed ? `${Math.round(s.wins / s.closed * 100)}% (${s.wins}/${s.closed})` : '—'}
+                      </td>
                       <td style={{ padding: '10px 14px', color: 'var(--nd-text-3)', fontSize: 11 }}>{fmt(s.tradeDate)}</td>
                       <td style={{ padding: '10px 14px', color: 'var(--nd-text-3)', fontSize: 11 }}>{fmt(s.createdAt)}</td>
                     </tr>
