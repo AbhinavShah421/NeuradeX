@@ -144,7 +144,33 @@ async def scheduled_sweep_loop() -> None:
         logger.info("Memory sweep disabled via config")
         return
 
-    from app.utils.nightly import nightly_loop
+    from app.utils.nightly import nightly_loop, NotReady
+
+    async def _run() -> object:
+        res = await run_memory_sweep(trigger="scheduled")
+        if isinstance(res, dict):
+            if res.get("status") == "already_running":
+                raise NotReady("a sweep is already running")
+            # A sweep where EVERY backtest failed rebuilt nothing — the case
+            # bank still holds whatever it held this morning. Letting that book
+            # the day means the next attempt is tomorrow: on 2026-09-08 the boot
+            # catch-up recorded backtests_ok 0 / backtests_failed 248 as a
+            # successful sweep because the host's network was not up yet.
+            #
+            # A partial failure is left alone deliberately — some symbols always
+            # fail (delisted tickers, renamed symbols), and a sweep that
+            # refreshed most of the bank did its job.
+            #
+            # `skipped_frozen` is not this: REPLAY_MEMORY_WRITES=0 means the bank
+            # is deliberately frozen for a validation batch, so skipping the day
+            # is the intended outcome and the slot should be spent.
+            if (res.get("status") != "skipped_frozen"
+                    and not res.get("backtests_ok")
+                    and res.get("backtests_failed")):
+                raise NotReady(
+                    f"every backtest failed ({res.get('backtests_failed')} symbols) "
+                    f"— no candle data reached the sweep")
+        return res
+
     await nightly_loop("memory_sweep", settings.MEMORY_SWEEP_HOUR_IST,
-                       lambda: run_memory_sweep(trigger="scheduled"),
-                       label="Pattern-memory sweep")
+                       _run, label="Pattern-memory sweep")

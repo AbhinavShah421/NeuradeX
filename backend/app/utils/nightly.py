@@ -82,6 +82,18 @@ class NotReady(Exception):
     Leaves the day's slot outstanding and records nothing — this is neither a
     success nor a failure, just "ask again later". Use it for a dependency
     another loop produces, not for a genuine error.
+
+    It is also the right answer when a run COMPLETED but did no work because
+    its data source was unreachable. Returning a `{"status": "no_data"}` dict
+    reads as success here, advances `last_slot`, and spends the day: measured
+    2026-09-08, the boot catch-up fired at 09:36 IST while the host's network
+    was still settling after three days off, all 304 symbol fetches failed in
+    3.1 seconds, and `pattern_autotrain` recorded a successful run that trained
+    nothing. The same boot did it to the GBM retrain and the memory sweep. By
+    the time the network was up an hour later the day was already spent, and
+    the System Map showed a model 88h stale next to a loop row saying OK —
+    both true, which is the confusing part. Deferring instead means the next
+    5-minute poll picks the day up the moment the data is reachable.
     """
 
 
@@ -254,20 +266,51 @@ async def nightly_loop(
                                            "event": "nightly_start",
                                            "loop": name, "slot": str(slot)})
                         started = datetime.now(timezone.utc)
-                        res = await run()
-                        secs = (datetime.now(timezone.utc) - started).total_seconds()
-                        await _mark_ok(name, slot, secs, str(res))
-                        logger.info("%s: slot %s done in %.0fs: %s", what, slot, secs, res,
-                                    extra={"log_type": "app_lifecycle",
-                                           "event": "nightly_done", "loop": name,
-                                           "slot": str(slot), "duration_secs": secs})
+                        try:
+                            res = await run()
+                        except NotReady as exc:
+                            # How long the deferral cost decides whether it is
+                            # worth repeating. A run that gave up in seconds gave
+                            # up because nothing was reachable, and the next poll
+                            # costs those same few seconds — cheap to keep asking.
+                            # A run that ground for longer than the gap between
+                            # polls and STILL had nothing is not a transient
+                            # network gap; deferring it would put a heavy job back
+                            # on an 11GB VM continuously, market hours included.
+                            # Use poll_secs as the line rather than a constant:
+                            # the question is exactly whether the attempt costs
+                            # more than the interval between attempts.
+                            secs = (datetime.now(timezone.utc) - started).total_seconds()
+                            if secs <= poll_secs:
+                                raise
+                            await _mark_ok(
+                                name, slot, secs,
+                                f"not ready after {secs:.0f}s ({exc}) — slot consumed, "
+                                f"too slow to retry every {poll_secs:.0f}s")
+                            logger.warning(
+                                "%s: slot %s not ready after %.0fs (%s) — consuming the "
+                                "slot rather than retrying a job that outlasts the poll",
+                                what, slot, secs, exc,
+                                extra={"log_type": "app_lifecycle",
+                                       "event": "nightly_defer_too_slow", "loop": name,
+                                       "slot": str(slot), "duration_secs": secs})
+                        else:
+                            secs = (datetime.now(timezone.utc) - started).total_seconds()
+                            await _mark_ok(name, slot, secs, str(res))
+                            logger.info("%s: slot %s done in %.0fs: %s", what, slot, secs, res,
+                                        extra={"log_type": "app_lifecycle",
+                                               "event": "nightly_done", "loop": name,
+                                               "slot": str(slot), "duration_secs": secs})
 
         except asyncio.CancelledError:
             break
         except NotReady as exc:
             # Slot stays outstanding, nothing recorded. Debug level: on a cold
             # boot this can be true for hours and it is not a fault.
-            logger.debug("%s: not ready yet (%s) — will retry", what, exc)
+            logger.debug("%s: not ready yet (%s) — will retry in %.0fs",
+                         what, exc, poll_secs,
+                         extra={"log_type": "app_lifecycle", "event": "nightly_deferred",
+                                "loop": name, "slot": str(slot)})
         except Exception as exc:
             logger.error("%s: run failed: %s", what, exc,
                          extra={"log_type": "app_lifecycle", "event": "nightly_error",

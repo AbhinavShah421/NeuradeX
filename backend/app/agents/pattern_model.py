@@ -558,6 +558,34 @@ async def train_gbm_intraday(days: int = 10, horizon_min: int = 30, stride: int 
 _LABEL_UP_INTRADAY = 0.05
 
 
+def _defer_if_untrained(res: object, what: str) -> None:
+    """Turn a "ran, trained nothing" result into a deferral.
+
+    `nightly_loop` reads a returned value as success and spends the day's slot
+    on it, so a trainer that hands back `{"status": "no_data"}` books a day it
+    did not use. That is not hypothetical: on 2026-09-08 the boot catch-up beat
+    the host's network back up after three days off, every candle fetch failed
+    in milliseconds, and both trainers recorded a successful run over zero
+    samples — the same providers served 252 candles per symbol an hour later,
+    by which time neither would look again until the next day.
+
+    `already_running` is the same shape of mistake from the other direction: a
+    manual retrain is mid-flight, this call did nothing, and consuming the slot
+    would credit the schedule with someone else's work.
+
+    Raising `NotReady` records nothing and leaves the slot outstanding, so the
+    five-minute poll retries as soon as the data is reachable.
+    """
+    from app.utils.nightly import NotReady
+    if not isinstance(res, dict):
+        return
+    status = res.get("status")
+    if status == "no_data":
+        raise NotReady(f"{what} trained nothing — no candle data reached it ({res})")
+    if status == "already_running":
+        raise NotReady(f"{what} training is already running elsewhere")
+
+
 async def gbm_autotrain_loop() -> None:
     """Background task: retrain the GBM once daily, advancing the universe offset so
     it covers the whole market over successive nights and keeps strengthening.
@@ -582,6 +610,7 @@ async def gbm_autotrain_loop() -> None:
             await train_gbm_intraday(trigger="scheduled")
         except Exception as exc:
             logger.error("Scheduled intraday GBM retrain error: %s", exc)
+        _defer_if_untrained(daily, "GBM")
         return daily
 
     from app.utils.nightly import nightly_loop
@@ -614,13 +643,15 @@ async def pattern_autotrain_loop() -> None:
         logger.info("Pattern-model auto-retrain disabled via config")
         return
     async def _run() -> object:
-        return await train_pattern_model(
+        res = await train_pattern_model(
             lookback_days=getattr(settings, "PATTERN_AUTOTRAIN_LOOKBACK_DAYS", 365),
             horizon=3,
             stride=1,
             max_symbols=getattr(settings, "PATTERN_AUTOTRAIN_MAX_SYMBOLS", 400),
             trigger="scheduled",
         )
+        _defer_if_untrained(res, "Pattern model")
+        return res
 
     from app.utils.nightly import nightly_loop
     await nightly_loop("pattern_autotrain",
