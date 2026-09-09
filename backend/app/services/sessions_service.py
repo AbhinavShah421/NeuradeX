@@ -1149,6 +1149,38 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
                                    f"(model P(up) {psig.get('p_up')}, memory WR {psig.get('memory_winrate')})")
             except Exception as exc:
                 logger.debug("pattern gate skipped: %s", exc)
+        # ── Final validator ───────────────────────────────────────────────────
+        # Runs LAST, after every strategy veto above, and can only block. The
+        # chain above encodes opinions about which setups are worth taking; this
+        # verifies the invariants that must hold whatever the strategy thinks —
+        # the price is real, the bar actually traded, the decision genuinely
+        # satisfies the gate it claims to have cleared. It exists because a
+        # zero-priced trade and a zero-volume forming candle have both reached
+        # production here without anything erroring. See agents/validator.py.
+        if enter:
+            try:
+                from app.agents.validator import build_context, validate_entry
+                verdict = validate_entry(build_context(
+                    symbol=symbol, candle=candle, gate=gate, score=score,
+                    confidence=conf, buy_votes=buy_votes,
+                    position_status=pos_status, mode=s.get("mode", "paper"),
+                    session=s,
+                    # Raw inputs, so the validator can rebuild the score itself
+                    # rather than trusting the total this function accumulated.
+                    agents=agents, indicators=ind, ens_action=ens_action, tsig=tsig,
+                ))
+                s["last_validation"] = verdict.to_dict()
+                if not verdict.ok:
+                    enter = False
+                    blocked.append(f"validator: {verdict.as_reason()}")
+            except Exception as exc:
+                # The validator failing is not a reason to trade unchecked. It
+                # is the last thing standing between a decision and real money,
+                # so an unusable validator blocks rather than abstains.
+                logger.error("validator unavailable — blocking entry: %s", exc, exc_info=True)
+                enter = False
+                blocked.append(f"validator unavailable ({exc}) — refusing to enter unchecked")
+
         action = "BUY" if enter else "HOLD"
         if action == "BUY":
             reason = (f"Entry [score {score:.0f}/{gate.get('score_min', 78)}]: {buy_votes} agents voted BUY "
