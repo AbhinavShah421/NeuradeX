@@ -1201,7 +1201,15 @@ async def component_detail(node_id: str):
 
     # elk_logger stamps `service` from SERVICE_NAME, which is the compose
     # service name — the container name minus the project prefix.
-    service = (spec or {}).get("container", "").replace("stock-prediction-", "") or node_id
+    #
+    # A `component` has no container of its own, so this would fall through to
+    # the node id and every Kibana link would filter on a service that does not
+    # exist — links that look right and return nothing. Its logs are its HOST's.
+    if spec and spec.get("kind") == "component":
+        host = spec.get("host", "stock-prediction-session-runner")
+        service = host.replace("stock-prediction-", "")
+    else:
+        service = (spec or {}).get("container", "").replace("stock-prediction-", "") or node_id
     return {
         "id": node_id,
         "label": (spec or {}).get("label", node_id),

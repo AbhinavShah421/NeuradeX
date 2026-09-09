@@ -205,6 +205,133 @@ _DOCS: dict[str, dict] = {
             "No bind mount — code changes need `compose build` + `up -d`, not a restart.",
         ],
     },
+    # ── Components added 2026-09-09 ─────────────────────────────────────────
+    # These have no container and no port of their own, so the panel's probe /
+    # CPU / memory tiles read "—" for all of them. Code & flow is therefore the
+    # ONLY thing that explains what they do, which makes the entry mandatory
+    # rather than nice-to-have: a node with an empty panel is worse than no node.
+    "validator": {
+        "role": "Last checkpoint before a BUY becomes a trade. Verifies facts, can only block.",
+        "language": "Python",
+        "entry": ("backend/app/agents/validator.py", "validate_entry"),
+        "flow": [
+            ("Called last in the decision", "backend/app/services/sessions_service.py", "_step",
+             "Runs AFTER all nine strategy vetoes, immediately before action = BUY. Because it is last it "
+             "also catches the case where one of those blocks was edited and got its own logic wrong."),
+            ("Check the facts", "backend/app/agents/validator.py", "CHECKS",
+             "Finite positive price, the bar actually traded (non-zero volume), symbol in the tradable "
+             "universe, the decision genuinely satisfies its gate, confidence outside the anti-predictive "
+             "band, no stacking on an open LONG, daily loss limit, position cap, market open."),
+            ("Rebuild the score independently", "backend/app/agents/validator.py", "recompute_score",
+             "Rebuilds the entry score from RAW inputs and blocks on disagreement. The only check that can "
+             "catch _step accumulating a score that is WRONG but self-consistent — a double-count, a "
+             "dropped branch, a flipped comparison. Constants are imported; the arithmetic is reimplemented."),
+            ("Fail closed", "backend/app/agents/validator.py", "validate_entry",
+             "A check that raises is a BLOCK, not a pass. If the module cannot be imported at all, _step "
+             "refuses the entry rather than trading unchecked."),
+        ],
+        "gotchas": [
+            "It can only turn a BUY into a HOLD. A bug here costs a trade; it can never cause one.",
+            "Deliberately NOT an LLM judge — the 8B's verdict tracked prompt framing, not evidence.",
+            "NEURADEX_TREND_FILTER=legacy flips the trend leg's polarity; the recomputation honours "
+            "whichever is live and the tests pin both.",
+        ],
+    },
+    "wk_sectors": {
+        "role": "Ranks sectors by median move weighted by breadth, over the one universe sweep.",
+        "language": "Python",
+        "entry": ("stock-scanner/app/workers/sectors.py", "rank_sectors"),
+        "flow": [
+            ("Bucket the sweep by sector", "stock-scanner/app/workers/sectors.py", "sector_breadth",
+             "sector_of is injected rather than imported, so the worker stays a pure function — tests pass "
+             "a dict, production passes the Redis-backed NSE map."),
+            ("Rank on median x breadth", "stock-scanner/app/workers/sectors.py", "_heat",
+             "Median, never mean: one name up 18% in a nine-name sector gives the same MEAN as all nine up "
+             "2%, and only the second is tradable. Needs >=4 names or it is reported but never ranked."),
+            ("Answer 'is this name's sector working'", "stock-scanner/app/workers/sectors.py", "sector_tailwind",
+             "Used by the movers attribution and the promotion reviewer."),
+        ],
+        "gotchas": [
+            "Reads the backend's NSE map from ai_engine:sector_map:<date> — it does not rebuild it.",
+            "A cold map degrades to one 'Other' bucket rather than failing the sweep.",
+        ],
+    },
+    "wk_movers": {
+        "role": "Ranks the day's gainers and losers and attributes each move mechanically.",
+        "language": "Python",
+        "entry": ("stock-scanner/app/workers/movers.py", "rank_movers"),
+        "flow": [
+            ("Rank on the move itself", "stock-scanner/app/workers/movers.py", "rank_movers",
+             "Sorted on change_pct, NOT the setup score — that board already exists, and the disagreement "
+             "between the two is informative rather than a bug."),
+            ("Attribute the move", "stock-scanner/app/workers/movers.py", "attribute_move",
+             "Gap-led, volume conviction, sector agreement, extension, gap-fade — every driver read off "
+             "figures the sweep already computed. A reason that cannot be recomputed from the record is a "
+             "story, not a reason."),
+            ("Classify what is still available", "stock-scanner/app/workers/movers.py", "attribute_move",
+             "already happened / extended / in progress / thin. Only 'in progress' gainers are eligible "
+             "for promotion."),
+        ],
+        "gotchas": [
+            "rsi here is computed on DAILY candles — a name up 13% intraday still reads 54-68, so it does "
+            "NOT identify an intraday chase. The trend legs (uptrend) are what that means.",
+        ],
+    },
+    "wk_promotion": {
+        "role": "Reviews every nomination before it reaches the watchlist.",
+        "language": "Python",
+        "entry": ("stock-scanner/app/workers/promotion.py", "review_promotion"),
+        "flow": [
+            ("A worker files a nomination", "stock-scanner/app/workers/promotion.py", "build_promotion",
+             "Built FROM the sweep row rather than hand-filled, so a promoter cannot omit a parameter by "
+             "forgetting it — if the sweep did not produce it, the review says so."),
+            ("Check the parameters were considered", "stock-scanner/app/workers/promotion.py", "REQUIRED_PARAMS",
+             "A nomination missing any of them is not 'probably fine' — it is one that did not consider "
+             "the thing, which is what the review exists to catch."),
+            ("Check it against what was measured", "stock-scanner/app/workers/promotion.py", "review_promotion",
+             "Rejects a gap-led finished move, thin participation, buying strength (uptrend — the measured "
+             "worst cell, 22.6% win vs 28.6%), and a promotion whose whole case is an A grade (those "
+             "realised 26.1% against a stated 82-95%)."),
+            ("Return the rejections", "stock-scanner/app/workers/promotion.py", "review_all",
+             "Rejections are RETURNED, not dropped: the point of a reviewer is lost if the reason a name "
+             "missed the watchlist is invisible."),
+        ],
+        "gotchas": [
+            "Every constraint is overridable BY NAME. A promoter that supplies the case gets through; "
+            "what is refused is a promotion that never considered the point.",
+            "Checks facts, not plausibility — same reasoning as the entry validator.",
+        ],
+    },
+    "wk_grading": {
+        "role": "Scores past promotions as a day-clustered lift against two same-day controls.",
+        "language": "Python",
+        "entry": ("stock-scanner/app/workers/grading.py", "aggregate"),
+        "flow": [
+            ("Snapshot the day", "stock-scanner/app/scanner.py", "_run_workers",
+             "ai_engine:promotions:<date> keeps accepted, rejected AND the field with prices for 30 days. "
+             "Only the last sweep of a day survives — grading the same names once per intraday sweep would "
+             "count one day's evidence a dozen times."),
+            ("Price the forward window", "stock-scanner/app/scanner.py", "grade_promotions",
+             "Close-to-close from the promotion day: an entry at the promotion's own price is not available "
+             "to anyone reading it after the bell. Only days whose window has fully elapsed are graded."),
+            ("Lift, never raw return", "stock-scanner/app/workers/grading.py", "day_lift",
+             "On a day everything rose 3%, a promoted set that rose 3% added nothing. Every reading is "
+             "promoted mean minus a SAME-DAY control mean."),
+            ("Cluster by day", "stock-scanner/app/workers/grading.py", "cluster_t",
+             "n is DAYS, not trades. Readings inside one day share that day's market; pooling 400 trades "
+             "over 4 days and quoting sqrt(400) treats 4 pieces of information as 400."),
+        ],
+        "endpoints": [
+            ("POST", "/grade-promotions", "stock-scanner/app/main.py", "grade_promotions_ep"),
+            ("GET", "/promotion-grades", "stock-scanner/app/main.py", "promotion_grades"),
+        ],
+        "gotchas": [
+            "Two controls reported separately — vs the field (did the promoter add anything) and vs the "
+            "rejected set (did the reviewer). They can each work or not, independently.",
+            "Nothing is called established under 20 days or |t| < 2.8, whatever the number says.",
+            "No graded days until the snapshots accumulate; it needs ~20 trading days to say anything.",
+        ],
+    },
     "scanner": {
         "role": "Sweeps the NSE universe and ranks candidates.",
         "language": "Python · FastAPI",
