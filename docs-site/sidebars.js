@@ -72,6 +72,7 @@ const sidebars = {
         'microservices/agents',
         'microservices/ensemble-engine',
         'microservices/risk-trade',
+        'microservices/position-lifecycle',
         'microservices/feedback-trainer',
         'microservices/stock-scanner',
         'microservices/scanner-workers',

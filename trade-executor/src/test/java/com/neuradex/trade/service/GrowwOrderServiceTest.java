@@ -39,8 +39,9 @@ class GrowwOrderServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new GrowwOrderService();
-        ReflectionTestUtils.setField(service, "restTemplate", restTemplate);
+        // The RestTemplate is injected now (one shared, timeout-configured bean)
+        // rather than constructed inside the service.
+        service = new GrowwOrderService(restTemplate);
         ReflectionTestUtils.setField(service, "baseUrl", "https://fake.groww.test/v1/api");
         ReflectionTestUtils.setField(service, "apiToken", "test-token");
     }

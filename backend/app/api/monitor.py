@@ -86,6 +86,12 @@ _COMPONENTS: list[dict] = [
      "source": "stock-scanner/app/workers/grading.py",
      "role": "Scores past promotions as a day-clustered lift against the same "
              "day's field and against what the reviewer rejected."},
+    {"id": "position_monitor", "label": "Position Monitor", "layer": "execution",
+     "host": "stock-prediction-trade-executor",
+     "source": "trade-executor/src/main/java/com/neuradex/trade/service/PositionMonitor.java",
+     "role": "Closes what the executor opened, on the stop/target that arrived "
+             "with the signal plus a same-day square-off. Until 2026-09-09 nothing "
+             "published a close, so every executor trade stayed open forever."},
 ]
 
 _VOTE_AGENTS: list[tuple[str, str, str]] = [
@@ -176,6 +182,11 @@ _EDGES: list[dict] = [
     {"from": "ensemble",  "to": "risk",      "kind": "amqp", "queue": "ensemble.decision"},
     {"from": "risk",      "to": "executor",  "kind": "amqp", "queue": "risk.validated"},
     {"from": "executor",  "to": "feedback",  "kind": "amqp", "queue": "trade.outcomes.feedback"},
+    # The close half of the trade lifecycle: the monitor prices held symbols
+    # through the backend and publishes the closing leg on the same queue.
+    {"from": "executor",  "to": "position_monitor", "kind": "http"},
+    {"from": "position_monitor", "to": "backend",  "kind": "http"},
+    {"from": "position_monitor", "to": "feedback", "kind": "amqp", "queue": "trade.outcomes.feedback"},
     # RL learns from outcomes through the backend Q-table, not a queue — the
     # `trade.outcomes.rl` binding was removed 2026-08-17 because no consumer for
     # it was ever written (see market-data-service rabbitmq_setup.py).

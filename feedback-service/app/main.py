@@ -146,7 +146,8 @@ async def _store_trade_record(pool: asyncpg.Pool, payload: dict) -> bool:
     # detail that context is for, so keep it rather than storing "{}".
     if not ctx:
         execution = {k: payload[k] for k in
-                     ("fill_qty", "stop_loss", "take_profit", "portfolio_value", "status")
+                     ("fill_qty", "stop_loss", "take_profit", "portfolio_value",
+                      "status", "exit_reason")
                      if payload.get(k) is not None}
         if execution:
             ctx = {"source": "trade-executor", **execution}
@@ -199,7 +200,12 @@ async def _store_trade_record(pool: asyncpg.Pool, payload: dict) -> bool:
             timestamp_close=EXCLUDED.timestamp_close,
             trade_source=EXCLUDED.trade_source,
             session_id=EXCLUDED.session_id,
-            paper_trade=EXCLUDED.paper_trade
+            paper_trade=EXCLUDED.paper_trade,
+            -- The closing leg carries these and the entry cannot. Leaving them out
+            -- stored every executor close with a NULL duration and a context still
+            -- reading status=FILLED, so nothing recorded WHY a position was exited.
+            duration_minutes=COALESCE(EXCLUDED.duration_minutes, trade_records.duration_minutes),
+            market_context=COALESCE(EXCLUDED.market_context, trade_records.market_context)
         """,
         payload.get("trade_id", str(uuid.uuid4())),
         payload.get("symbol", ""),
@@ -528,6 +534,50 @@ async def get_trades(limit: int = 500, offset: int = 0, source: str = None,
         return result
     except Exception as exc:
         logger.error("GET /trades error: %s", exc)
+        return []
+
+
+@app.get("/trades/open")
+async def get_open_trades(days: int = 1):
+    """Trades the trade-executor opened and never closed.
+
+    The executor holds its positions in memory, so a restart used to lose them:
+    the rows stayed open in the database with nothing left alive that knew to
+    close them. This is how it gets them back at boot.
+
+    Only rows written by the executor are returned — a Python session runner
+    manages its own exits and must not have them taken over from here. Also only
+    the recent ones: `days=1` is today, and an older open row is a stranded
+    record, not a position anyone still holds.
+    """
+    if not _pool:
+        return []
+    try:
+        rows = await _pool.fetch(
+            f"""
+            SELECT {_TRADE_COLUMNS}, paper_trade
+            FROM trade_records
+            WHERE exit_price IS NULL
+              AND outcome IS NULL
+              AND COALESCE(entry_price, 0) > 0
+              AND market_context->>'source' = 'trade-executor'
+              AND timestamp_open >= NOW() - ($1::int * INTERVAL '1 day')
+            ORDER BY timestamp_open ASC
+            """,
+            max(1, min(days, 30)),
+        )
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["agent_signals"]  = json.loads(d["agent_signals"])  if d["agent_signals"]  else {}
+            d["market_context"] = json.loads(d["market_context"]) if d["market_context"] else {}
+            for k in ("timestamp_open", "timestamp_close", "created_at"):
+                if d.get(k):
+                    d[k] = d[k].isoformat()
+            out.append(d)
+        return out
+    except Exception as exc:
+        logger.error("GET /trades/open error: %s", exc)
         return []
 
 

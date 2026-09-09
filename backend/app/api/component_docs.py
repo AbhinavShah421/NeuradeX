@@ -332,6 +332,55 @@ _DOCS: dict[str, dict] = {
             "No graded days until the snapshots accumulate; it needs ~20 trading days to say anything.",
         ],
     },
+    "position_monitor": {
+        "role": "Closes what the executor opened — the half of the trade lifecycle "
+                "that did not exist until 2026-09-09.",
+        "language": "Java",
+        "entry": ("trade-executor/src/main/java/com/neuradex/trade/service/PositionMonitor.java", "tick"),
+        "flow": [
+            ("Claim the symbol at entry", "trade-executor/src/main/java/com/neuradex/trade/consumer/RiskValidatedConsumer.java", "onRiskValidated",
+             "A BUY on a symbol already held is skipped. MIDHANI opened at 09:40, 09:42 and 09:42 — "
+             "three positions inside two minutes, two at an identical price — because the executor "
+             "kept no record of what it held."),
+            ("Track every leg", "trade-executor/src/main/java/com/neuradex/trade/service/OpenPositionStore.java", "tryOpen",
+             "Symbol maps to a LIST, not one position. New duplicates are refused, but duplicates "
+             "that already exist must stay closable: the first rehydrate found five open rows across "
+             "two symbols and a symbol-keyed map silently dropped three."),
+            ("Price only what can be priced", "backend/app/api/stocks.py", "get_ltp_strict",
+             "POST /api/stocks/ltp omits any symbol it cannot genuinely price. Deliberately NOT "
+             "/directory/prices, which substitutes a simulated price — right for a directory grid, "
+             "catastrophic for something that closes real positions."),
+            ("Enforce the levels that arrived with the signal", "trade-executor/src/main/java/com/neuradex/trade/service/PositionMonitor.java", "exitReason",
+             "stop_loss and take_profit are computed upstream by risk-engine and ride on "
+             "RiskValidated. This invents no trailing stop and no time-stop — those are strategy "
+             "and live in the session runner."),
+            ("Publish the close under the entry's id", "trade-executor/src/main/java/com/neuradex/trade/service/PositionMonitor.java", "close",
+             "feedback-service upserts ON CONFLICT (trade_id), so the same id completes the entry "
+             "row. A fresh id would store two half-trades."),
+            ("Survive a restart", "trade-executor/src/main/java/com/neuradex/trade/service/PositionRehydrator.java", "run",
+             "The store is in memory, so GET /trades/open reloads still-open executor rows at boot. "
+             "Without it a deploy in market hours orphans everything held."),
+        ],
+        "endpoints": [
+            ("GET", "/positions", "trade-executor/src/main/java/com/neuradex/trade/controller/PositionController.java", "open"),
+            ("POST", "/positions/{symbol}/close", "trade-executor/src/main/java/com/neuradex/trade/controller/PositionController.java", "forceClose"),
+            ("GET", "/trades/open", "feedback-service/app/main.py", "get_open_trades"),
+            ("POST", "/api/stocks/ltp", "backend/app/api/stocks.py", "get_ltp_strict"),
+        ],
+        "gotchas": [
+            "pnl_pct is published as a FRACTION. Every other producer stores it that way (mean "
+            "|pnl_pct| 0.0062 over 194 paper trades) and determine_outcome's threshold is 0.001 — "
+            "sending a percentage would feed the weight learner a 100x signal without failing.",
+            "A tick spanning both the stop and the target resolves to the STOP. Which came first is "
+            "unknowable from a 30-second snapshot, and assuming the target books wins that may not "
+            "have happened.",
+            "An unpriceable symbol at square-off stays OPEN and logs an error. Closing at a number "
+            "we cannot stand behind is worse than staying open; POST /positions/{symbol}/close is "
+            "the escape hatch.",
+            "Containers run UTC — every clock decision is made explicitly in Asia/Kolkata.",
+            "trade-executor has NO bind mount: changes need `docker compose build trade-executor`.",
+        ],
+    },
     "scanner": {
         "role": "Sweeps the NSE universe and ranks candidates.",
         "language": "Python · FastAPI",

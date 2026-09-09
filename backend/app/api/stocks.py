@@ -366,6 +366,88 @@ class PricesRequest(BaseModel):
     symbols: list[str]
 
 
+@router.post("/ltp")
+async def get_ltp_strict(req: PricesRequest):
+    """Real last-traded prices only. A symbol that cannot be priced is OMITTED.
+
+    Deliberately not /directory/prices, which falls back to a simulated price
+    when Groww does not answer. That fallback is correct for a directory page —
+    a placeholder beats a blank cell — and completely wrong for anything that
+    acts on the number. The trade-executor closes positions against this, and
+    exiting a real position at a random price is worse than not exiting at all,
+    so the contract here is "a price you can act on, or nothing".
+    """
+    import asyncio as _aio
+
+    symbols = [s.upper() for s in req.symbols[:100]]
+    out: dict[str, float] = {}
+    client = get_groww_client()
+    if not client:
+        return {"prices": out, "priced": 0, "asked": len(symbols),
+                "source": "none", "detail": "no broker client"}
+
+    # The price is the last 1-minute candle CLOSE, NOT /live-data/ltp.
+    #
+    # /live-data/ltp 403s here even with a freshly issued token, and nothing else
+    # in this system has ever called it. Worse, calling it is not free: the client
+    # reads a 403 as a revoked token, forces a re-auth, and then backs off for 30
+    # minutes — so an unentitled endpoint churns the token every service shares.
+    #
+    # /historical/candle/range is what the platform actually prices on; the session
+    # runner reaches for it ~150 times a day and enters and exits on candle closes.
+    # So this is not a downgrade to a worse number, it is the number the rest of
+    # the system trades on — a real traded price, up to a minute or two old.
+    #
+    # NOTE: on 2026-09-09 the candle endpoint was ALSO 403ing account-wide from
+    # 13:00 UTC, before any of this was deployed, so this path is unverified
+    # against a live quote. Every branch below is written to return nothing rather
+    # than something when that is the case.
+    source = "candle"
+    missing = list(symbols)
+    if missing:
+        now = datetime.now()
+        start = now - timedelta(minutes=30)
+
+        async def _last_close(sym: str):
+            try:
+                candles = await client.get_historical(sym, 1, start, now)
+                if not candles:
+                    return sym, None
+                # Walk BACKWARDS to the last candle that actually traded. The final
+                # bar is usually still forming, and a zero-volume bar is not a price
+                # anyone transacted at — the same forming-candle trap that had the
+                # anomaly agent vetoing half of all decisions for two days.
+                for c in reversed(candles):
+                    if isinstance(c, list) and len(c) >= 5:
+                        close = float(c[4])                       # [ts,o,h,l,c,v]
+                        vol = float(c[5]) if len(c) >= 6 else 1.0
+                    elif isinstance(c, dict):
+                        close = float(c.get("close") or c.get("c") or 0)
+                        vol = float(c.get("volume") or c.get("v") or 0)
+                    else:
+                        continue
+                    if close > 0 and vol > 0:
+                        return sym, close
+                return sym, None
+            except Exception as exc:
+                logger.debug("candle fallback failed for %s: %s", sym, exc)
+                return sym, None
+
+        # Bounded concurrency — this runs against a source that 403s under load.
+        for i in range(0, len(missing), 10):
+            for sym, price in await _aio.gather(
+                *(_last_close(s) for s in missing[i:i + 10])
+            ):
+                if price is not None:
+                    out[sym] = price
+
+    if len(out) < len(symbols):
+        logger.warning("strict LTP priced %d/%d symbols (source=%s); unpriced: %s",
+                       len(out), len(symbols), source,
+                       [s for s in symbols if s not in out])
+    return {"prices": out, "priced": len(out), "asked": len(symbols), "source": source}
+
+
 @router.post("/directory/prices")
 async def get_directory_prices(req: PricesRequest):
     """

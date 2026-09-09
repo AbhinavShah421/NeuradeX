@@ -26,8 +26,8 @@ public class GrowwOrderService {
     @Value("${groww.api.token:}")
     private String apiToken;
 
-    public GrowwOrderService() {
-        this.restTemplate = new RestTemplate();
+    public GrowwOrderService(RestTemplate restTemplate) {
+        this.restTemplate = restTemplate;
     }
 
     @Retryable(maxAttempts = 3, backoff = @Backoff(delay = 1000, multiplier = 2))
@@ -93,5 +93,50 @@ public class GrowwOrderService {
             log.error("Groww order failed for {}: {}", validated.getSymbol(), e.getMessage());
             throw e;
         }
+    }
+
+    /**
+     * Place the order that FLATTENS an existing position.
+     *
+     * <p>Called only from PositionMonitor, and only when the position is not a
+     * paper trade. The transaction type is the opposite of the entry: a long is
+     * closed by selling. Live entries go out as product=MIS, so a position not
+     * squared off here is squared off by the broker at its own time and price,
+     * which is why a failure to place this is an error rather than a retry-later.
+     *
+     * @return the exchange order id
+     */
+    @Retryable(maxAttempts = 3, backoff = @Backoff(delay = 1000, multiplier = 2))
+    public String closePosition(String symbol, double qty, String entryAction) {
+        int shares = (int) Math.floor(qty);
+        if (shares <= 0) {
+            throw new IllegalArgumentException(
+                "Cannot close " + symbol + " — quantity rounds to zero (qty=" + qty + ")");
+        }
+        String exitType = "SELL".equals(entryAction) ? "BUY" : "SELL";
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.setBearerAuth(apiToken);
+
+        Map<String, Object> body = Map.of(
+                "trading_symbol", symbol,
+                "exchange", "NSE",
+                "transaction_type", exitType,
+                "order_type", "MARKET",
+                "quantity", shares,
+                "product", "MIS"
+        );
+
+        ResponseEntity<Map> response = restTemplate.postForEntity(
+                baseUrl + "/order/create", new HttpEntity<>(body, headers), Map.class);
+
+        if (!response.getStatusCode().is2xxSuccessful() || response.getBody() == null) {
+            throw new IllegalStateException(
+                "Exit order rejected for " + symbol + ": " + response.getStatusCode());
+        }
+        Object orderId = response.getBody().get("order_id");
+        log.info("[LIVE] EXIT {} {} shares of {} (orderId={})", exitType, shares, symbol, orderId);
+        return orderId != null ? orderId.toString() : "";
     }
 }

@@ -550,6 +550,10 @@ services:
       AUTOPILOT_CAPITAL: "50000"
       AUTOPILOT_TICK_SECS: "60"
       AUTOPILOT_MAX_HOLD_MINUTES: "0"
+      # A-grade promotions disarmed 2026-08-31: 26.1% realized accuracy vs
+      # 0.82-0.95 advertised win_probability (scanner's own evaluator).
+      # Set "1" to resume trading them; the watch UI keeps working either way.
+      AUTOPILOT_TRADE_PROMOTIONS: "0"
       AUTOPILOT_BACKTEST_SPEED: "1"
       AUTOPILOT_BACKTEST_BATCH_SIZE: "7"
       AUTOPILOT_BACKTEST_POLL: "15"
@@ -764,6 +768,10 @@ services:
       RABBITMQ_USER: guest
       RABBITMQ_PASSWORD: guest
       PAPER_TRADING_MODE: "true"
+      # The position monitor prices held symbols through the backend and reloads
+      # open positions from feedback-service at boot.
+      BACKEND_URL: "http://backend:8000"
+      FEEDBACK_URL: "http://feedback-service:8012"
     ports:
       - "8011:8011"
     depends_on:
