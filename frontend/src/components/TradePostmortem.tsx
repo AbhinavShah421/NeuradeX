@@ -168,8 +168,17 @@ const TradePostmortem: React.FC<{ tradeId: string }> = ({ tradeId }) => {
             {path.everGreen
               ? `Peaked at +${path.bestPct}% and closed at ${d.pnlPct}%.`
               : `Never traded above entry — best was ${path.bestPct}%.`}
-            {' '}Over {path.bars} one-minute bars. A peak below the 0.125% round-trip cost
-            was never bankable, so it points at the entry rather than the exit.
+            {' '}Over {path.bars} one-minute bars.{' '}
+            {/* This sentence used to be printed unconditionally, which made it
+                read as a verdict on every trade. On a trade that peaked ABOVE
+                the cost it flatly contradicted the headline: the banner blamed
+                the exit while this line said the entry. Say what is true of
+                THIS path, and let the two agree. */}
+            {path.peakWasBankable
+              ? `The peak cleared the ${path.roundTripCostPct ?? 0.125}% round-trip cost, so there was a
+                 real gain to keep — that points at the exit, not the entry.`
+              : `The peak never cleared the ${path.roundTripCostPct ?? 0.125}% round-trip cost, so there
+                 was no gain here that could have been banked — that points at the entry, not the exit.`}
           </div>
         </div>
       ) : null}

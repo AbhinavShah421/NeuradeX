@@ -628,6 +628,12 @@ async def trade_postmortem(trade_id: str) -> dict:
                     # holding have cleared the round trip?
                     "recovered_after_exit": (rebound is not None
                                              and rebound > _ROUND_TRIP_COST_PCT),
+                    # Carried so the UI states the cost hurdle instead of
+                    # hardcoding it, and — more importantly — so it can say
+                    # whether THIS trade cleared it rather than printing a
+                    # general remark that reads as a verdict.
+                    "round_trip_cost_pct": _ROUND_TRIP_COST_PCT,
+                    "peak_was_bankable": mfe > _ROUND_TRIP_COST_PCT,
                 }
     except Exception as exc:
         logger.debug("price path unavailable for %s: %s", trade_id, exc)
@@ -694,12 +700,16 @@ async def trade_postmortem(trade_id: str) -> dict:
             blame = {
                 "target": "exit",
                 "headline": "The stop was too tight" if stopped else "It was closed too early",
+                # `pnl_pct` is a raw float here — unformatted it renders as
+                # "-1.6099999999999999%", which reads as a precision the number
+                # does not have and undermines a panel whose whole job is to be
+                # believed.
                 "detail": (
-                    f"We came out at {pnl_pct}%, and the price then reached "
+                    f"We came out at {pnl_pct:.2f}%, and the price then reached "
                     f"{path['best_after_exit_pct']}% above the entry over the following "
                     f"{path['bars_after_exit']} minutes. The direction was right; the trade "
                     "was not given room." if stopped else
-                    f"We came out at {pnl_pct}% on the {_loss_reason(exit_reason, pnl_pct, held)}, "
+                    f"We came out at {pnl_pct:.2f}% on the {_loss_reason(exit_reason, pnl_pct, held)}, "
                     f"and the price then reached {path['best_after_exit_pct']}% above the entry "
                     f"over the following {path['bars_after_exit']} minutes. The entry was "
                     "vindicated; the exit fired first."),
@@ -718,7 +728,7 @@ async def trade_postmortem(trade_id: str) -> dict:
             blame = {
                 "target": "exit",
                 "headline": "The exit gave back a real gain",
-                "detail": (f"It was up {best}% at best and still closed at {pnl_pct}% — "
+                "detail": (f"It was up {best}% at best and still closed at {pnl_pct:.2f}% — "
                            f"{path['gave_back_pct']} points handed back. The entry found the move; "
                            "the exit did not keep it."),
             }
