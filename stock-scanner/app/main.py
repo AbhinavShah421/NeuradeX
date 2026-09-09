@@ -17,6 +17,7 @@ from .scanner import (
     get_auto_scan_interval, set_auto_scan_interval, next_scan_at,
     agrade_watch_loop, agrade_status, agrade_force_promote,
     evaluate_agrades, get_agrade_eval, ranked_by_change,
+    grade_promotions,
 )
 from .universe import UNIVERSE
 
@@ -124,6 +125,31 @@ async def evaluate(date: str | None = None, _: None = Depends(_require_internal)
     """Grade a day's morning watchlist against the actual move (post-market signal score)."""
     asyncio.create_task(evaluate_day(date))
     return {"status": "started"}
+
+
+@app.post("/grade-promotions")
+async def grade_promotions_ep(days_back: int = 30, horizon_days: int = 1,
+                              _: None = Depends(_require_internal)):
+    """Score past promotions against a same-day control, clustered by day.
+
+    Long-running (it prices the whole field for every graded day), so it is
+    fired as a task and the result read from /promotion-grades.
+    """
+    asyncio.create_task(grade_promotions(days_back, horizon_days))
+    return {"status": "started", "days_back": days_back, "horizon_days": horizon_days}
+
+
+@app.get("/promotion-grades")
+async def promotion_grades():
+    """The latest promotion grading: does the promoter beat the day's field, and
+    does the reviewer beat what it rejected."""
+    from .scanner import _get_redis, _PROMO_GRADE_KEY
+    import json as _json
+    try:
+        raw = await (await _get_redis()).get(_PROMO_GRADE_KEY)
+        return {"status": "success", "data": _json.loads(raw) if raw else None}
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc)}
 
 
 @app.get("/evaluation")
