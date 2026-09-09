@@ -53,6 +53,35 @@ def _gate_defaults() -> dict:
         return {}
 
 
+def _validator_defaults() -> dict:
+    try:
+        from app.agents import validator as v
+        return {"anti_predictive_conf": v._ANTI_PREDICTIVE_CONF}
+    except Exception:
+        logger.warning("could not read validator defaults", exc_info=True)
+        return {}
+
+
+def _scanner_defaults() -> dict:
+    """Shipped scanner-worker thresholds.
+
+    The scanner is a SEPARATE service, so these cannot be imported — the values
+    are mirrored here and the scanner reads the override layer from the same
+    Redis key. That mirroring is the one place this module cannot honour its own
+    "defaults travel with the control" rule, so the numbers are commented with
+    their source and a drift between the two shows up as a control whose reset
+    does not match the code.
+    """
+    return {
+        "sector_min_names": 4,      # workers/sectors.py _MIN_NAMES
+        "sector_broad": 0.65,       # workers/sectors.py _BROAD
+        "gap_material": 1.5,        # workers/movers.py _GAP_MATERIAL
+        "vol_conviction": 2.0,      # workers/movers.py _VOL_CONVICTION
+        "vol_thin": 0.8,            # workers/movers.py _VOL_THIN
+        "rsi_extended": 72.0,       # workers/movers.py _RSI_EXTENDED
+    }
+
+
 def _ensemble_defaults() -> dict:
     try:
         from app.agents import ensemble as e
@@ -77,6 +106,8 @@ def _ensemble_defaults() -> dict:
 def control_specs() -> list[dict]:
     g = _gate_defaults()
     e = _ensemble_defaults()
+    v = _validator_defaults()
+    sc = _scanner_defaults()
     out: list[dict] = []
 
     for mode in ("strict", "gentle", "loose"):
@@ -160,6 +191,65 @@ def control_specs() -> list[dict]:
          "label": "Boost above this win rate", "type": "number", "min": 0.0, "max": 1.0, "step": 0.01,
          "default": e.get("mem_strong_winrate"), "read_in": "agents/ensemble.py — _MEM_STRONG_WINRATE",
          "help": "Precedent above this actively boosts confidence."},
+
+        # ── Entry validator ─────────────────────────────────────────────────
+        # The last checkpoint before a BUY. Only one of its checks has a number
+        # worth turning: the rest test facts (is the price finite, did the bar
+        # trade) that have no threshold to tune.
+        {"id": "validator.anti_predictive_conf", "group": "Entry validator",
+         "label": "Anti-predictive confidence band", "type": "number",
+         "min": 0.50, "max": 1.05, "step": 0.01, "default": v.get("anti_predictive_conf"),
+         "read_in": "agents/validator.py — _ANTI_PREDICTIVE_CONF",
+         "help": "Entries at or above this confidence are blocked even when the gate "
+                 "allows them, unless the caller passes allow_anti_predictive.",
+         "evidence": "Win rate is 40% in the 0.50-0.60 band and 16% above 0.90 over "
+                     "7k+ intraday trades. This is the backstop for a gate whose "
+                     "ceiling has been widened by hand on this page."},
+
+        # ── Scanner: what counts as a sector move ───────────────────────────
+        {"id": "scanner.sector_min_names", "group": "Scanner — sectors",
+         "label": "Minimum names to read a sector", "type": "number",
+         "min": 2, "max": 20, "step": 1, "default": sc.get("sector_min_names"),
+         "read_in": "workers/sectors.py — _MIN_NAMES",
+         "help": "Below this a sector is reported but never ranked.",
+         "danger": "Setting this to 2-3 lets one stock BE its sector: its move "
+                   "becomes a 'sector move' wearing a label."},
+        {"id": "scanner.sector_broad", "group": "Scanner — sectors",
+         "label": "Breadth that counts as broad", "type": "number",
+         "min": 0.50, "max": 0.95, "step": 0.01, "default": sc.get("sector_broad"),
+         "read_in": "workers/sectors.py — _BROAD",
+         "help": "Share of a sector moving the same way before it is called a "
+                 "supporting tailwind for a name inside it."},
+
+        # ── Scanner: what counts as a tradable move ─────────────────────────
+        {"id": "scanner.gap_material", "group": "Scanner — movers",
+         "label": "Gap that dominates the day", "type": "number",
+         "min": 0.5, "max": 5.0, "step": 0.1, "default": sc.get("gap_material"),
+         "read_in": "workers/movers.py — _GAP_MATERIAL",
+         "help": "Opening gap above this is treated as the leading fact about the "
+                 "move, and a move that is mostly gap is classed 'already happened'."},
+        {"id": "scanner.vol_conviction", "group": "Scanner — movers",
+         "label": "Relative volume = real participation", "type": "number",
+         "min": 1.0, "max": 6.0, "step": 0.1, "default": sc.get("vol_conviction"),
+         "read_in": "workers/movers.py — _VOL_CONVICTION",
+         "help": "Above this a move is classed 'in progress' — the only class a "
+                 "promotion may be drawn from.",
+         "danger": "Lowering this widens what can be promoted. It is the main "
+                   "control on how many nominations reach the reviewer."},
+        {"id": "scanner.vol_thin", "group": "Scanner — movers",
+         "label": "Relative volume = thin", "type": "number",
+         "min": 0.2, "max": 1.0, "step": 0.05, "default": sc.get("vol_thin"),
+         "read_in": "workers/movers.py — _VOL_THIN",
+         "help": "Below this a move is nobody trading, and unwinds as easily as "
+                 "it formed."},
+        {"id": "scanner.rsi_extended", "group": "Scanner — movers",
+         "label": "RSI that marks a move late", "type": "number",
+         "min": 60, "max": 90, "step": 1, "default": sc.get("rsi_extended"),
+         "read_in": "workers/movers.py — _RSI_EXTENDED",
+         "help": "Gainers at or above this are classed 'extended'.",
+         "evidence": "This RSI is computed on DAILY candles, so it does NOT catch "
+                     "an intraday rip — names up 6-13% on the day read 54-68. The "
+                     "buying-strength constraint tests the trend legs instead."},
     ]
     return out
 
@@ -239,6 +329,20 @@ async def get(control_id: str, default: Any = None) -> Any:
         return ov[control_id]
     s = spec(control_id)
     return s.get("default") if s else default
+
+
+def get_sync(control_id: str) -> Any:
+    """An override, from the in-process cache only. None when not overridden.
+
+    For synchronous callers — the validator's checks are plain functions that
+    cannot await. It deliberately does NOT reach Redis: a blocking network call
+    inside a per-candle decision path is how a gate check becomes a latency
+    problem. The async path refreshes the cache every _CACHE_TTL anyway, so this
+    is at most that far behind, and a cold cache simply returns None and the
+    caller keeps the value the code ships.
+    """
+    data = _cache.get("data")
+    return data.get(control_id) if data else None
 
 
 async def set_value(control_id: str, value: Any) -> tuple[bool, str]:

@@ -54,6 +54,40 @@ _LAYERS = ["edge", "ui", "api", "vote", "agents", "decision", "execution", "data
 # container, and solely because the backend calls it for FinBERT inference.
 # These in-process agents produce session_decisions AND now feed the execution
 # chain via app/utils/decision_publisher.py. Weight and accuracy attached live.
+# In-process components that are NOT vote agents: they hold no weight and cast
+# no vote, so the per-agent accuracy columns are meaningless for them — but they
+# can fail, and something that can fail while nothing reports it is exactly what
+# this map exists to prevent. Each names the container it runs inside, because
+# unlike the vote agents these do not all live in the session runner.
+_COMPONENTS: list[dict] = [
+    {"id": "validator", "label": "Entry Validator", "layer": "vote",
+     "host": "stock-prediction-session-runner",
+     "source": "backend/app/agents/validator.py",
+     "role": "Last checkpoint before a BUY. Verifies facts and can only block; "
+             "fails closed, so an unusable validator stops the entry rather "
+             "than letting it through unchecked."},
+    {"id": "wk_sectors", "label": "Sector Worker", "layer": "agents",
+     "host": "stock-prediction-stock-scanner",
+     "source": "stock-scanner/app/workers/sectors.py",
+     "role": "Ranks sectors on median move weighted by breadth over the one "
+             "universe sweep."},
+    {"id": "wk_movers", "label": "Movers Worker", "layer": "agents",
+     "host": "stock-prediction-stock-scanner",
+     "source": "stock-scanner/app/workers/movers.py",
+     "role": "Ranks the day's gainers/losers and attributes each move from the "
+             "sweep's own figures."},
+    {"id": "wk_promotion", "label": "Promotion Reviewer", "layer": "agents",
+     "host": "stock-prediction-stock-scanner",
+     "source": "stock-scanner/app/workers/promotion.py",
+     "role": "Reviews every nomination before it reaches the watchlist — checks "
+             "the parameters were considered, not that the answer sounds right."},
+    {"id": "wk_grading", "label": "Promotion Grading", "layer": "ml",
+     "host": "stock-prediction-stock-scanner",
+     "source": "stock-scanner/app/workers/grading.py",
+     "role": "Scores past promotions as a day-clustered lift against the same "
+             "day's field and against what the reviewer rejected."},
+]
+
 _VOTE_AGENTS: list[tuple[str, str, str]] = [
     ("technical",     "Technical",     "backend/app/agents/technical.py"),
     ("pattern",       "Pattern",       "backend/app/agents/pattern.py"),
@@ -104,6 +138,8 @@ _NODES: list[dict] = [
     {"id": f"vote_{aid}", "label": label, "layer": "vote",
      "kind": "inprocess", "agent": aid, "source": src}
     for aid, label, src in _VOTE_AGENTS
+] + [
+    {**c, "kind": "component"} for c in _COMPONENTS
 ]
 
 # Edges are the end-to-end flow. `queue` marks an AMQP hop whose CONSUMER COUNT
@@ -150,6 +186,16 @@ _EDGES: list[dict] = [
     {"from": "trainer",   "to": "mlflow",    "kind": "http"},
     {"from": "trainer",   "to": "postgres",  "kind": "sql"},
     {"from": "scanner",   "to": "postgres",  "kind": "sql"},
+    # The scanner's analysis workers, and the gate the runner puts in front of
+    # every entry. Drawn so a reader can see WHERE the promotion pipeline runs
+    # and where it ends — a component with no edge reads as decoration.
+    {"from": "scanner",   "to": "wk_sectors",   "kind": "call"},
+    {"from": "scanner",   "to": "wk_movers",    "kind": "call"},
+    {"from": "wk_sectors", "to": "wk_movers",   "kind": "call"},
+    {"from": "wk_movers", "to": "wk_promotion", "kind": "call"},
+    {"from": "wk_promotion", "to": "redis",     "kind": "cache"},
+    {"from": "wk_promotion", "to": "wk_grading", "kind": "call"},
+    {"from": "runner",    "to": "validator",    "kind": "call"},
     {"from": "autopilot", "to": "backend",   "kind": "http"},
     {"from": "backend",   "to": "ollama",    "kind": "http"},
     {"from": "backend",   "to": "elastic",   "kind": "http"},
@@ -894,6 +940,23 @@ async def snapshot(force: bool = False):
     for spec in _NODES:
         ct = containers.get(spec.get("container", ""), {})
         pr = probes.get(spec["id"], {})
+        if spec.get("kind") == "component":
+            # A component's health IS its host's: it has no process, no port and
+            # no probe of its own, so inventing a separate status for it would
+            # be a status that cannot be wrong.
+            host = spec.get("host", "stock-prediction-session-runner")
+            up = containers.get(host, {}).get("running")
+            nodes.append({
+                "id": spec["id"], "label": spec["label"], "layer": spec["layer"],
+                "kind": "component", "source": spec["source"], "role": spec.get("role"),
+                "container": None, "host": host,
+                "running": up, "state": "in-process" if up else "host down",
+                "health": None, "log_severity": "ok",
+                "probe_ok": None,
+                "probe_detail": f"runs inside {host.replace('stock-prediction-', '')}",
+                "github": f"{_GITHUB_BASE}/{spec['source']}",
+            })
+            continue
         if spec.get("kind") == "inprocess":
             st = agent_stats.get(spec["agent"], {})
             nodes.append({

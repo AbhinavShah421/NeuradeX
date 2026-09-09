@@ -756,14 +756,16 @@ const SystemMap: React.FC = () => {
                                   : isFocus ? 'rgba(56,189,248,.10)' : 'rgba(13,21,36,.92)'}
                             stroke={ring}
                             strokeWidth={isSel || isFocus ? 2.2 : (isUp || isDown_) ? 1.8 : 1.2}
-                            strokeDasharray={n.kind === 'inprocess' ? '5 3' : undefined} />
+                            strokeDasharray={n.kind === 'inprocess' || n.kind === 'component' ? '5 3' : undefined} />
                       <rect width="3.5" height={NODE_H} rx="2" fill={col} />
                       <text x="14" y="23" fill={C.text} style={{ fontSize: 12.5, fontWeight: 600 }}>
                         {n.label.length > 17 ? n.label.slice(0, 16) + '…' : n.label}
                       </text>
                       <text x="14" y="41" fill={C.dim}
                             style={{ fontSize: 10, fontFamily: 'ui-monospace, monospace' }}>
-                        {n.kind === 'inprocess'
+                        {n.kind === 'component'
+                          ? `in ${(n.host ?? '').replace('stock-prediction-', '') || 'process'}`
+                          : n.kind === 'inprocess'
                           ? `w ${n.weight ?? '—'}${n.lift != null
                               ? ` · ${n.lift >= 0 ? '+' : ''}${(n.lift * 100).toFixed(1)}pp` : ''}`
                           : n.running === false ? 'STOPPED'

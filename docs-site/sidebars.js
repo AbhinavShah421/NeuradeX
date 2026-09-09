@@ -34,6 +34,8 @@ const sidebars = {
         'ai-engine/llm-provider',
         'ai-engine/live-sessions',
         'ai-engine/data-providers',
+        'ai-engine/trading-controls',
+        'ai-engine/entry-validator',
       ],
     },
     {
@@ -72,6 +74,7 @@ const sidebars = {
         'microservices/risk-trade',
         'microservices/feedback-trainer',
         'microservices/stock-scanner',
+        'microservices/scanner-workers',
         'microservices/sentiment-service',
       ],
     },

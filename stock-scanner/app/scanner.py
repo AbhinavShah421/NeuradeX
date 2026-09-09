@@ -1101,6 +1101,54 @@ async def _market_regime(client: httpx.AsyncClient) -> tuple[int, dict]:
 
 # ── Calibration (learning loop) ───────────────────────────────────────────────
 
+# Runtime knobs the Trading Controls page writes. The scanner is a separate
+# service, so it reads the same Redis key the backend's control layer owns
+# rather than importing it — one writer, many readers.
+_CONTROLS_KEY = "ai_engine:runtime_controls"
+_controls_cache: dict = {"data": {}, "ts": 0.0}
+_CONTROLS_TTL = 30.0
+
+
+async def _controls() -> dict:
+    """Current overrides, cached briefly.
+
+    Cached because the sweep asks per symbol and an uncached Redis read per name
+    would be thousands per scan; 30s is well inside the cadence at which anyone
+    turns one of these knobs.
+    """
+    now = time.time()
+    if _controls_cache["data"] and (now - _controls_cache["ts"]) < _CONTROLS_TTL:
+        return _controls_cache["data"]
+    try:
+        rc = await _get_redis()
+        raw = await rc.get(_CONTROLS_KEY)
+        data = json.loads(raw) if raw else {}
+        _controls_cache.update({"data": data, "ts": now})
+        return data
+    except Exception as exc:
+        logger.debug("controls unavailable, using shipped defaults: %s", exc)
+        return _controls_cache["data"] or {}
+
+
+async def worker_tunables() -> dict:
+    """The scanner-worker thresholds, override applied over shipped default.
+
+    Defaults live in the worker modules; this only overrides what the operator
+    has actually changed, so an untouched knob keeps the value in the code.
+    """
+    ov = await _controls()
+    from .workers import movers as M
+    from .workers import sectors as S
+    return {
+        "sector_min_names": ov.get("scanner.sector_min_names", S._MIN_NAMES),
+        "sector_broad": ov.get("scanner.sector_broad", S._BROAD),
+        "gap_material": ov.get("scanner.gap_material", M._GAP_MATERIAL),
+        "vol_conviction": ov.get("scanner.vol_conviction", M._VOL_CONVICTION),
+        "vol_thin": ov.get("scanner.vol_thin", M._VOL_THIN),
+        "rsi_extended": ov.get("scanner.rsi_extended", M._RSI_EXTENDED),
+    }
+
+
 async def _load_sector_map() -> dict[str, str]:
     """The backend's NSE industry map, from its Redis cache.
 
@@ -1130,6 +1178,20 @@ async def _run_workers(movers: list[dict]) -> dict:
     from .workers import build_promotion, rank_movers, rank_sectors
     from .workers.promotion import review_all
     from .workers.sectors import sector_tailwind
+
+    # Apply the operator's overrides to the worker modules for this run. Module
+    # attributes rather than parameters because the thresholds are read at
+    # several points inside each worker, and threading six values through every
+    # signature would make the workers harder to read than the knobs are worth.
+    from .workers import movers as M
+    from .workers import sectors as S
+    tun = await worker_tunables()
+    S._MIN_NAMES = int(tun["sector_min_names"])
+    S._BROAD = float(tun["sector_broad"])
+    M._GAP_MATERIAL = float(tun["gap_material"])
+    M._VOL_CONVICTION = float(tun["vol_conviction"])
+    M._VOL_THIN = float(tun["vol_thin"])
+    M._RSI_EXTENDED = float(tun["rsi_extended"])
 
     smap = await _load_sector_map()
     sector_of = lambda sym: smap.get((sym or "").upper(), "Other")

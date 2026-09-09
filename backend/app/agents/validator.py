@@ -160,6 +160,23 @@ def _check_gate_consistency(ctx: dict) -> Optional[str]:
     return None
 
 
+def _anti_predictive_threshold() -> float:
+    """The band, honouring a runtime override from Trading Controls.
+
+    Read per call rather than cached: the controls layer already caches for
+    10s, and a validator that holds a stale threshold would silently ignore the
+    operator's change for as long as the process lives.
+    """
+    try:
+        from app.services.controls import get_sync
+        v = get_sync("validator.anti_predictive_conf")
+        if v is not None:
+            return float(v)
+    except Exception:
+        pass
+    return _ANTI_PREDICTIVE_CONF
+
+
 def _check_confidence_band(ctx: dict) -> Optional[str]:
     """Backstop against a hand-widened confidence ceiling.
 
@@ -168,13 +185,14 @@ def _check_confidence_band(ctx: dict) -> Optional[str]:
     above 0.90 is where the win rate is 16%, so entering there should be an
     explicit act rather than a side effect of loosening a gate.
     """
+    band = _anti_predictive_threshold()
     conf = ctx.get("confidence")
-    if conf is None or conf < _ANTI_PREDICTIVE_CONF:
+    if conf is None or conf < band:
         return None
     if ctx.get("allow_anti_predictive"):
         return None
     return (f"confidence {conf:.0%} sits in the measured anti-predictive band "
-            f"(≥{_ANTI_PREDICTIVE_CONF:.0%} wins ~16% vs ~40% at 0.50-0.60)")
+            f"(≥{band:.0%} wins ~16% vs ~40% at 0.50-0.60)")
 
 
 def _check_not_already_long(ctx: dict) -> Optional[str]:
