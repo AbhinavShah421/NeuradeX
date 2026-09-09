@@ -837,20 +837,7 @@ const SystemMap: React.FC = () => {
                 </div>
               )}
               {faults.map((f: any, i: number) => (
-                <div key={i} style={{
-                  borderLeft: `3px solid ${f.severity === 'critical' ? C.down : C.warn}`,
-                  background: 'rgba(255,255,255,.02)', padding: '9px 11px',
-                  borderRadius: 6, marginBottom: 7,
-                }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 3 }}>
-                    <span style={{ fontSize: 11, fontWeight: 700, color: f.severity === 'critical' ? C.down : C.warn,
-                                   fontFamily: 'ui-monospace, monospace', letterSpacing: '.08em' }}>
-                      {f.severity.toUpperCase()}
-                    </span>
-                    <span style={{ fontSize: 10, color: C.dim, fontFamily: 'ui-monospace, monospace' }}>{f.kind}</span>
-                  </div>
-                  <div style={{ fontSize: 12.5, lineHeight: 1.45 }}>{f.message}</div>
-                </div>
+                <FaultCard key={i} f={f} />
               ))}
             </Panel>
 
@@ -1202,6 +1189,88 @@ const panel: React.CSSProperties = {
   background: C.panel, border: `1px solid ${C.edge}`, borderRadius: 12,
   backdropFilter: 'blur(6px)',
 };
+
+/** One fault, with what to do about it.
+ *
+ *  The message alone leaves the reader to work out the remedy every time, and
+ *  it is the same short list each time — read that container's log, restart
+ *  that service, re-run the loop that consumed its slot without doing work. So
+ *  the backend ships `actions` alongside every fault and this renders them.
+ *
+ *  Criticals open expanded: something is down and the next step should be on
+ *  screen. Warnings open collapsed but say how many steps they carry, because
+ *  six warnings with four steps each is a wall of text that gets scrolled past
+ *  — which is the failure mode this panel exists to avoid.
+ */
+const FaultCard: React.FC<{ f: any }> = ({ f }) => {
+  const critical = f.severity === 'critical';
+  const actions: string[] = f.actions ?? [];
+  const [open, setOpen] = useState(critical);
+  const hue = critical ? C.down : C.warn;
+
+  return (
+    <div style={{
+      borderLeft: `3px solid ${hue}`,
+      background: 'rgba(255,255,255,.02)', padding: '9px 11px',
+      borderRadius: 6, marginBottom: 7,
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 3 }}>
+        <span style={{ fontSize: 11, fontWeight: 700, color: hue,
+                       fontFamily: 'ui-monospace, monospace', letterSpacing: '.08em' }}>
+          {f.severity.toUpperCase()}
+        </span>
+        <span style={{ fontSize: 10, color: C.dim, fontFamily: 'ui-monospace, monospace' }}>{f.kind}</span>
+      </div>
+      <div style={{ fontSize: 12.5, lineHeight: 1.45 }}>{f.message}</div>
+
+      {actions.length > 0 && (
+        <>
+          <button
+            onClick={() => setOpen(o => !o)}
+            style={{
+              marginTop: 7, background: 'transparent', border: 'none', padding: 0,
+              color: hue, cursor: 'pointer', fontSize: 11,
+              fontFamily: 'ui-monospace, monospace', letterSpacing: '.06em',
+            }}>
+            {open ? '▾' : '▸'} what to do ({actions.length})
+          </button>
+          {open && (
+            <ol style={{
+              margin: '7px 0 1px', paddingLeft: 18, display: 'flex',
+              flexDirection: 'column', gap: 5,
+            }}>
+              {actions.map((a, j) => (
+                <li key={j} style={{ fontSize: 11.5, lineHeight: 1.5, color: C.text }}>
+                  {renderAction(a)}
+                </li>
+              ))}
+            </ol>
+          )}
+        </>
+      )}
+    </div>
+  );
+};
+
+/** Set the runnable part of an action in monospace so a command or an endpoint
+ *  reads as something to copy rather than as prose. Anything that starts with a
+ *  shell verb, or an HTTP verb and a path, qualifies; everything else is left
+ *  alone rather than guessed at. */
+function renderAction(text: string): React.ReactNode {
+  const m = text.match(/((?:docker|POST|GET|npm|curl)\s+[^\n]*)$/);
+  if (!m) return text;
+  const head = text.slice(0, m.index);
+  return (
+    <>
+      {head}
+      <code style={{
+        fontFamily: 'ui-monospace, monospace', fontSize: 11,
+        background: 'rgba(56,189,248,.10)', color: C.accent,
+        padding: '1px 5px', borderRadius: 4, wordBreak: 'break-all',
+      }}>{m[1]}</code>
+    </>
+  );
+}
 
 const Panel: React.FC<{ title: string; children: React.ReactNode }> = ({ title, children }) => (
   <div style={{ ...panel, padding: 14 }}>

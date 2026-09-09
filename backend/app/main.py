@@ -137,6 +137,22 @@ async def lifespan(app: FastAPI):
             except Exception as exc:
                 logger.warning("Could not schedule LLM rejection review: %s", exc)
 
+            # Keep the agent-culpability baseline warm. It is a full-corpus
+            # scan (~1M decisions x ~12 agent votes) that two UI post-mortem
+            # paths read; computing it inline took 107s on 2026-09-08 and blew
+            # nginx's 90s timeout, so the first click after the 12h cache
+            # expired returned 504. Those paths now serve it warm or not at
+            # all, which only works if something keeps it warm.
+            try:
+                from app.services.session_postmortem import culpability_baseline_loop
+                app.state.culpability_baseline_task = asyncio.create_task(
+                    culpability_baseline_loop())
+                logger.info("Agent culpability baseline warm-up scheduled",
+                            extra={"log_type": "app_lifecycle",
+                                   "event": "culpability_baseline_scheduled"})
+            except Exception as exc:
+                logger.warning("Could not schedule culpability baseline: %s", exc)
+
             # Background runner that advances live trading sessions server-side
             try:
                 from app.api.sessions import session_runner_loop

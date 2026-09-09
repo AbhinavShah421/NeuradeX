@@ -250,6 +250,78 @@ async def agent_culpability_baseline(force: bool = False) -> dict:
     return out
 
 
+_baseline_task: "Optional[asyncio.Task]" = None
+
+
+def _refresh_baseline_in_background() -> None:
+    """Kick off one baseline computation, at most one at a time.
+
+    Without the guard, a page that renders several post-mortems would start a
+    100-second full-corpus scan for each of them.
+    """
+    global _baseline_task
+    if _baseline_task is not None and not _baseline_task.done():
+        return
+    try:
+        _baseline_task = asyncio.create_task(agent_culpability_baseline())
+    except RuntimeError:
+        _baseline_task = None          # no running loop (sync caller) — skip
+
+
+async def baseline_if_warm() -> dict:
+    """The culpability baseline, but never at the cost of the request.
+
+    The baseline is a GLOBAL statistic — identical for every trade — and
+    computing it expands every cf-labelled decision into one row per agent vote
+    (~1M decisions x ~12 agents) to cluster the lift by day, and it sat on the
+    critical path of a UI click. Measured 2026-09-08: the failing request took
+    107 seconds end to end, and the scan on its own timed at 169. nginx gives
+    up at 90, so the first person to open a post-mortem after the 12-hour cache
+    expired got `Request failed with status code 504` while the backend carried
+    on and finished 17 seconds later. Every other request in that window served
+    in under 1.1s — nothing was blocked or contended, the whole 107s was this
+    one scan.
+
+    Worse, a 504 does not just fail: the client disconnect can cancel the task
+    before it writes the cache, so the next click pays the full cost again. Two
+    504s twenty-two minutes apart is exactly what that looks like.
+
+    So serve it warm or not at all, and refresh out of band. The post-mortem is
+    complete without it — the baseline only decorates each agent with its
+    long-run verdict, and the UI already renders nothing when that is absent.
+    `culpability_baseline_loop` keeps it warm so the absent case stays rare.
+    """
+    from app.utils.redis_client import cache_get
+    try:
+        raw = await cache_get(_BASELINE_KEY)
+        if raw:
+            return json.loads(raw)
+    except Exception:
+        logger.debug("culpability baseline cache read failed", exc_info=True)
+        return {"agents": [], "pending": False}
+    _refresh_baseline_in_background()
+    return {"agents": [], "pending": True}
+
+
+async def culpability_baseline_loop() -> None:
+    """Keep the baseline warm so no UI request ever computes it.
+
+    Due at 05:00 IST — after counterfactual labelling (04:00) has supplied the
+    cf_pnl_pct the scan reads, so the day's decisions are included rather than
+    missed by an hour.
+    """
+    from app.utils.nightly import nightly_loop, NotReady
+
+    async def _run() -> object:
+        res = await agent_culpability_baseline(force=True)
+        if res.get("error"):
+            raise NotReady(f"baseline scan failed: {res['error']}")
+        return {"agents": len(res.get("agents", []))}
+
+    await nightly_loop("culpability_baseline", 5, _run,
+                       label="Agent culpability baseline")
+
+
 def _verdict(lift: float, t: Optional[float]) -> str:
     """Only a Bonferroni-clearing t earns a label. Everything else is 'no signal'
     — which is the correct answer for most agents most of the time, and saying
@@ -663,7 +735,7 @@ async def trade_postmortem(trade_id: str) -> dict:
                 f"The setup was '{setup}', which is measured at {SETUP_EDGE_PP[setup]}pp against "
                 "the same day's other entries — a cell known to do worse than average.")
 
-    baseline = await agent_culpability_baseline()
+    baseline = await baseline_if_warm()
     by_agent = {a["agent"]: a for a in baseline.get("agents", [])}
     for a in agents:
         b = by_agent.get(a["agent"]) or {}
@@ -1006,7 +1078,7 @@ async def session_postmortem(session_id: str, narrative: bool = False,
                                         if str(v).upper() in ("SELL", "HOLD")),
             })
 
-    baseline = await agent_culpability_baseline()
+    baseline = await baseline_if_warm()
     by_agent = {a["agent"]: a for a in baseline.get("agents", [])}
 
     # Descriptive session tally: how often each agent voted BUY on this
