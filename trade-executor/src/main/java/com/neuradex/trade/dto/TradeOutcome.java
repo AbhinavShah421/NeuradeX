@@ -31,6 +31,12 @@ public class TradeOutcome {
     @JsonProperty("paper_trade")
     private boolean paperTrade;
 
+    // The ensemble confidence this trade cleared the risk gate on. RiskValidated
+    // has carried it all along and it was logged on the way past, but it was
+    // never put on the outcome — so every stored trade read 0.00 confidence and
+    // nothing downstream could tell a 0.61 entry from a 0.95 one.
+    private double confidence;
+
     private String status;
 
     // Passed straight through from RiskValidated — vote objects, not strings.

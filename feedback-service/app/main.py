@@ -102,7 +102,36 @@ async def _save_agent_hits(pool: asyncpg.Pool, hits: dict[str, bool]) -> None:
         )
 
 
-async def _store_trade_record(pool: asyncpg.Pool, payload: dict) -> None:
+def _pick(payload: dict, *keys, default=None):
+    """First key present and non-null. Two producers, two vocabularies."""
+    for k in keys:
+        v = payload.get(k)
+        if v is not None:
+            return v
+    return default
+
+
+async def _store_trade_record(pool: asyncpg.Pool, payload: dict) -> bool:
+    """Store one trade, from either producer. False if the record was refused.
+
+    Two things write here and they do not use the same field names. The Python
+    side (POST /trades, backtests and paper sessions) speaks the column names
+    directly. The Java trade-executor publishes a `TradeOutcome` over
+    trade.outcomes whose fields are named for what they mean at execution time:
+    `fill_price`, `agent_votes`, `executed_at`, `pnl`.
+
+    Reading only the column names silently dropped every executor field that
+    was not `trade_id`, `symbol` or `action` — measured 2026-09-08, all 90
+    executor trades since 2026-08-18 were stored with entry_price 0, confidence
+    0, no votes and no context, while the executor's own log for the same
+    trades read "BUY NIACL @ 204.49 (paper=true, confidence=0.61)". Nothing
+    errored; `payload.get("entry_price", 0)` simply returned the default every
+    time. The blank rows filling the Orders page are those records.
+
+    So accept both dialects, preferring the column name where a producer sends
+    it. `status` is deliberately NOT mapped onto `outcome`: the executor's
+    "FILLED" describes the entry, not how the trade turned out.
+    """
     # session_id may be passed as a top-level key or nested inside market_context
     ctx = payload.get("market_context") or {}
     if isinstance(ctx, str):
@@ -112,14 +141,56 @@ async def _store_trade_record(pool: asyncpg.Pool, payload: dict) -> None:
             ctx = {}
     session_id = payload.get("session_id") or ctx.get("session_id")
 
+    # The executor sends no market_context at all, which left these rows with
+    # nothing to show in the Orders row expander. It does send the execution
+    # detail that context is for, so keep it rather than storing "{}".
+    if not ctx:
+        execution = {k: payload[k] for k in
+                     ("fill_qty", "stop_loss", "take_profit", "portfolio_value", "status")
+                     if payload.get(k) is not None}
+        if execution:
+            ctx = {"source": "trade-executor", **execution}
+
+    entry_price = _pick(payload, "entry_price", "fill_price", default=0)
+    pnl_abs = _pick(payload, "pnl_abs", "pnl")
+    agent_signals = _pick(payload, "agent_signals", "agent_votes", default={})
+    opened_at = _pick(payload, "timestamp_open", "executed_at")
+    confidence = _pick(payload, "ensemble_confidence", "confidence", default=0)
+
+    # `paper_trade` decides the source when the producer does not name one. The
+    # executor sends paper_trade=true and no trade_source, so its paper fills
+    # were being stored under the "LIVE" column default and shown as LIVE on
+    # the Orders page.
+    paper_trade = bool(_pick(payload, "paper_trade", default=False))
+    trade_source = payload.get("trade_source") or ("PAPER" if paper_trade else "LIVE")
+
+    # A record with no entry price and no outcome describes no executed trade.
+    # There is nothing to compute a P&L from, nothing to group into a session,
+    # nothing to learn from — and on the Orders page it renders as a blank row
+    # that buries the real ones. 90 of these accumulated between 2026-08-18 and
+    # 2026-09-08 from the field-name mismatch above, and were deleted once it
+    # was fixed. Refuse them at the door so they cannot come back.
+    #
+    # WARNING, not debug: this only fires when a producer sends something
+    # unusable, and the whole reason those 90 went unnoticed for three weeks is
+    # that storing them was silent. A regression here should be loud.
+    if not float(entry_price or 0) and not payload.get("outcome"):
+        logger.warning(
+            "Refusing trade record with no executed trade — %s %s from %s "
+            "(no entry price, no outcome). Payload keys: %s",
+            payload.get("action", "?"), payload.get("symbol", "?"), trade_source,
+            sorted(payload.keys()),
+        )
+        return False
+
     await pool.execute(
         """
         INSERT INTO trade_records
             (trade_id, symbol, exchange, action, entry_price, exit_price,
              pnl_pct, pnl_abs, duration_minutes, ensemble_confidence,
              agent_signals, market_context, outcome, timestamp_open, timestamp_close,
-             trade_source, session_id)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+             trade_source, session_id, paper_trade)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
         ON CONFLICT (trade_id) DO UPDATE SET
             exit_price=EXCLUDED.exit_price,
             pnl_pct=EXCLUDED.pnl_pct,
@@ -127,26 +198,29 @@ async def _store_trade_record(pool: asyncpg.Pool, payload: dict) -> None:
             outcome=EXCLUDED.outcome,
             timestamp_close=EXCLUDED.timestamp_close,
             trade_source=EXCLUDED.trade_source,
-            session_id=EXCLUDED.session_id
+            session_id=EXCLUDED.session_id,
+            paper_trade=EXCLUDED.paper_trade
         """,
         payload.get("trade_id", str(uuid.uuid4())),
         payload.get("symbol", ""),
         payload.get("exchange", "NSE"),
         payload.get("action", ""),
-        float(payload.get("entry_price", 0)),
+        float(entry_price),
         float(payload.get("exit_price", 0)) if payload.get("exit_price") else None,
         float(payload.get("pnl_pct", 0)) if payload.get("pnl_pct") is not None else None,
-        float(payload.get("pnl_abs", 0)) if payload.get("pnl_abs") is not None else None,
+        float(pnl_abs) if pnl_abs is not None else None,
         int(payload.get("duration_minutes", 0)) if payload.get("duration_minutes") else None,
-        float(payload.get("ensemble_confidence", 0)),
-        json.dumps(payload.get("agent_signals", {})),
+        float(confidence),
+        json.dumps(agent_signals),
         json.dumps(ctx),
         payload.get("outcome"),
-        datetime.fromisoformat(payload["timestamp_open"]) if payload.get("timestamp_open") else datetime.now(tz=timezone.utc),
+        datetime.fromisoformat(opened_at) if opened_at else datetime.now(tz=timezone.utc),
         datetime.fromisoformat(payload["timestamp_close"]) if payload.get("timestamp_close") else None,
-        payload.get("trade_source", "LIVE"),
+        trade_source,
         session_id,
+        paper_trade,
     )
+    return True
 
 
 async def _apply_trade_outcome(pool: asyncpg.Pool, payload: dict) -> bool:
@@ -164,8 +238,24 @@ async def _apply_trade_outcome(pool: asyncpg.Pool, payload: dict) -> bool:
     if pnl_pct is None or action not in ("BUY", "SELL"):
         return False                      # still open, or not a directional leg
 
+    # "Has a pnl_pct" is not the same as "has closed". The executor's TradeOutcome
+    # types pnl_pct as a Java primitive double, so an ENTRY serialises it as 0.0
+    # rather than omitting it — which reads here as a break-even close. That was
+    # inert only for as long as the votes failed to map: with `agent_votes` now
+    # reaching compute_weight_updates, every open entry would nudge the weights
+    # towards break-even on a trade whose result is not known yet.
+    #
+    # So require positive evidence of a close. Python producers send exit_price,
+    # timestamp_close and an explicit outcome on the closing leg; the executor
+    # sends none of the three at entry.
+    if not any(payload.get(k) for k in ("exit_price", "timestamp_close", "outcome")):
+        return False                      # entry leg — nothing to learn from yet
+
     symbol = payload.get("symbol", "")
-    agent_signals = payload.get("agent_signals", {})
+    # Same two dialects as _store_trade_record. The executor's votes arrive as
+    # `agent_votes`, so reading only `agent_signals` handed compute_weight_updates
+    # an empty dict — every executor trade was a no-op for the weight loop.
+    agent_signals = _pick(payload, "agent_signals", "agent_votes", default={})
     if isinstance(agent_signals, str):
         try:
             agent_signals = json.loads(agent_signals)
@@ -352,10 +442,13 @@ async def post_trades(payload: list[dict]):
     if not _pool:
         return {"error": "not ready"}
     saved = 0
+    refused = 0
     learned = 0
     for record in payload:
         try:
-            await _store_trade_record(_pool, record)
+            if not await _store_trade_record(_pool, record):
+                refused += 1        # no executed trade in it — see the guard
+                continue
             saved += 1
         except Exception as exc:
             logger.error("POST /trades insert error: %s", exc)
@@ -364,23 +457,48 @@ async def post_trades(payload: list[dict]):
         if source in _LEARNABLE_SOURCES:
             if await _apply_trade_outcome(_pool, record):
                 learned += 1
-    return {"saved": saved, "total": len(payload), "learned": learned}
+    return {"saved": saved, "refused": refused,
+            "total": len(payload), "learned": learned}
+
+
+# Belt and braces behind the write guard in _store_trade_record. A trade with no
+# entry price and no outcome represents no executed trade: no P&L, no win/loss,
+# nothing for the Orders row to expand into. 90 such rows accumulated from the
+# field-name mismatch and were deleted 2026-09-08 once it was fixed, and the
+# guard now refuses new ones — so this should never match anything. It stays
+# because a read filter costs nothing and the failure it covers was invisible
+# for three weeks.
+#
+# Deliberately narrow. A genuine open position has an entry price and shows up
+# normally, so this hides only the unreadable rows, nothing live.
+_READABLE = "NOT (COALESCE(entry_price, 0) = 0 AND outcome IS NULL)"
+
+_TRADE_COLUMNS = """
+    trade_id, symbol, exchange, action, entry_price, exit_price,
+    pnl_pct, pnl_abs, duration_minutes, ensemble_confidence,
+    agent_signals, market_context, outcome, timestamp_open, timestamp_close,
+    trade_source, created_at
+"""
 
 
 @app.get("/trades")
-async def get_trades(limit: int = 500, offset: int = 0, source: str = None):
+async def get_trades(limit: int = 500, offset: int = 0, source: str = None,
+                     include_empty: bool = False):
+    """Recent trades, newest first.
+
+    `include_empty=true` keeps the unreadable rows in, for anyone auditing what
+    a producer actually wrote rather than reading the trade list.
+    """
     if not _pool:
         return []
+    keep = "TRUE" if include_empty else _READABLE
     try:
         if source and source.upper() != "ALL":
             rows = await _pool.fetch(
-                """
-                SELECT trade_id, symbol, exchange, action, entry_price, exit_price,
-                       pnl_pct, pnl_abs, duration_minutes, ensemble_confidence,
-                       agent_signals, market_context, outcome, timestamp_open, timestamp_close,
-                       trade_source, created_at
+                f"""
+                SELECT {_TRADE_COLUMNS}
                 FROM trade_records
-                WHERE COALESCE(trade_source, 'LIVE') = $3
+                WHERE COALESCE(trade_source, 'LIVE') = $3 AND {keep}
                 ORDER BY created_at DESC
                 LIMIT $1 OFFSET $2
                 """,
@@ -388,12 +506,10 @@ async def get_trades(limit: int = 500, offset: int = 0, source: str = None):
             )
         else:
             rows = await _pool.fetch(
-                """
-                SELECT trade_id, symbol, exchange, action, entry_price, exit_price,
-                       pnl_pct, pnl_abs, duration_minutes, ensemble_confidence,
-                       agent_signals, market_context, outcome, timestamp_open, timestamp_close,
-                       trade_source, created_at
+                f"""
+                SELECT {_TRADE_COLUMNS}
                 FROM trade_records
+                WHERE {keep}
                 ORDER BY created_at DESC
                 LIMIT $1 OFFSET $2
                 """,

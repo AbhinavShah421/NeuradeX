@@ -80,6 +80,7 @@ public class GrowwOrderService {
                         .stopLoss(validated.getStopLoss())
                         .takeProfit(validated.getTakeProfit())
                         .paperTrade(false)
+                        .confidence(validated.getConfidence())
                         .status("FILLED")
                         .agentVotes(validated.getAgentVotes())
                         .executedAt(Instant.now().toString())
