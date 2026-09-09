@@ -6,7 +6,7 @@ interface HealthTabProps {
 
 const HealthTab: React.FC<HealthTabProps> = ({ health }) => {
   return (
-    <div style={{ padding: '18px 20px' }}>
+    <div>
       {!health ? (
         <div style={{ textAlign: 'center', padding: 40, color: 'var(--nd-text-3)', fontSize: 13 }}>Analysing portfolio health…</div>
       ) : health.score == null ? (
@@ -26,7 +26,7 @@ const HealthTab: React.FC<HealthTabProps> = ({ health }) => {
               <div style={{ fontSize: 12, color: 'var(--nd-text-3)', marginTop: 4 }}>{health.metrics.holdings} holdings · ~{health.metrics.effectiveHoldings} effective</div>
             </div>
             <div style={{ flex: 1, minWidth: 280 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>Health factors</div>
+              <div className="nd-section-title" style={{ marginBottom: 8 }}>Health factors</div>
               {health.factors.map((f: any) => {
                 const fc = f.score >= 70 ? '#34d399' : f.score >= 50 ? '#fbbf24' : '#fb5c7d';
                 return (
@@ -39,7 +39,7 @@ const HealthTab: React.FC<HealthTabProps> = ({ health }) => {
                   </div>
                 );
               })}
-              <div style={{ marginTop: 14, fontSize: 13, fontWeight: 700 }}>Issues &amp; fixes</div>
+              <div className="nd-section-title" style={{ marginTop: 14, marginBottom: 0 }}>Issues &amp; fixes</div>
               {health.issues.map((s: string, i: number) => <div key={i} style={{ fontSize: 12, color: 'var(--nd-text-2)', padding: '3px 0' }}>• {s}</div>)}
               {health.actions.map((s: string, i: number) => <div key={i} style={{ fontSize: 12, color: 'var(--nd-green)', padding: '3px 0' }}>→ {s}</div>)}
             </div>

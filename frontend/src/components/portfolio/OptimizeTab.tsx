@@ -30,9 +30,7 @@ const OptimizeTab: React.FC<OptimizeTabProps> = ({
             Scores every holding with live AI signals, measures concentration &amp; sector risk, pulls higher-conviction picks from the AI scanner, and proposes a rebalancing plan.
           </div>
         </div>
-        <button onClick={runOptimization} disabled={optimizing}
-          style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 18px', borderRadius: 10, border: 'none',
-            background: 'var(--nd-green)', color: '#fff', fontWeight: 600, fontSize: 14, cursor: optimizing ? 'wait' : 'pointer' }}>
+        <button className="nd-btn nd-btn-primary" onClick={runOptimization} disabled={optimizing}>
           <span className={`material-icons${optimizing ? ' nd-spin' : ''}`} style={{ fontSize: 18 }}>{optimizing ? 'autorenew' : 'insights'}</span>
           {optimizing ? 'Optimizing…' : optimization ? 'Re-run' : 'Run optimization'}
         </button>
@@ -118,7 +116,7 @@ const OptimizeTab: React.FC<OptimizeTabProps> = ({
             {/* Summary */}
             <div className="nd-card" style={{ borderLeft: '3px solid var(--nd-green)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
-                <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--nd-text-1)' }}>Recommendation</span>
+                <span className="nd-section-title" style={{ margin: 0 }}>Recommendation</span>
                 <span style={{ fontSize: 10, fontWeight: 600, padding: '2px 8px', borderRadius: 6, background: 'var(--nd-surface-2)', color: 'var(--nd-text-3)' }}>
                   {String(optimization.source || '').startsWith('ai') ? 'AI-generated' : 'rule-based'}
                 </span>

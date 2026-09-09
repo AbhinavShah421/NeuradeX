@@ -455,33 +455,11 @@ body {
 .nd-table tbody tr:hover { background: var(--nd-surface); }
 .nd-table .text-right { text-align: right; }
 
-/* ── Tabs ───────────────────────────────────────────────────────────────────── */
-.nd-tabs {
-  display: flex;
-  border-bottom: 1px solid var(--nd-border);
-  margin-bottom: 24px;
-  gap: 0;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-.nd-tabs::-webkit-scrollbar { display: none; }
-
-.nd-tab {
-  padding: 10px 18px;
-  font-size: 13.5px;
-  font-weight: 500;
-  color: var(--nd-text-2);
-  border: none;
-  background: none;
-  cursor: pointer;
-  border-bottom: 3px solid transparent;
-  transition: color 0.15s, border-color 0.15s;
-  white-space: nowrap;
-  font-family: 'Roboto', sans-serif;
-}
-
-.nd-tab:hover { color: var(--nd-text-1); }
-.nd-tab.active { color: var(--nd-text-1); border-bottom-color: var(--nd-green); font-weight: 600; }
+/* ── Tabs ───────────────────────────────────────────────────────────────────
+   The old underline strip (.nd-tabs + .nd-tab.active) lived here and collided
+   with the console strip further down once that was generalised out of
+   .nd-gate-tabs. One name, one component: the console version won and its only
+   caller was migrated to `role="tab" aria-selected`. See CONSOLE LAYER below. */
 
 /* ── Buttons ────────────────────────────────────────────────────────────────── */
 .nd-btn {
@@ -1139,4 +1117,940 @@ body.nd-chart-fullscreen-open { overflow: hidden; }
 }
 @media (max-width: 380px) {
   .nd-pm-headline { grid-template-columns: 1fr; }
+}
+
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Trading Controls — mixing-desk faders.
+
+   These knobs decide whether real money moves, so the console look is doing
+   a job rather than decorating: a fader shows where a value sits IN ITS RANGE
+   at a glance, which a bare number box never did. "0.68" tells you nothing
+   about how much headroom is left; a cap two-thirds along a lit track does.
+
+   Every fader also carries a tick at the value the code ships, so drift from
+   the shipped default is visible on the track itself, not only in the badge.
+
+   Values commit on RELEASE, never during the drag — see Controls.tsx. A live
+   write per pixel would push dozens of gate changes at the running session.
+   ───────────────────────────────────────────────────────────────────────── */
+
+.nd-console { --nd-fader-h: 26px; }
+
+/* Each row lights up its own accent so a dangerous knob reads hot before you
+   have read a word of the label. */
+.nd-fader-row            { --fader: var(--nd-accent); }
+.nd-fader-row.is-danger  { --fader: var(--nd-red); }
+.nd-fader-row.is-dirty   { --fader: var(--nd-orange); }
+
+.nd-fader-wrap {
+  position: relative;
+  flex: 1 1 220px;
+  min-width: 180px;
+  height: var(--nd-fader-h);
+  display: flex;
+  align-items: center;
+}
+
+/* The groove. Inset, so the lit fill reads as sitting inside a channel. */
+.nd-fader {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  background: transparent;
+  cursor: grab;
+  position: relative;
+  z-index: 2;
+}
+.nd-fader:active { cursor: grabbing; }
+
+.nd-fader-track {
+  position: absolute;
+  left: 0; right: 0; top: 50%;
+  transform: translateY(-50%);
+  height: 6px;
+  border-radius: 3px;
+  background:
+    linear-gradient(90deg,
+      var(--fader) 0%,
+      color-mix(in srgb, var(--fader) 65%, transparent) var(--pct, 0%),
+      transparent var(--pct, 0%)),
+    var(--nd-surface-2);
+  box-shadow:
+    inset 0 1px 2px rgba(0,0,0,.45),
+    0 0 10px -2px color-mix(in srgb, var(--fader) 55%, transparent);
+  border: 1px solid var(--nd-border);
+  pointer-events: none;
+}
+
+/* The tick for the shipped default. Sits under the cap so a value parked on
+   its default reads as "at rest" rather than hidden. */
+.nd-fader-default {
+  position: absolute;
+  top: 50%;
+  left: var(--defpct, 0%);
+  width: 2px;
+  height: 14px;
+  margin-left: -1px;
+  transform: translateY(-50%);
+  background: var(--nd-text-3);
+  border-radius: 1px;
+  pointer-events: none;
+  opacity: .85;
+}
+
+/* The cap. A fader cap, not a knob — wider than tall, with a centre line. */
+.nd-fader::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 22px;
+  border-radius: 4px;
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--fader) 92%, white) 0%,
+    var(--fader) 45%,
+    color-mix(in srgb, var(--fader) 70%, black) 100%);
+  border: 1px solid color-mix(in srgb, var(--fader) 70%, black);
+  box-shadow:
+    0 0 0 1px rgba(0,0,0,.35),
+    0 2px 6px rgba(0,0,0,.5),
+    0 0 14px -2px var(--fader);
+  cursor: grab;
+  transition: box-shadow .12s ease, transform .12s ease;
+}
+.nd-fader:hover::-webkit-slider-thumb,
+.nd-fader:focus-visible::-webkit-slider-thumb {
+  box-shadow:
+    0 0 0 1px rgba(0,0,0,.35),
+    0 2px 8px rgba(0,0,0,.55),
+    0 0 20px -1px var(--fader);
+  transform: scale(1.06);
+}
+.nd-fader:active::-webkit-slider-thumb { transform: scale(1.1); cursor: grabbing; }
+
+.nd-fader::-moz-range-thumb {
+  width: 14px;
+  height: 22px;
+  border-radius: 4px;
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--fader) 92%, white) 0%,
+    var(--fader) 45%,
+    color-mix(in srgb, var(--fader) 70%, black) 100%);
+  border: 1px solid color-mix(in srgb, var(--fader) 70%, black);
+  box-shadow: 0 2px 6px rgba(0,0,0,.5), 0 0 14px -2px var(--fader);
+  cursor: grab;
+}
+.nd-fader::-moz-range-track { background: transparent; height: 100%; }
+.nd-fader:focus-visible { outline: none; }
+.nd-fader:disabled { opacity: .45; cursor: default; }
+
+/* Numeric readout — monospace and boxed, like a channel display. Still a real
+   input: typing an exact value beats dragging to it. */
+.nd-readout {
+  width: 76px;
+  flex: 0 0 auto;
+  background: var(--nd-bg);
+  color: var(--fader);
+  border: 1px solid color-mix(in srgb, var(--fader) 45%, transparent);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: right;
+  letter-spacing: .02em;
+  box-shadow: inset 0 0 12px -6px var(--fader);
+}
+.nd-readout:focus {
+  outline: none;
+  border-color: var(--fader);
+  box-shadow: inset 0 0 12px -6px var(--fader), 0 0 0 2px color-mix(in srgb, var(--fader) 25%, transparent);
+}
+/* Spinners fight the monospace alignment and add nothing next to a fader. */
+.nd-readout::-webkit-outer-spin-button,
+.nd-readout::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.nd-readout[type=number] { -moz-appearance: textfield; }
+
+.nd-fader-ends {
+  display: flex;
+  justify-content: space-between;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9.5px;
+  letter-spacing: .08em;
+  color: var(--nd-text-3);
+  margin-top: 2px;
+}
+
+/* Toggle — a lit power switch rather than a checkbox. */
+.nd-switch {
+  position: relative;
+  width: 46px;
+  height: 24px;
+  border-radius: 12px;
+  border: 1px solid var(--nd-border);
+  background: var(--nd-surface-2);
+  cursor: pointer;
+  padding: 0;
+  flex: 0 0 auto;
+  transition: background .15s ease, border-color .15s ease, box-shadow .15s ease;
+}
+.nd-switch::after {
+  content: '';
+  position: absolute;
+  top: 2px; left: 2px;
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  background: var(--nd-text-3);
+  transition: transform .16s cubic-bezier(.4,.0,.2,1), background .16s ease;
+}
+.nd-switch[aria-checked="true"] {
+  background: color-mix(in srgb, var(--fader) 22%, transparent);
+  border-color: var(--fader);
+  box-shadow: 0 0 14px -4px var(--fader), inset 0 0 10px -6px var(--fader);
+}
+.nd-switch[aria-checked="true"]::after {
+  transform: translateX(22px);
+  background: var(--fader);
+  box-shadow: 0 0 10px -1px var(--fader);
+}
+.nd-switch:disabled { opacity: .45; cursor: default; }
+.nd-switch:focus-visible { outline: 2px solid var(--fader); outline-offset: 2px; }
+
+/* Enum — a segmented mode selector. */
+.nd-seg {
+  display: inline-flex;
+  border: 1px solid var(--nd-border);
+  border-radius: 7px;
+  overflow: hidden;
+  background: var(--nd-surface-2);
+}
+.nd-seg button {
+  background: transparent;
+  border: none;
+  border-right: 1px solid var(--nd-border);
+  color: var(--nd-text-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  letter-spacing: .06em;
+  padding: 4px 11px;
+  cursor: pointer;
+  transition: background .12s ease, color .12s ease, box-shadow .12s ease;
+}
+.nd-seg button:last-child { border-right: none; }
+.nd-seg button:hover:not(:disabled) { background: var(--nd-surface); color: var(--nd-text-1); }
+.nd-seg button[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--fader) 20%, transparent);
+  color: var(--fader);
+  box-shadow: inset 0 0 14px -6px var(--fader);
+  font-weight: 700;
+}
+.nd-seg button:disabled { opacity: .5; cursor: default; }
+
+/* Group card — a faint lit edge so each bank reads as a unit on the desk. */
+.nd-bank {
+  position: relative;
+  overflow: hidden;
+}
+.nd-bank::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 1px;
+  background: linear-gradient(90deg,
+    transparent,
+    color-mix(in srgb, var(--nd-accent) 55%, transparent),
+    transparent);
+}
+
+@media (max-width: 620px) {
+  .nd-fader-wrap { flex-basis: 100%; }
+}
+
+/* Tab strip — used by the Trading Controls gate presets and the Dashboard.
+   On the gate it carries a lamp, because two facts have to be readable at once
+   and they are not the same fact:
+   which preset you are LOOKING AT (tab selection) and which one the runner is
+   actually READING (the lamp). Stacked one after another, all three presets
+   looked equally in force — which invites tuning Strict while Gentle trades. */
+.nd-tabs {
+  display: inline-flex;
+  border: 1px solid var(--nd-border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--nd-surface-2);
+}
+.nd-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: transparent;
+  border: none;
+  border-right: 1px solid var(--nd-border);
+  color: var(--nd-text-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  letter-spacing: .06em;
+  padding: 6px 14px;
+  cursor: pointer;
+  transition: background .12s ease, color .12s ease, box-shadow .12s ease;
+}
+.nd-tabs button:last-child { border-right: none; }
+.nd-tabs button:hover[aria-selected="false"] {
+  background: var(--nd-surface);
+  color: var(--nd-text-1);
+}
+.nd-tabs button[aria-selected="true"] {
+  background: color-mix(in srgb, var(--nd-accent) 18%, transparent);
+  color: var(--nd-accent);
+  font-weight: 700;
+  box-shadow: inset 0 -2px 0 var(--nd-accent), inset 0 0 18px -8px var(--nd-accent);
+}
+.nd-tabs button:focus-visible { outline: 2px solid var(--nd-accent); outline-offset: -2px; }
+
+/* The live lamp. Green regardless of selection, because "is this the gate that
+   trades" must not change meaning depending on which tab you clicked. */
+.nd-lamp {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--nd-green);
+  box-shadow: 0 0 8px 0 var(--nd-green);
+  flex: 0 0 auto;
+  animation: nd-lamp-pulse 2.4s ease-in-out infinite;
+}
+@keyframes nd-lamp-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: .45; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .nd-lamp { animation: none; }
+}
+
+.nd-tabs button.is-live[aria-selected="true"] {
+  box-shadow: inset 0 -2px 0 var(--nd-green), inset 0 0 18px -8px var(--nd-green);
+  background: color-mix(in srgb, var(--nd-green) 16%, transparent);
+  color: var(--nd-green);
+}
+
+.nd-live-note {
+  font-size: 10.5px;
+  color: var(--nd-text-3);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: .04em;
+}
+.nd-live-note.is-live { color: var(--nd-green); }
+.nd-live-note strong { color: var(--nd-green); font-weight: 700; }
+
+/* Activating a gate is a different act from looking at one, so it gets its own
+   button rather than being what a tab click does. Amber, not accent: it changes
+   what the runner trades on the next candle. */
+.nd-make-live {
+  background: color-mix(in srgb, var(--nd-orange) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--nd-orange) 55%, transparent);
+  color: var(--nd-orange);
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+  letter-spacing: .04em;
+  cursor: pointer;
+  transition: background .12s ease, box-shadow .12s ease;
+}
+.nd-make-live:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--nd-orange) 26%, transparent);
+  box-shadow: 0 0 14px -4px var(--nd-orange);
+}
+.nd-make-live:disabled { opacity: .5; cursor: wait; }
+.nd-make-live:focus-visible { outline: 2px solid var(--nd-orange); outline-offset: 2px; }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Console surface — the instrument-panel look shared by Trading Controls and
+   the Dashboard.
+
+   Two rules keep it from being decoration. Mono, letterspaced, uppercase is
+   for LABELS only — the things you scan for, never the prose you read. And the
+   accent glow marks a live reading, so it has to stay rare enough to mean
+   something; a page where everything glows says nothing.
+   ───────────────────────────────────────────────────────────────────────── */
+
+.nd-console-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.nd-console-title {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--nd-text-1);
+  margin: 0;
+}
+.nd-console-sub {
+  font-size: 11.5px;
+  color: var(--nd-text-3);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  letter-spacing: .04em;
+  margin: 0;
+}
+
+/* Stat tile. The value is the point, so it is the only thing at full size and
+   the only thing allowed the accent colour. */
+.nd-stat {
+  position: relative;
+  background: var(--nd-surface);
+  border: 1px solid var(--nd-border);
+  border-radius: 12px;
+  padding: 13px 15px 14px;
+  overflow: hidden;
+  cursor: pointer;
+  transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease;
+}
+.nd-stat::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent,
+    color-mix(in srgb, var(--tone, var(--nd-accent)) 65%, transparent), transparent);
+}
+.nd-stat:hover {
+  border-color: color-mix(in srgb, var(--tone, var(--nd-accent)) 45%, var(--nd-border));
+  box-shadow: 0 0 24px -12px var(--tone, var(--nd-accent));
+  transform: translateY(-1px);
+}
+.nd-stat-label {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 9.5px;
+  letter-spacing: .13em;
+  text-transform: uppercase;
+  color: var(--nd-text-3);
+  margin: 0 0 6px;
+  display: block;
+}
+.nd-stat-value {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--tone, var(--nd-text-1));
+  margin: 0;
+  text-shadow: 0 0 22px color-mix(in srgb, var(--tone, var(--nd-accent)) 35%, transparent);
+}
+.nd-stat-sub {
+  font-size: 10.5px;
+  color: var(--nd-text-3);
+  margin: 4px 0 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.nd-stat-info {
+  position: absolute;
+  top: 9px; right: 9px;
+  font-size: 14px !important;
+  color: var(--nd-text-3);
+  opacity: .55;
+}
+.nd-stat:hover .nd-stat-info { opacity: 1; }
+
+/* A tab strip that spans its container, for page-level navigation rather than
+   the inline preset switch the gate uses. */
+/* A page-level strip sits directly above the panel it switches, so it needs
+   air between the two — without it the first heading of the panel reads as
+   part of the tab bar. Default rather than per-page, so a new section switcher
+   is spaced correctly without anyone remembering to do it; pages that want a
+   different rhythm (the Dashboard puts a one-line hint in the gap) still win
+   with an inline value.
+
+   Deliberately NOT applied to the bare .nd-tabs: that form is also used inline
+   inside a header row — the entry-gate picker sits beside its label and the
+   live lamp — where a bottom margin would just push it off the baseline. */
+.nd-tabs.is-wide { width: 100%; margin-bottom: 18px; }
+.nd-tabs.is-wide button { flex: 1; justify-content: center; padding: 9px 14px; font-size: 12px; }
+
+.nd-tab-count {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 9.5px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, currentColor 16%, transparent);
+  letter-spacing: .04em;
+}
+
+/* Console button — the neutral action on this surface. Ghost by default so the
+   only filled controls on the page stay the ones that change trading. */
+.nd-console-btn {
+  background: var(--nd-surface-2);
+  border: 1px solid var(--nd-border);
+  color: var(--nd-text-2);
+  border-radius: 6px;
+  padding: 4px 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+  letter-spacing: .04em;
+  cursor: pointer;
+  transition: border-color .12s ease, color .12s ease, box-shadow .12s ease;
+}
+.nd-console-btn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--nd-accent) 55%, var(--nd-border));
+  color: var(--nd-text-1);
+  box-shadow: 0 0 14px -6px var(--nd-accent);
+}
+.nd-console-btn:disabled { opacity: .5; cursor: wait; }
+.nd-console-btn:focus-visible { outline: 2px solid var(--nd-accent); outline-offset: 2px; }
+
+/* A destructive variant, for the one button that stops a running loop. */
+.nd-console-btn.is-stop { color: var(--nd-red); border-color: color-mix(in srgb, var(--nd-red) 45%, transparent); }
+.nd-console-btn.is-stop:hover:not(:disabled) {
+  border-color: var(--nd-red); color: var(--nd-red);
+  box-shadow: 0 0 14px -6px var(--nd-red);
+}
+.nd-console-btn.is-go { color: var(--nd-accent); border-color: color-mix(in srgb, var(--nd-accent) 45%, transparent); }
+
+/* "running" marker on a loop that is currently doing work. */
+.nd-run-tag {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--nd-green);
+  border: 1px solid color-mix(in srgb, var(--nd-green) 50%, transparent);
+  background: color-mix(in srgb, var(--nd-green) 12%, transparent);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+
+/* Small mono tag used on portfolio rows. */
+.nd-chip-tag {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+  letter-spacing: .08em;
+  border-radius: 4px;
+  padding: 1px 6px;
+  border: 1px solid color-mix(in srgb, currentColor 50%, transparent);
+  background: color-mix(in srgb, currentColor 12%, transparent);
+}
+
+
+/* ═════════════════════════════════════════════════════════════════════════
+   CONSOLE LAYER — the instrument-panel look, applied to the shared primitives.
+
+   Why here rather than component by component: 3,313 inline `style={{}}` props
+   across 23 pages and 47 components mean a per-file revamp is a very long job,
+   but `.nd-card` (88 uses), `.nd-btn` (50) and `.nd-input` (39) are already
+   threaded through nearly every page. Restyling those reaches most of the app
+   for free and, more importantly, keeps it consistent — a page written next
+   month inherits the theme instead of re-inventing it.
+
+   Scoped to .dark-mode, following the decision already made for .nd-card
+   above: light stays a plain readable document, dark is the panel the operator
+   actually works in. Every colour is a var, so nothing here hardcodes a hue.
+
+   The vocabulary, so new work reuses it instead of inventing a second one:
+     surface   .nd-card / .nd-bank        lit hairline along the top edge
+     label     .nd-label / .nd-eyebrow    mono, uppercase, letterspaced
+     value     .nd-readout, tabular-nums  mono, so digits line up
+     action    .nd-btn-*, .nd-console-btn ghost by default
+     switch    .nd-switch                 toggles
+     picker    .nd-seg / .nd-tabs         mode and section switches
+     live      .nd-lamp / .nd-run-tag     something is running right now
+   ═════════════════════════════════════════════════════════════════════════ */
+
+/* ── Surfaces ─────────────────────────────────────────────────────────────
+   The same lit edge .nd-bank uses, so a plain card and a control bank read as
+   the same object. `position: relative` is set defensively: most cards already
+   set it inline, and the pseudo-element needs it to anchor. */
+.dark-mode .nd-card {
+  border-radius: 12px;
+  /* The lit edge is painted as a background layer rather than a ::before,
+     deliberately. A pseudo-element needs `position: relative` on the card, and
+     that would re-anchor every absolutely-positioned child across 88 cards —
+     badges, close buttons, overlay corners — to the card instead of whatever
+     ancestor they were written against. A background costs nothing and cannot
+     move anything. (The existing backdrop-filter note above is the same class
+     of bug, found the hard way.) */
+  background-image: linear-gradient(90deg, transparent,
+    color-mix(in srgb, var(--nd-accent) 45%, transparent), transparent);
+  background-repeat: no-repeat;
+  background-size: 100% 1px;
+  background-position: top center;
+}
+
+/* ── Type voice ───────────────────────────────────────────────────────────
+   Mono/uppercase is for things you SCAN — titles, labels, table headers. Body
+   copy stays Roboto; a paragraph set in letterspaced mono is a chore to read
+   and this surface has a lot of explanatory prose worth keeping legible. */
+.dark-mode .nd-page-title {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+}
+.dark-mode .nd-page-sub {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 11.5px;
+  letter-spacing: .04em;
+  color: var(--nd-text-3);
+}
+.dark-mode .nd-section-title {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--nd-text-2);
+}
+.dark-mode .nd-label {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 9.5px;
+  letter-spacing: .13em;
+  color: var(--nd-text-3);
+}
+/* Numbers are readings. Mono keeps columns aligned as values tick. */
+.dark-mode .nd-value-xl,
+.dark-mode .nd-value-lg {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Actions ──────────────────────────────────────────────────────────────
+   Ghost by default; filled is reserved for the primary action so that the one
+   button that commits something still stands out on a busy page. */
+.dark-mode .nd-btn {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 11.5px;
+  letter-spacing: .06em;
+  border-radius: 7px;
+  padding: 8px 15px;
+  transition: border-color .12s ease, color .12s ease, box-shadow .12s ease, background .12s ease;
+}
+.dark-mode .nd-btn-primary {
+  background: color-mix(in srgb, var(--nd-primary) 20%, transparent);
+  border: 1px solid color-mix(in srgb, var(--nd-primary) 60%, transparent);
+  color: var(--nd-primary);
+  font-weight: 700;
+}
+.dark-mode .nd-btn-primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--nd-primary) 30%, transparent);
+  box-shadow: 0 0 18px -6px var(--nd-primary);
+  opacity: 1;
+}
+.dark-mode .nd-btn-outline {
+  background: var(--nd-surface-2);
+  color: var(--nd-text-2);
+}
+.dark-mode .nd-btn-outline:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--nd-accent) 55%, var(--nd-border));
+  color: var(--nd-text-1);
+  box-shadow: 0 0 14px -6px var(--nd-accent);
+  background: var(--nd-surface-2);
+}
+.dark-mode .nd-btn-ghost:hover { color: var(--nd-accent); }
+.dark-mode .nd-btn:focus-visible { outline: 2px solid var(--nd-accent); outline-offset: 2px; }
+
+/* ── Fields ───────────────────────────────────────────────────────────────
+   An input is where a value is entered, so it echoes .nd-readout: mono, and
+   lit while focused. */
+.dark-mode .nd-input,
+.dark-mode .nd-select {
+  background: var(--nd-bg);
+  border-radius: 7px;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12.5px;
+  transition: border-color .12s ease, box-shadow .12s ease;
+}
+.dark-mode .nd-input:focus,
+.dark-mode .nd-select:focus {
+  outline: none;
+  border-color: var(--nd-accent);
+  box-shadow: inset 0 0 14px -8px var(--nd-accent),
+              0 0 0 2px color-mix(in srgb, var(--nd-accent) 22%, transparent);
+}
+.dark-mode .nd-input::placeholder { color: var(--nd-text-3); }
+
+/* ── Tables ───────────────────────────────────────────────────────────────
+   Headers are labels, so they take the label voice; the body stays Roboto
+   except for the digits, which .dark-mode .nd-card table already tabularises. */
+.dark-mode .nd-card th,
+.dark-mode table thead th {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 9.5px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--nd-text-3);
+  font-weight: 700;
+}
+
+/* ── Legacy pill tabs ─────────────────────────────────────────────────────
+   .nd-pill-tab predates .nd-tabs and is still used by a few pages. Rather than
+   rewrite each one, give it the same face so the two cannot look different in
+   the same app. Callers set the active colours inline, so the selected state
+   is left to them — only the shape and voice are unified here. */
+.dark-mode .nd-pill-tab {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 11.5px;
+  letter-spacing: .06em;
+  border-radius: 7px;
+}
+
+/* ── Modals and overlays ──────────────────────────────────────────────────
+   Dialogs are built inline all over the app; this reaches the ones that use
+   the shared class and leaves the rest alone. */
+.dark-mode .nd-modal,
+.dark-mode .nd-sheet {
+  background: var(--nd-surface);
+  border: 1px solid var(--nd-border);
+  border-radius: 14px;
+  box-shadow: var(--nd-shadow-md);
+}
+
+
+/* ── Header / navbar ──────────────────────────────────────────────────────
+   The frame every page sits inside, so it sets the expectation for the rest.
+   Nav items are labels you scan, not prose, so they take the label voice; the
+   active one is lit rather than merely underlined, matching how .nd-tabs marks
+   a selection everywhere else in the app. */
+.dark-mode .nd-header {
+  background: color-mix(in srgb, var(--nd-bg) 88%, transparent);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--nd-border);
+  box-shadow: 0 1px 0 0 color-mix(in srgb, var(--nd-accent) 14%, transparent),
+              0 6px 24px -12px rgba(0,0,0,.8);
+}
+.dark-mode .nd-logo-text {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace;
+  font-weight: 700;
+  letter-spacing: .1em;
+  /* The mark is teal; the wordmark picks the same family up rather than
+     sitting in plain white next to it. */
+  background: linear-gradient(90deg, var(--nd-primary), var(--nd-accent));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.dark-mode .nd-nav-link {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 11.5px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--nd-text-3);
+  position: relative;
+}
+.dark-mode .nd-nav-link:hover { color: var(--nd-text-1); }
+.dark-mode .nd-nav-link.active {
+  color: var(--nd-accent);
+  border-bottom-color: var(--nd-accent);
+  font-weight: 700;
+}
+/* The lit wash under the active item. A border alone reads as a document tab;
+   the glow is what makes it read as a selected channel. */
+.dark-mode .nd-nav-link.active::after {
+  content: '';
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 22px;
+  background: linear-gradient(180deg, transparent,
+    color-mix(in srgb, var(--nd-accent) 16%, transparent));
+  pointer-events: none;
+}
+
+/* Search, theme and hamburger buttons beside the account chip. */
+.dark-mode .nd-theme-btn,
+.dark-mode .nd-hamburger {
+  transition: border-color .12s ease, box-shadow .12s ease, color .12s ease;
+}
+.dark-mode .nd-theme-btn:hover,
+.dark-mode .nd-hamburger:hover {
+  border-color: color-mix(in srgb, var(--nd-accent) 55%, var(--nd-border));
+  box-shadow: 0 0 14px -6px var(--nd-accent);
+  color: var(--nd-accent);
+}
+
+/* The dropdown under the account chip — Settings, Logout. */
+.dark-mode .nd-menu,
+.dark-mode .nd-dropdown {
+  background: var(--nd-surface);
+  border: 1px solid var(--nd-border);
+  border-radius: 10px;
+  box-shadow: var(--nd-shadow-md);
+}
+.dark-mode .nd-menu > div > a,
+.dark-mode .nd-menu > div > button,
+.dark-mode .nd-dropdown a,
+.dark-mode .nd-dropdown button {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace !important;
+  font-size: 11.5px !important;
+  letter-spacing: .05em;
+}
+
+
+/* ── Headings written before the theme ────────────────────────────────────
+   20 of 23 pages set their own <h1>/<h2> with inline fontSize/fontWeight/color.
+   Inline wins on those three, so this sets only the VOICE — family, spacing,
+   case — which none of them specify. The result is one typographic identity
+   without touching twenty files, and each page keeps the size it chose.
+   Scoped to .nd-main so the login/signup shell is unaffected. */
+.dark-mode .nd-main h1,
+.dark-mode .nd-main h2 {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+/* Card-level h3/h4 are usually a record's name — a symbol, a fund, an agent —
+   so they take the mono face for alignment but keep their own casing. */
+.dark-mode .nd-main h3,
+.dark-mode .nd-main h4 {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  letter-spacing: .04em;
+}
+
+/* Tab strips scroll rather than wrap. Several pages have six or more sections
+   and the strip is inline-flex, so on a narrow window it would otherwise push
+   the layout wide. */
+.nd-tabs {
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.nd-tabs::-webkit-scrollbar { display: none; }
+.nd-tabs button { flex-shrink: 0; }
+.nd-tabs.is-wide button { flex: 1 1 auto; }
+
+
+/* ── Tables ───────────────────────────────────────────────────────────────
+   Only the headers had been given the console voice; the rows were left as
+   they shipped, so a themed page still ended in an untouched grid. A table is
+   the densest reading surface in the app, so this is where the treatment has
+   to earn its keep rather than decorate:
+
+     · numbers in mono with tabular figures, so digits stay in column as
+       prices tick and a mis-scaled value is visible by its width alone;
+     · a hairline between rows instead of a boxed grid — the eye tracks a row
+       across, and vertical rules fight that;
+     · hover lights the whole row, because on a 19-row holdings table the
+       question is always "which row am I on".
+
+   Applies to .nd-table AND to plain <table> inside a card, so the bespoke ones
+   (LiveSessionsPanel, the post-mortem position lists) match without edits. */
+.dark-mode .nd-table,
+.dark-mode .nd-card table {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: 100%;
+}
+
+.dark-mode .nd-table th,
+.dark-mode .nd-card table th {
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--nd-border);
+  background: color-mix(in srgb, var(--nd-surface-2) 55%, transparent);
+  /* No `position: sticky` here. The wrap has no height cap, so it would never
+     actually stick — and `overflow-x: auto` makes overflow-y compute to auto,
+     which is exactly the kind of quiet scroll-container change that breaks
+     something else later. */
+}
+.dark-mode .nd-table th:first-child,
+.dark-mode .nd-card table th:first-child { padding-left: 18px; }
+.dark-mode .nd-table th:last-child,
+.dark-mode .nd-card table th:last-child { padding-right: 18px; }
+.dark-mode .nd-table th.active-sort { color: var(--nd-accent); }
+
+.dark-mode .nd-table td,
+.dark-mode .nd-card table td {
+  padding: 11px 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--nd-border) 55%, transparent);
+  font-variant-numeric: tabular-nums;
+}
+.dark-mode .nd-table td:first-child,
+.dark-mode .nd-card table td:first-child { padding-left: 18px; }
+.dark-mode .nd-table td:last-child,
+.dark-mode .nd-card table td:last-child { padding-right: 18px; }
+
+/* Numeric columns read as instrument values. Right-aligned cells are the
+   numbers in practice, which is why this keys off alignment rather than
+   needing every table to tag its columns. */
+.dark-mode .nd-table td[align="right"],
+.dark-mode .nd-card table td[align="right"],
+.dark-mode .nd-table td.text-right,
+.dark-mode .nd-table .text-right {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12.5px;
+}
+
+.dark-mode .nd-table tbody tr,
+.dark-mode .nd-card table tbody tr { transition: background .12s ease; }
+.dark-mode .nd-table tbody tr:hover,
+.dark-mode .nd-card table tbody tr:hover {
+  background: color-mix(in srgb, var(--nd-accent) 7%, transparent);
+}
+.dark-mode .nd-table tbody tr:last-child td,
+.dark-mode .nd-card table tbody tr:last-child td { border-bottom: none; }
+
+/* A table that fills its card edge-to-edge reads as a spreadsheet pasted in.
+   Wrap it in .nd-table-wrap for the inset the rest of the surface has. */
+.nd-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--nd-border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--nd-bg) 55%, transparent);
+}
+.dark-mode .nd-table-wrap { margin-top: 10px; }
+
+
+/* ── Mini stat ────────────────────────────────────────────────────────────
+   .nd-metric is the label+value pair the Portfolio tabs, Backtest, AIAgent and
+   RiskAnalytics all reach for. It is the same object as .nd-stat on the
+   Dashboard, so it gets the same treatment: lit edge, label in the scanning
+   voice, value in mono with tabular figures. Tabs that hand-rolled their own
+   label/value divs were converted to this class rather than restyled inline —
+   one object, one look, and the next tab inherits it. */
+.dark-mode .nd-metric {
+  border-radius: 12px;
+  padding: 13px 15px 14px;
+  background-image: linear-gradient(90deg, transparent,
+    color-mix(in srgb, var(--tone, var(--nd-accent)) 55%, transparent), transparent);
+  background-repeat: no-repeat;
+  background-size: 100% 1px;
+  background-position: top center;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.dark-mode .nd-metric:hover {
+  border-color: color-mix(in srgb, var(--tone, var(--nd-accent)) 40%, var(--nd-border));
+  box-shadow: 0 0 22px -14px var(--tone, var(--nd-accent));
+}
+.dark-mode .nd-metric-label {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 9.5px;
+  font-weight: 400;
+  letter-spacing: .13em;
+  color: var(--nd-text-3);
+  margin-bottom: 6px;
+}
+.dark-mode .nd-metric-value {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 19px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+  text-shadow: 0 0 22px color-mix(in srgb, var(--tone, var(--nd-accent)) 30%, transparent);
+}
+/* A value that is a list of names rather than a number — "Textiles,
+   Information Technology, …" — needs to wrap and stay readable, so it drops
+   the mono face at a smaller size instead of overflowing its tile. */
+.dark-mode .nd-metric-value.is-text {
+  font-family: 'Roboto', system-ui, sans-serif;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.45;
+  text-shadow: none;
+}
+.dark-mode .nd-metric-sub {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 10.5px;
+  color: var(--nd-text-3);
 }

@@ -6,20 +6,23 @@ interface SectorsTabProps {
 
 const SectorsTab: React.FC<SectorsTabProps> = ({ sectorData }) => {
   return (
-    <div style={{ padding: '18px 20px' }}>
+    <div>
       {!sectorData ? (
         <div className="nd-card" style={{ textAlign: 'center', padding: 40, color: 'var(--nd-text-3)', fontSize: 13 }}>Scanning sector exposure…</div>
       ) : (
         <>
           <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 14 }}>
             {[
-              { label: 'Top sector', value: `${sectorData.topSector} · ${sectorData.topSectorPct}%`, color: sectorData.topSectorPct > 40 ? 'var(--nd-red)' : 'var(--nd-text-1)' },
+              { label: 'Top sector', value: `${sectorData.topSector} · ${sectorData.topSectorPct}%`, color: sectorData.topSectorPct > 40 ? 'var(--nd-red)' : 'var(--nd-text-1)', text: true },
               { label: 'Effective sectors', value: sectorData.effectiveSectors, color: 'var(--nd-text-1)' },
-              { label: 'AI-favoured', value: (sectorData.aiFavoured ?? []).slice(0, 3).map((a: any) => a.sector).join(', ') || '—', color: 'var(--nd-green)' },
+              { label: 'AI-favoured', value: (sectorData.aiFavoured ?? []).slice(0, 3).map((a: any) => a.sector).join(', ') || '—', color: 'var(--nd-green)', text: true },
             ].map((c, i) => (
-              <div key={i} className="nd-card" style={{ flex: '1 1 200px', padding: '12px 16px' }}>
-                <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>{c.label}</div>
-                <div style={{ fontSize: 15, fontWeight: 700, color: c.color }}>{c.value}</div>
+              <div key={i} className="nd-metric" style={{ flex: '1 1 200px', ['--tone' as any]: c.color }}>
+                <p className="nd-metric-label">{c.label}</p>
+                {/* `is-text` on the AI-favoured tile: a comma-separated list of
+                    sector names is prose, not a reading, so it wraps in Roboto
+                    instead of overflowing the tile in wide mono. */}
+                <p className={`nd-metric-value${c.text ? ' is-text' : ''}`} style={{ color: c.color }}>{c.value}</p>
               </div>
             ))}
           </div>

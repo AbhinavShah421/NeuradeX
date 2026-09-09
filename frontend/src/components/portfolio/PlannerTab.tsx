@@ -20,19 +20,21 @@ interface PlannerTabProps {
 
 const PlannerTab: React.FC<PlannerTabProps> = ({ plan, planForm, setPlanForm, planning, runPlan, setQuizOpen }) => {
   return (
-    <div style={{ padding: '18px 20px' }}>
+    <div>
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: 16 }}>
         {[['goalAmount', 'Goal ₹'], ['years', 'Years'], ['currentCorpus', 'Current corpus ₹'], ['monthly', 'Monthly SIP ₹ (optional)']].map(([k, label]) => (
-          <div key={k}><div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginBottom: 3 }}>{label}</div>
+          <div key={k}><div className="nd-metric-label" style={{ marginBottom: 3 }}>{label}</div>
             <input className="nd-input" style={{ width: k === 'years' ? 80 : 150 }} value={(planForm as any)[k]}
               onChange={e => setPlanForm({ ...planForm, [k]: e.target.value.replace(/[^0-9]/g, '') })} /></div>
         ))}
-        <div><div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginBottom: 3 }}>Risk</div>
+        <div><div className="nd-metric-label" style={{ marginBottom: 3 }}>Risk</div>
           <select className="nd-input" value={planForm.risk} onChange={e => setPlanForm({ ...planForm, risk: e.target.value })}>
             <option value="conservative">Conservative</option><option value="moderate">Moderate</option><option value="aggressive">Aggressive</option>
           </select></div>
-        <button onClick={() => setQuizOpen(true)} style={{ padding: '9px 14px', borderRadius: 8, border: '1px solid var(--nd-blue)', background: 'transparent', color: 'var(--nd-blue)', fontWeight: 600, fontSize: 12, cursor: 'pointer' }}>📋 Find my risk</button>
-        <button onClick={runPlan} disabled={planning} style={{ padding: '9px 18px', borderRadius: 8, border: 'none', background: 'var(--nd-green)', color: '#fff', fontWeight: 700, fontSize: 12.5, cursor: 'pointer' }}>{planning ? 'Planning…' : 'Plan'}</button>
+        <button className="nd-btn nd-btn-outline" onClick={() => setQuizOpen(true)}>Find my risk</button>
+        <button className="nd-btn nd-btn-primary" onClick={runPlan} disabled={planning}>
+          {planning ? 'Planning…' : 'Plan'}
+        </button>
       </div>
       {plan && (
         <>
@@ -44,9 +46,9 @@ const PlannerTab: React.FC<PlannerTabProps> = ({ plan, planForm, setPlanForm, pl
               ['Wealth gained', `₹${inr(plan.wealthGained)}`],
               ['Assumed return', `${plan.assumedReturnPct}% p.a.`],
             ].map(([l, v], i) => (
-              <div key={i} className="nd-card" style={{ padding: '12px 16px' }}>
-                <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>{l}</div>
-                <div style={{ fontSize: 15, fontWeight: 700, color: i === 3 ? 'var(--nd-green)' : 'var(--nd-text-1)' }}>{v}</div>
+              <div key={i} className="nd-metric">
+                <p className="nd-metric-label">{l}</p>
+                <p className="nd-metric-value" style={{ color: i === 3 ? 'var(--nd-green)' : 'var(--nd-text-1)' }}>{v}</p>
               </div>
             ))}
           </div>
@@ -64,7 +66,7 @@ const PlannerTab: React.FC<PlannerTabProps> = ({ plan, planForm, setPlanForm, pl
             const line = (key: string) => pts.map((p: any, i: number) => `${sx(i).toFixed(1)},${sy(p[key]).toFixed(1)}`).join(' ');
             return (
               <div className="nd-card" style={{ padding: '14px 18px', marginBottom: 14 }}>
-                <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 6 }}>Projected growth ({plan.years} yrs)</div>
+                <div className="nd-section-title" style={{ marginBottom: 6 }}>Projected growth ({plan.years} yrs)</div>
                 <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 140 }} preserveAspectRatio="none">
                   <polyline points={`${line('optimistic')} ${pts.map((p: any, i: number) => `${sx(pts.length - 1 - i).toFixed(1)},${sy(p.pessimistic ? pts[pts.length - 1 - i].pessimistic : 0).toFixed(1)}`).join(' ')}`} fill="#34d39915" stroke="none" />
                   <polyline points={line('expected')} fill="none" stroke="#34d399" strokeWidth="2" />
@@ -74,7 +76,7 @@ const PlannerTab: React.FC<PlannerTabProps> = ({ plan, planForm, setPlanForm, pl
               </div>
             );
           })()}
-          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>AI asset allocation ({plan.risk})</div>
+          <div className="nd-section-title" style={{ marginBottom: 8 }}>AI asset allocation ({plan.risk})</div>
           {plan.sleeves.map((s: any) => (
             <div key={s.sleeve} style={{ marginBottom: 8 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5 }}><span style={{ fontWeight: 600 }}>{s.sleeve} · {s.pct}%</span></div>

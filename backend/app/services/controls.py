@@ -290,14 +290,34 @@ async def ensemble_setting(name: str) -> Any:
 
 
 async def snapshot() -> dict:
-    """Everything the control page needs in one call."""
+    """Everything the control page needs in one call.
+
+    `active_gate` matters more than it looks. Three gate presets are listed but
+    only ONE is in force, and a page that shows all three identically invites
+    the mistake of carefully tuning Strict while the runner reads Gentle. The
+    mode lives in Redis under the session service's own key, so it is read from
+    there rather than mirrored here.
+    """
     ov = await _load()
     specs = control_specs()
     for c in specs:
         c["value"] = ov.get(c["id"], c.get("default"))
         c["overridden"] = c["id"] in ov
+        # The UI groups the gate presets into tabs; carrying the mode on the
+        # control saves it parsing the id or the group label to find it.
+        if c["id"].startswith("gate."):
+            c["gate_mode"] = c["id"].split(".")[1]
+
+    try:
+        from app.services.sessions_service import get_trade_gate
+        active_gate = await get_trade_gate()
+    except Exception:
+        logger.warning("could not read the active trade gate", exc_info=True)
+        active_gate = None
+
     return {
         "controls": specs,
+        "active_gate": active_gate,
         "override_count": len(ov),
         "cache_ttl_secs": _CACHE_TTL,
         "note": ("Changes apply within the cache TTL — on the next candle in practice. "

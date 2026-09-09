@@ -269,7 +269,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
                 </button>
 
                 {userDropdownOpen && (
-                  <div style={{ position: 'absolute', top: 'calc(100% + 8px)', right: 0, width: 240, background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 12, boxShadow: 'var(--nd-shadow-md)', zIndex: 200, overflow: 'hidden' }}>
+                  <div className="nd-menu" style={{ position: 'absolute', top: 'calc(100% + 8px)', right: 0, width: 240, zIndex: 200, overflow: 'hidden' }}>
                     <div style={{ padding: '16px', borderBottom: '1px solid var(--nd-border)', display: 'flex', gap: 12, alignItems: 'center' }}>
                       <div style={{ width: 40, height: 40, borderRadius: '50%', background: brokerColor, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: 16, color: '#fff', flexShrink: 0 }}>
                         {profile?.initials || brokerLabel.charAt(0)}

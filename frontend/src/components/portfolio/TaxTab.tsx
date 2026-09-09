@@ -7,7 +7,7 @@ interface TaxTabProps {
 
 const TaxTab: React.FC<TaxTabProps> = ({ tax }) => {
   return (
-    <div style={{ padding: '18px 20px' }}>
+    <div>
       {!tax ? (
         <div style={{ textAlign: 'center', padding: 40, color: 'var(--nd-text-3)', fontSize: 13 }}>Analysing capital gains…</div>
       ) : tax.note ? (
@@ -21,7 +21,10 @@ const TaxTab: React.FC<TaxTabProps> = ({ tax }) => {
               ['Potential offset', `₹${inr(tax.potentialOffset)}`, 'var(--nd-text-1)'],
               ['Est. tax saved', `₹${inr(tax.estTaxSaved)}`, 'var(--nd-green)'],
             ].map(([l, v, c], i) => (
-              <div key={i} className="nd-card" style={{ padding: '12px 16px' }}><div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>{l}</div><div style={{ fontSize: 15, fontWeight: 700, color: c as string }}>{v}</div></div>
+              <div key={i} className="nd-metric" style={{ ['--tone' as any]: c as string }}>
+                <p className="nd-metric-label">{l}</p>
+                <p className="nd-metric-value" style={{ color: c as string }}>{v}</p>
+              </div>
             ))}
           </div>
           {tax.tips.map((t: string, i: number) => <div key={i} style={{ fontSize: 12, color: 'var(--nd-text-2)', padding: '3px 0' }}>💡 {t}</div>)}

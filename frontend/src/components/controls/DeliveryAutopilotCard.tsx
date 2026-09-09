@@ -35,54 +35,70 @@ const DeliveryAutopilotCard: React.FC = () => {
   const on = !!data?.enabled;
 
   return (
-    <div className="nd-card" style={{ padding: '16px 18px', marginBottom: 20, borderLeft: `3px solid ${on ? '#38bdf8' : 'var(--nd-border)'}` }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 10 }}>
-        <div className="nd-icon-chip" style={{ background: on ? '#38bdf81a' : 'var(--nd-surface)' }}>
-          <span className="material-icons" style={{ color: on ? '#38bdf8' : 'var(--nd-text-2)' }}>calendar_month</span>
-        </div>
-        <div style={{ flex: 1, minWidth: 180 }}>
-          <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>Delivery Autopilot
-            <span style={{ fontSize: 10, fontWeight: 700, marginLeft: 6, color: on ? '#38bdf8' : 'var(--nd-text-3)', border: `1px solid ${on ? '#38bdf8' : 'var(--nd-border)'}`, borderRadius: 4, padding: '0 5px' }}>{on ? 'ON' : 'OFF'}</span>
-          </div>
-          <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>Multi-day paper portfolios on delivery picks — an AI agent times the exits (target / stop / time-stop / downgrade). Feeds the Delivery line.</div>
-        </div>
-        <button onClick={() => setShowCreate(s => !s)} style={{ padding: '6px 12px', fontSize: 12, fontWeight: 600, borderRadius: 7, border: '1px solid var(--nd-border)', background: 'transparent', color: 'var(--nd-text-2)', cursor: 'pointer' }}>+ Portfolio</button>
-        <button onClick={runTick} disabled={busy} style={{ padding: '6px 12px', fontSize: 12, fontWeight: 600, borderRadius: 7, border: '1px solid #38bdf8', background: 'transparent', color: '#38bdf8', cursor: 'pointer' }}>{busy ? '…' : 'Run now'}</button>
-        <button onClick={toggle} disabled={busy} style={{ padding: '6px 14px', fontSize: 12, fontWeight: 700, borderRadius: 7, border: 'none', background: on ? 'var(--nd-red)' : '#38bdf8', color: '#fff', cursor: 'pointer' }}>{on ? 'Disable' : 'Enable'}</button>
+    <div className="nd-bank" style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 12, padding: '14px 16px', marginBottom: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 10 }}>
+        <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--nd-text-2)',
+                       fontFamily: 'ui-monospace, monospace', letterSpacing: '.12em', textTransform: 'uppercase' }}>
+          Delivery autopilot
+        </span>
+        {on && <i className="nd-lamp" aria-hidden="true" />}
+        <span className="nd-live-note">{on ? 'the agent is managing these daily' : 'off'}</span>
+        <span style={{ display: 'flex', gap: 8, marginLeft: 'auto' }}>
+          <button className="nd-console-btn" onClick={() => setShowCreate(s => !s)}>+ portfolio</button>
+          <button className="nd-console-btn is-go" onClick={runTick} disabled={busy}>{busy ? '…' : 'run now'}</button>
+          <button className={`nd-console-btn${on ? ' is-stop' : ' is-go'}`} onClick={toggle} disabled={busy}>
+            {on ? 'disable' : 'enable'}
+          </button>
+        </span>
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--nd-text-3)', lineHeight: 1.5, marginBottom: 12 }}>
+        Multi-day paper portfolios on delivery picks — an AI agent times the exits
+        (target / stop / time-stop / downgrade). Feeds the Delivery line.
       </div>
 
       {showCreate && (
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: 12, padding: '10px 12px', background: 'var(--nd-surface)', borderRadius: 8 }}>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: 12, padding: '10px 12px', background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 8 }}>
           {[['name', 'Name', 130], ['capital', 'Capital ₹', 110], ['maxPositions', 'Max pos', 70], ['targetPct', 'Target %', 70], ['stopPct', 'Stop %', 70]].map(([k, label, w]) => (
-            <div key={k as string}><div style={{ fontSize: 10, color: 'var(--nd-text-3)' }}>{label}</div>
+            <div key={k as string}>
+              <div style={{ fontSize: 9.5, color: 'var(--nd-text-3)', fontFamily: 'ui-monospace, monospace',
+                            letterSpacing: '.08em', textTransform: 'uppercase', marginBottom: 3 }}>{label}</div>
               <input className="nd-input" style={{ width: w as number }} value={(form as any)[k as string]}
                 onChange={e => setForm({ ...form, [k as string]: k === 'name' ? e.target.value : e.target.value.replace(/[^0-9.]/g, '') })} /></div>
           ))}
-          <button onClick={create} style={{ padding: '8px 14px', borderRadius: 7, border: 'none', background: '#38bdf8', color: '#fff', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>Create</button>
+          <button className="nd-console-btn is-go" onClick={create} style={{ padding: '7px 14px' }}>create</button>
         </div>
       )}
 
       {pfs.length === 0 ? (
-        <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>No delivery portfolios yet — click <strong>+ Portfolio</strong>, then Enable to let the agent manage it daily.</div>
+        <div style={{ fontSize: 11.5, color: 'var(--nd-text-3)' }}>No delivery portfolios yet — <strong>+ portfolio</strong>, then <strong>enable</strong> to let the agent manage it daily.</div>
       ) : pfs.map((p: any) => {
         const ret = p.returnPct ?? 0;
         return (
           <div key={p.id} style={{ border: '1px solid var(--nd-border)', borderRadius: 8, padding: '10px 12px', marginBottom: 8 }}>
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
-              <span style={{ fontWeight: 700, color: 'var(--nd-text-1)' }}>{p.name}</span>
-              <span style={{ fontSize: 9, fontWeight: 700, color: p.source === 'optimize' ? '#a78bfa' : '#38bdf8', border: `1px solid ${p.source === 'optimize' ? '#a78bfa' : '#38bdf8'}`, borderRadius: 4, padding: '0 5px' }}>{p.source === 'optimize' ? 'OPTIMIZE TEST' : 'AI-MANAGED'}</span>
-              <span style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>₹{inr(p.value)} · {p.positions.length} pos · cash ₹{inr(p.cash)}</span>
-              <span style={{ fontSize: 13, fontWeight: 700, color: ret >= 0 ? 'var(--nd-green)' : 'var(--nd-red)' }}>{ret >= 0 ? '+' : ''}{ret}%</span>
-              <span style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
-                <button onClick={() => setOpen(open === p.id ? null : p.id)} style={{ background: 'none', border: 'none', color: 'var(--nd-blue)', cursor: 'pointer', fontSize: 11 }}>{open === p.id ? 'hide' : 'positions'}</button>
-                <button onClick={() => del(p.id)} style={{ background: 'none', border: 'none', color: 'var(--nd-red)', cursor: 'pointer', fontSize: 15 }}>×</button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 9, flexWrap: 'wrap' }}>
+              <span style={{ fontWeight: 600, fontSize: 12.5, color: 'var(--nd-text-1)' }}>{p.name}</span>
+              <span className="nd-chip-tag" style={{ color: p.source === 'optimize' ? 'var(--nd-purple)' : 'var(--nd-accent)' }}>
+                {p.source === 'optimize' ? 'optimize test' : 'ai-managed'}
+              </span>
+              <span style={{ fontSize: 11, color: 'var(--nd-text-3)', fontFamily: 'ui-monospace, monospace' }}>
+                ₹{inr(p.value)} · {p.positions.length} pos · cash ₹{inr(p.cash)}
+              </span>
+              <span style={{ fontSize: 13, fontWeight: 700, fontFamily: 'ui-monospace, monospace',
+                             color: ret >= 0 ? 'var(--nd-green)' : 'var(--nd-red)' }}>{ret >= 0 ? '+' : ''}{ret}%</span>
+              <span style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
+                <button className="nd-console-btn" onClick={() => setOpen(open === p.id ? null : p.id)}>
+                  {open === p.id ? 'hide' : 'positions'}
+                </button>
+                <button className="nd-console-btn is-stop" onClick={() => del(p.id)} title={`Delete ${p.name}`}>×</button>
               </span>
             </div>
             {open === p.id && (
               <div style={{ marginTop: 8 }}>
                 {[...p.positions, ...((p.closed || []).slice(-5).reverse())].length === 0 ? <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>No positions.</div> : (
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11.5 }}>
-                    <thead><tr style={{ color: 'var(--nd-text-3)', fontSize: 10, textAlign: 'right' }}>
+                    <thead><tr style={{ color: 'var(--nd-text-3)', fontSize: 9.5, textAlign: 'right',
+                                       fontFamily: 'ui-monospace, monospace', letterSpacing: '.06em',
+                                       textTransform: 'uppercase' }}>
                       <th style={{ textAlign: 'left', padding: '3px 6px' }}>Stock</th><th>Entry</th><th>Now</th><th>Target</th><th>Stop</th><th>P&L%</th><th style={{ textAlign: 'left' }}>Status</th>
                     </tr></thead>
                     <tbody>

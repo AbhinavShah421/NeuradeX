@@ -51,23 +51,20 @@ const InvestTab: React.FC<InvestTabProps> = ({
   return (
     <>
       {/* ── AI Invest Tab — sub-nav: Quick Invest / AI Funds / AI Themes ─────── */}
-      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', padding: '14px 20px 0' }}>
+      {/* Same strip as the Portfolio tabs above it — these were three
+          separately-styled pill buttons with a filled-green active state, which
+          made a sub-level nav shout louder than the level it sits under. */}
+      <div className="nd-tabs" role="tablist" aria-label="Invest mode" style={{ marginBottom: 14 }}>
         {([
           { id: 'quick', label: 'Quick Invest', icon: 'savings' },
           { id: 'funds', label: 'AI Funds', icon: 'inventory_2' },
           { id: 'themes', label: 'AI Themes', icon: 'category' },
-        ] as const).map(s => {
-          const on = investSub === s.id;
-          return (
-            <button key={s.id} onClick={() => setInvestSub(s.id)}
-              style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 14px', borderRadius: 9, cursor: 'pointer',
-                border: `1px solid ${on ? 'var(--nd-green)' : 'var(--nd-border)'}`,
-                background: on ? 'var(--nd-green)' : 'transparent',
-                color: on ? '#fff' : 'var(--nd-text-2)', fontWeight: 700, fontSize: 12.5 }}>
-              <span className="material-icons" style={{ fontSize: 16 }}>{s.icon}</span>{s.label}
-            </button>
-          );
-        })}
+        ] as const).map(s => (
+          <button key={s.id} role="tab" aria-selected={investSub === s.id}
+            onClick={() => setInvestSub(s.id)}>
+            <span className="material-icons" style={{ fontSize: 15 }}>{s.icon}</span>{s.label}
+          </button>
+        ))}
       </div>
 
       {/* ── Quick Invest (amount → AI-split across A/B scan picks) ─────────────── */}
@@ -87,9 +84,7 @@ const InvestTab: React.FC<InvestTabProps> = ({
                 <input type="number" min={0} value={investAmount} onChange={e => setInvestAmount(e.target.value)}
                   placeholder="Amount" className="nd-input" style={{ width: 140, paddingLeft: 22 }} />
               </div>
-              <button onClick={generateInvestPlan} disabled={investLoading}
-                style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '9px 16px', borderRadius: 10, border: 'none',
-                  background: 'var(--nd-green)', color: '#fff', fontWeight: 600, fontSize: 14, cursor: investLoading ? 'wait' : 'pointer' }}>
+              <button className="nd-btn nd-btn-primary" onClick={generateInvestPlan} disabled={investLoading}>
                 <span className={`material-icons${investLoading ? ' nd-spin' : ''}`} style={{ fontSize: 18 }}>{investLoading ? 'autorenew' : 'auto_awesome'}</span>
                 {investLoading ? 'Building…' : 'Build plan'}
               </button>
@@ -103,9 +98,8 @@ const InvestTab: React.FC<InvestTabProps> = ({
                 <div><div className="nd-label" style={{ margin: 0 }}>Deploying</div><div style={{ fontSize: 18, fontWeight: 700, color: 'var(--nd-green)' }}>₹{inr(investData.deployed)}</div></div>
                 <div><div className="nd-label" style={{ margin: 0 }}>Leftover</div><div style={{ fontSize: 18, fontWeight: 700, color: 'var(--nd-text-2)' }}>₹{inr(investData.leftover)}</div></div>
                 <div><div className="nd-label" style={{ margin: 0 }}>Stocks</div><div style={{ fontSize: 18, fontWeight: 700 }}>{investData.count}</div></div>
-                <button onClick={() => askInvestAll(investData.picks)}
-                  style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, padding: '10px 18px', borderRadius: 10, border: 'none',
-                    background: 'var(--nd-green)', color: '#fff', fontWeight: 700, fontSize: 14, cursor: 'pointer' }}>
+                <button className="nd-btn nd-btn-primary" onClick={() => askInvestAll(investData.picks)}
+                  style={{ marginLeft: 'auto' }}>
                   <span className="material-icons" style={{ fontSize: 18 }}>shopping_cart_checkout</span>
                   Invest all
                 </button>
@@ -167,7 +161,7 @@ const InvestTab: React.FC<InvestTabProps> = ({
 
       {/* ── AI Themes (thematic baskets) ── */}
       {investSub === 'themes' && (
-        <div style={{ padding: '18px 20px' }}>
+        <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 4 }}>
             <span style={{ fontSize: 12.5, color: 'var(--nd-text-2)' }}>Invest amount ₹</span>
             <input value={basketAmt} onChange={e => setBasketAmt(e.target.value.replace(/[^0-9]/g, ''))}
@@ -275,8 +269,8 @@ const InvestTab: React.FC<InvestTabProps> = ({
                         <span className="material-icons" style={{ fontSize: 15 }}>science</span>
                         {themeBusy === t.id + ':pt' ? '…' : 'Paper-test'}
                       </button>
-                      <button onClick={() => askInvestBasket(t)} className="nd-btn"
-                        style={{ flex: 1, minWidth: 130, background: 'var(--nd-green)', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 0', fontSize: 12.5, fontWeight: 700, cursor: 'pointer' }}>
+                      <button onClick={() => askInvestBasket(t)} className="nd-btn nd-btn-primary"
+                        style={{ flex: 1, minWidth: 130 }}>
                         Invest ₹{Number(basketAmt || 0).toLocaleString('en-IN')}
                       </button>
                     </div>
@@ -290,7 +284,7 @@ const InvestTab: React.FC<InvestTabProps> = ({
 
       {/* ── AI Funds (quant baskets) ── */}
       {investSub === 'funds' && (
-        <div style={{ padding: '18px 20px 0' }}>
+        <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 14 }}>
             <span style={{ fontSize: 12.5, color: 'var(--nd-text-2)' }}>Invest amount ₹</span>
             <input value={basketAmt} onChange={e => setBasketAmt(e.target.value.replace(/[^0-9]/g, ''))}
@@ -327,8 +321,8 @@ const InvestTab: React.FC<InvestTabProps> = ({
                         </button>
                       )}
                     </div>
-                    <button onClick={() => askInvestBasket(b)} className="nd-btn"
-                      style={{ width: '100%', background: 'var(--nd-green)', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 0', fontSize: 12.5, fontWeight: 700, cursor: 'pointer' }}>
+                    <button onClick={() => askInvestBasket(b)} className="nd-btn nd-btn-primary"
+                      style={{ width: '100%' }}>
                       Invest ₹{Number(basketAmt || 0).toLocaleString('en-IN')}
                     </button>
                   </div>

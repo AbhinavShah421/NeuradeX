@@ -60,13 +60,13 @@ const RiskTab: React.FC<RiskTabProps> = ({ portfolio, riskMetrics, riskLab }) =>
                 icon: 'warning_amber',
               },
             ].map(card => (
-              <div key={card.label} className="nd-card" style={{ padding: '16px 20px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                  <span className="material-icons" style={{ fontSize: 18, color: 'var(--nd-text-3)' }}>{card.icon}</span>
-                  <span style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>{card.label}</span>
-                </div>
-                <div style={{ fontSize: 24, fontWeight: 700, color: card.color, marginBottom: 4 }}>{card.value}</div>
-                <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>{card.sub}</div>
+              <div key={card.label} className="nd-metric" style={{ ['--tone' as any]: card.color }}>
+                <p className="nd-metric-label" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span className="material-icons" style={{ fontSize: 14 }}>{card.icon}</span>
+                  {card.label}
+                </p>
+                <p className="nd-metric-value" style={{ color: card.color, fontSize: 22 }}>{card.value}</p>
+                <p className="nd-metric-sub">{card.sub}</p>
               </div>
             ))}
           </div>
@@ -142,7 +142,7 @@ const RiskTab: React.FC<RiskTabProps> = ({ portfolio, riskMetrics, riskLab }) =>
       )}
 
       {/* ── AI Risk Lab (merged under the Risk tab) ── */}
-      <div style={{ padding: '18px 20px 0' }}>
+      <div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '4px 0 12px' }}>
           <span className="material-icons" style={{ fontSize: 18, color: 'var(--nd-purple)' }}>science</span>
           <span style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>AI Risk Lab</span>

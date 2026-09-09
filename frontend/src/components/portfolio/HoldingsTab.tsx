@@ -14,15 +14,18 @@ interface HoldingsTabProps {
 const HoldingsTab: React.FC<HoldingsTabProps> = ({ portfolio, alerts, sortKey, sortDir, sortedStocks, onSort }) => {
   return (
     <>
-      <div className="nd-card" style={{ padding: 0, marginBottom: 16 }}>
-        <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--nd-border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      {/* The table used to sit flush against the card's edges, which read as a
+          spreadsheet pasted into the page rather than part of it. The card now
+          keeps its own padding and the grid sits inset inside .nd-table-wrap. */}
+      <div className="nd-card" style={{ padding: '14px 16px 16px', marginBottom: 16 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
           <h2 className="nd-section-title" style={{ margin: 0 }}>
             Holdings
-            <span style={{ fontWeight: 400, color: 'var(--nd-text-2)', marginLeft: 6 }}>({portfolio.stocks.length})</span>
+            <span style={{ fontWeight: 400, color: 'var(--nd-text-3)', marginLeft: 6 }}>({portfolio.stocks.length})</span>
           </h2>
-          <span style={{ fontSize: 11.5, color: 'var(--nd-text-3)' }}>Click column to sort</span>
+          <span style={{ fontSize: 10.5, color: 'var(--nd-text-3)', fontFamily: 'ui-monospace, monospace' }}>click column to sort</span>
         </div>
-        <div style={{ overflowX: 'auto' }}>
+        <div className="nd-table-wrap">
           <table className="nd-table">
             <thead>
               <tr>

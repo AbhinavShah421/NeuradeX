@@ -112,10 +112,11 @@ const RiskAnalytics: React.FC = () => {
         <p className="nd-page-sub">Aladdin-inspired portfolio risk management — VaR, stress testing, factor analysis, optimization</p>
       </div>
 
-      <div className="nd-tabs">
+      <div className="nd-tabs" role="tablist" aria-label="Risk section" style={{ marginBottom: 20 }}>
         {TABS.map(t => (
-          <button key={t.id} className={`nd-tab${activeTab === t.id ? ' active' : ''}`} onClick={() => setActiveTab(t.id)}>
-            <span className="material-icons" style={{ fontSize: 16, verticalAlign: 'middle', marginRight: 5 }}>{t.icon}</span>
+          <button key={t.id} role="tab" aria-selected={activeTab === t.id}
+            onClick={() => setActiveTab(t.id)}>
+            <span className="material-icons" style={{ fontSize: 15 }}>{t.icon}</span>
             {t.label}
           </button>
         ))}
