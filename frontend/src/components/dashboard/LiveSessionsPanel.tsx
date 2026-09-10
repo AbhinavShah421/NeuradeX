@@ -441,12 +441,21 @@ const LiveSessionsPanel: React.FC = () => {
   const [savingBatch, setSavingBatch] = useState(false);
   const [speed, setSpeed] = useState<number | null>(null);
   const [savingSpeed, setSavingSpeed] = useState(false);
+  // Real Groww MIS positions, including ones placed by hand in the Groww app.
+  // Separate from `sessions`, which are paper/backtest runners.
+  const [livePositions, setLivePositions] = useState<any[]>([]);
 
   const load = useCallback(async () => {
     try {
       const r = await apiService.sessionList('running');
       setSessions((r as any).data ?? []);
     } catch { /* keep last */ }
+    try {
+      // Reconciles against the broker server-side, so a trade placed on Groww
+      // shows up here within one refresh.
+      const lp = await apiService.livePositions();
+      setLivePositions((lp as any).data ?? []);
+    } catch { /* live trading may be off — keep last */ }
   }, []);
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [load]);
 
@@ -487,7 +496,7 @@ const LiveSessionsPanel: React.FC = () => {
     try { await apiService.sessionStop(id); await load(); } catch { /* ignore */ } finally { setBusy(null); }
   };
 
-  if (!sessions.length) return null;
+  if (!sessions.length && !livePositions.length) return null;
   const totalPnl = sessions.reduce((s, x) => s + (x.pnl ?? 0), 0);
 
   return (
@@ -570,6 +579,65 @@ const LiveSessionsPanel: React.FC = () => {
           </tbody>
         </table>
       </div>
+
+      {/* ── Real Groww MIS positions ──────────────────────────────────────────
+          Kept visually separate from the paper sessions above, because the only
+          thing worse than not seeing a real position is mistaking one for
+          paper. Trades placed by hand in the Groww app appear here too. */}
+      {livePositions.length > 0 && (
+        <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--nd-border)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
+            <span className="material-icons" style={{ fontSize: 16, color: 'var(--nd-red)' }}>bolt</span>
+            <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--nd-text-1)' }}>Live Groww Positions</span>
+            <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>
+              {livePositions.length} open · real money
+            </span>
+          </div>
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', minWidth: 540, borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr style={{ color: 'var(--nd-text-3)', textAlign: 'left' }}>
+                  {['Symbol', 'Source', 'Side', 'Qty', 'Entry', 'Conviction'].map(h => (
+                    <th key={h} style={{ padding: '6px 10px', fontWeight: 500 }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {livePositions.map((p: any, i: number) => {
+                  const manual = p.source === 'groww_manual';
+                  const short  = p.action === 'SHORT';
+                  return (
+                    <tr key={p.symbol ?? i} style={{ borderTop: '1px solid var(--nd-border)' }}>
+                      <td style={{ padding: '8px 10px', fontWeight: 700 }}>{p.symbol}</td>
+                      <td style={{ padding: '8px 10px' }}>
+                        <span className="nd-chip-tag"
+                              style={{ color: manual ? 'var(--nd-orange)' : 'var(--nd-cyan)' }}
+                              title={manual
+                                ? 'Placed directly on Groww — adopted and managed by auto mode'
+                                : 'Placed by NeuradeX'}>
+                          {manual ? 'from Groww' : 'NeuradeX'}
+                        </span>
+                      </td>
+                      <td style={{ padding: '8px 10px', fontWeight: 600,
+                                   color: short ? 'var(--nd-red)' : 'var(--nd-green)' }}>
+                        {short ? 'SHORT' : 'LONG'}
+                      </td>
+                      <td style={{ padding: '8px 10px' }}>{p.quantity ?? '—'}</td>
+                      <td style={{ padding: '8px 10px' }}>{p.entryPrice != null ? inr(p.entryPrice) : '—'}</td>
+                      <td style={{ padding: '8px 10px', color: 'var(--nd-text-3)' }}>
+                        {/* A hand-placed trade was never scored. Showing 0% would
+                            read as "the system had no conviction", which is a
+                            different claim from "the system never saw it". */}
+                        {p.confidence == null ? 'not scored' : `${Math.round(p.confidence * 100)}%`}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
       {openSession && <SessionModal id={openSession} onClose={() => setOpenSession(null)} />}
     </div>
   );

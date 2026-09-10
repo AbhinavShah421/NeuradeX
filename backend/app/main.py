@@ -235,6 +235,17 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning("Could not start live squareoff loop: %s", exc)
 
+        # Auto-manage loop — reconciles the live book against Groww every minute
+        # (so a trade placed by hand in the Groww app becomes visible and managed)
+        # and lets the AI exit what is open when auto-execute is armed.
+        try:
+            from app.api.live_trading import _auto_manage_loop
+            app.state.live_manage_task = asyncio.create_task(_auto_manage_loop())
+            logger.info("Live trading auto-manage scheduled",
+                        extra={"log_type": "app_lifecycle", "event": "live_manage_scheduled"})
+        except Exception as exc:
+            logger.warning("Could not start live auto-manage loop: %s", exc)
+
         # Autopilot now runs as its own microservice (autopilot-service:8015) — it
         # owns the paper + backtest training loops and starts sessions via the API.
         # The backend only reads/writes the enable flags and serves status.

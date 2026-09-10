@@ -40,8 +40,13 @@ interface Position {
   entryPrice:  number;
   entryTime:   string;
   orderId:     string;
-  confidence:  number;
+  // Null for a trade placed by hand on Groww — nobody scored it. Rendering a
+  // number here would show a conviction the system never had.
+  confidence:  number | null;
   reason:      string;
+  action?:     'LONG' | 'SHORT';
+  source?:     string;      // "groww_manual" when adopted from the broker
+  product?:    string;      // MIS / CNC — the exit must match the entry
 }
 
 interface HistoryTrade {
@@ -406,7 +411,8 @@ const LiveTrading: React.FC = () => {
 
   const totalUnrealised = positions.reduce((s, p) => {
     const cur = currentPrices[p.symbol] ?? p.entryPrice;
-    return s + (cur - p.entryPrice) * p.quantity;
+    const dir = p.action === 'SHORT' ? p.entryPrice - cur : cur - p.entryPrice;
+    return s + dir * p.quantity;
   }, 0);
 
   return (
@@ -601,20 +607,41 @@ const LiveTrading: React.FC = () => {
 
           {positions.map((pos, i) => {
             const cur    = currentPrices[pos.symbol] ?? pos.entryPrice;
-            const pnl    = (cur - pos.entryPrice) * pos.quantity;
+            const isShort = pos.action === 'SHORT';
+            // A short profits when price FALLS. Using the long formula would
+            // show every winning short as a loss.
+            const pnl    = (isShort ? pos.entryPrice - cur : cur - pos.entryPrice) * pos.quantity;
             const pnlP   = pos.entryPrice > 0 ? pnl / (pos.entryPrice * pos.quantity) * 100 : 0;
+            const manual = pos.source === 'groww_manual';
             return (
               <div key={i} style={{
                 display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
                 padding: '10px 0', borderTop: i > 0 ? '1px solid var(--nd-border)' : 'none',
               }}>
                 <div style={{ flex: 1, minWidth: 100 }}>
-                  <div style={{ fontWeight: 700, fontSize: 14 }}>{pos.symbol}</div>
-                  <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>
-                    {pos.quantity} × {inr(pos.entryPrice)} · {pos.entryTime}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                    <span style={{ fontWeight: 700, fontSize: 14 }}>{pos.symbol}</span>
+                    {isShort && (
+                      <span className="nd-chip-tag" style={{ color: red }}>short</span>
+                    )}
+                    {manual && (
+                      // Adopted from the broker, not placed here. Worth saying
+                      // plainly: it is under auto management like any other
+                      // position, and the user did not arm it through this page.
+                      <span className="nd-chip-tag" style={{ color: 'var(--nd-orange)' }}
+                            title="Placed directly on Groww — adopted and managed by auto mode">
+                        from Groww
+                      </span>
+                    )}
                   </div>
                   <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>
-                    Conviction {(pos.confidence * 100).toFixed(0)}%
+                    {pos.quantity} × {inr(pos.entryPrice)} · {pos.entryTime}
+                    {pos.product && pos.product !== 'MIS' ? ` · ${pos.product}` : ''}
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>
+                    {pos.confidence == null
+                      ? 'Not scored — placed outside NeuradeX'
+                      : `Conviction ${(pos.confidence * 100).toFixed(0)}%`}
                   </div>
                 </div>
                 <div style={{ textAlign: 'right' }}>

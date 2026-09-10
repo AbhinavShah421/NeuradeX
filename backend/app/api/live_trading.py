@@ -31,6 +31,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.api.auth import get_current_user
+from app.config import settings
 from app.api.paper_trading import (
     IST,
     _MARKET_OPEN_MINUTES,
@@ -181,6 +182,164 @@ class SquareoffRequest(BaseModel):
 
 # ── Conviction gate ────────────────────────────────────────────────────────────
 
+# ── Broker reconciliation ──────────────────────────────────────────────────────
+#
+# `live:positions` only ever held trades WE placed through /place-order, so a
+# trade placed by hand in the Groww app was invisible to every part of NeuradeX:
+# not on this page, not on the dashboard, and — the part that actually costs
+# money — not picked up by the auto-squareoff loop. Groww's RMS would flatten it
+# at 3:20 PM and charge Rs59 for doing our job.
+#
+# Groww's own /positions/user is the only authority on what is really held, and
+# nothing in this codebase had ever called it. So reconcile against it: adopt
+# what we did not know about, and drop what the broker says is gone.
+
+_MANUAL_SOURCE = "groww_manual"
+
+
+def _num(v, default=0.0) -> float:
+    try:
+        f = float(v)
+        return f if f == f and f not in (float("inf"), float("-inf")) else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _map_broker_position(raw: dict) -> Optional[dict]:
+    """Map one Groww position onto our shape, or None if it is not a live one.
+
+    Deliberately tolerant about field NAMES and strict about field VALUES.
+    Groww's position payload has never been exercised by this codebase — nothing
+    had ever called /positions/user — so the exact spelling is unverified and
+    several plausible ones are accepted. What is NOT guessed is the numbers: a
+    position whose quantity or price cannot be read is returned as None rather
+    than defaulted, because a fabricated quantity here becomes a real order.
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    def pick(*names, default=None):
+        for n in names:
+            if raw.get(n) not in (None, ""):
+                return raw[n]
+        return default
+
+    symbol = pick("trading_symbol", "tradingSymbol", "symbol", "tradingsymbol")
+    if not symbol:
+        return None
+    symbol = str(symbol).upper()
+
+    # Net quantity decides both existence and direction. Groww may report it as
+    # a single net figure or as separate buy/sell legs.
+    qty = pick("net_quantity", "netQuantity", "quantity", "net_qty")
+    if qty is None:
+        buy_q = _num(pick("buy_quantity", "buyQuantity", default=0))
+        sell_q = _num(pick("sell_quantity", "sellQuantity", default=0))
+        qty = buy_q - sell_q
+    qty = _num(qty, default=0.0)
+    if qty == 0:
+        return None                      # flat — not an open position
+
+    entry = _num(pick("average_price", "averagePrice", "avg_price", "buy_price",
+                      "net_price", "price"), default=0.0)
+    if entry <= 0:
+        logger.warning(
+            "Groww position for %s has no usable average price — skipped",
+            symbol,
+            extra={"log_type": "live_trading_event", "event": "adopt_no_price",
+                   "symbol": symbol, "raw_keys": sorted(raw.keys())},
+        )
+        return None
+
+    product = str(pick("product", "product_type", "productType", default="MIS")).upper()
+
+    return {
+        "symbol":       symbol,
+        "action":       "LONG" if qty > 0 else "SHORT",
+        "quantity":     abs(qty),
+        "entry_price":  round(entry, 2),
+        "entry_time":   str(pick("created_at", "createdAt", "order_time", default="")) or "—",
+        "order_id":     str(pick("order_id", "orderId", default="groww-manual")),
+        "confidence":   None,           # nobody scored this one
+        "reason":       "Placed directly on Groww",
+        "source":       _MANUAL_SOURCE,
+        "product":      product,
+    }
+
+
+async def _broker_positions() -> tuple[list[dict], Optional[str]]:
+    """(positions, error). An error is NOT an empty book — the caller must not
+    read a failed fetch as 'the broker holds nothing' and start closing things."""
+    groww = get_groww_client()
+    if not groww:
+        return [], "no groww client"
+    try:
+        raw = await groww.get_positions()
+    except Exception as exc:
+        logger.warning("Groww positions fetch failed: %s", exc)
+        return [], str(exc)
+    if not isinstance(raw, list):
+        return [], f"unexpected payload type {type(raw).__name__}"
+
+    out = []
+    for r in raw:
+        mapped = _map_broker_position(r)
+        if mapped:
+            out.append(mapped)
+    return out, None
+
+
+async def _reconcile_positions() -> dict:
+    """Make `live:positions` agree with the broker. Returns a summary."""
+    broker, err = await _broker_positions()
+    if err:
+        # Leave our book untouched. Dropping positions because a fetch failed
+        # would un-manage real money on a network blip.
+        return {"reconciled": False, "error": err}
+
+    ours = await _get_positions()
+    by_symbol = {p["symbol"]: p for p in ours}
+    broker_symbols = {p["symbol"] for p in broker}
+
+    adopted, dropped, updated = [], [], []
+    merged: list[dict] = []
+
+    for bp in broker:
+        mine = by_symbol.get(bp["symbol"])
+        if mine is None:
+            merged.append(bp)
+            adopted.append(bp["symbol"])
+            logger.info(
+                "Adopted a position placed outside NeuradeX",
+                extra={"log_type": "live_trading_event", "event": "position_adopted",
+                       "symbol": bp["symbol"], "quantity": bp["quantity"],
+                       "entry_price": bp["entry_price"]},
+            )
+        else:
+            # Keep OUR record (it carries the confidence and reason the broker
+            # has no idea about) but take the broker's quantity, which is the
+            # one that decides how much a square-off has to sell.
+            if _num(mine.get("quantity")) != bp["quantity"]:
+                updated.append(bp["symbol"])
+                mine["quantity"] = bp["quantity"]
+            merged.append(mine)
+
+    for p in ours:
+        if p["symbol"] not in broker_symbols:
+            dropped.append(p["symbol"])
+            logger.info(
+                "Position closed outside NeuradeX — dropping from the live book",
+                extra={"log_type": "live_trading_event", "event": "position_vanished",
+                       "symbol": p["symbol"]},
+            )
+
+    if adopted or dropped or updated:
+        await _save_positions(merged)
+
+    return {"reconciled": True, "adopted": adopted, "dropped": dropped,
+            "updated": updated, "open": len(merged)}
+
+
 async def _check_gate(
     action: str, confidence: float, agreement: float
 ) -> tuple[bool, str]:
@@ -207,6 +366,10 @@ async def live_status(user: dict = Depends(get_current_user)):
     enabled      = await _is_enabled()
     auto_exec    = await _is_auto_execute()
     settings     = await _get_settings()
+    # This is the endpoint the Live Trading page polls, so reconcile here too —
+    # a trade placed in the Groww app should appear on the next poll rather than
+    # whenever the background loop next happens to run.
+    await _reconcile_positions()
     positions    = await _get_positions()
     history      = await _get_history()
     now          = _now_ist()
@@ -498,7 +661,20 @@ async def place_live_order(req: PlaceOrderRequest, user: dict = Depends(get_curr
 
 @router.get("/positions")
 async def get_positions(user: dict = Depends(get_current_user)):
-    return {"status": "success", "data": await _get_positions()}
+    """Open live positions, reconciled against the broker first.
+
+    Reconciling on read is what makes a trade placed in the Groww app show up
+    here without waiting for the background loop — this endpoint backs the UI,
+    so the refresh the user just did is the moment they expect to see it.
+    """
+    summary = await _reconcile_positions()
+    return {"status": "success", "data": await _get_positions(), "reconcile": summary}
+
+
+@router.post("/reconcile")
+async def reconcile_now(user: dict = Depends(get_current_user)):
+    """Force a broker reconciliation and report what changed."""
+    return {"status": "success", "data": await _reconcile_positions()}
 
 
 @router.get("/history")
@@ -600,7 +776,12 @@ async def _auto_squareoff_loop() -> None:
             if cur_mins < sqoff_mins or squareoff_done_date == date:
                 continue  # not yet time, or already done today
 
-            enabled   = await _is_enabled()
+            enabled = await _is_enabled()
+            # Reconcile FIRST. Without this the loop squares off only what we
+            # placed, and a trade made in the Groww app — the exact case this
+            # feature exists for — is left for the broker's RMS at 3:20 PM.
+            if enabled:
+                await _reconcile_positions()
             positions = await _get_positions()
 
             if not enabled or not positions:
@@ -617,13 +798,17 @@ async def _auto_squareoff_loop() -> None:
             if groww:
                 for pos in positions:
                     try:
+                        # A short is flattened by BUYING it back. The hardcoded
+                        # SELL here would have doubled a short instead of
+                        # closing it — harmless while nothing shorted, and an
+                        # adopted Groww position can be short.
                         await groww.place_order(
                             symbol           = pos["symbol"],
-                            quantity         = pos["quantity"],
-                            transaction_type = "SELL",
+                            quantity         = int(_num(pos.get("quantity"), 0)),
+                            transaction_type = "BUY" if pos.get("action") == "SHORT" else "SELL",
                             order_type       = "MARKET",
                             price            = 0.0,
-                            product          = "MIS",
+                            product          = pos.get("product", "MIS"),
                             exchange         = "NSE",
                         )
                         logger.info(
@@ -645,3 +830,143 @@ async def _auto_squareoff_loop() -> None:
             break
         except Exception as exc:
             logger.warning("Auto-squareoff loop error: %s", exc)
+
+
+# ── Auto management ────────────────────────────────────────────────────────────
+
+AUTO_MANAGE_SECS = 60      # one ensemble evaluation per position per minute
+
+
+async def _exit_position(pos: dict, price: float, reason: str) -> bool:
+    """Place the real MIS order that flattens `pos`, and record it. True if sent."""
+    groww = get_groww_client()
+    if not groww:
+        logger.error("Cannot exit %s — no Groww client", pos["symbol"])
+        return False
+
+    qty = int(_num(pos.get("quantity"), 0))
+    if qty <= 0:
+        # Not a safety rail, a physical one: there is no order to place without
+        # a quantity, and inventing one would sell something we may not hold.
+        logger.error(
+            "Cannot exit %s — quantity is %r",
+            pos["symbol"], pos.get("quantity"),
+            extra={"log_type": "live_trading_event", "event": "exit_no_qty",
+                   "symbol": pos["symbol"]},
+        )
+        return False
+
+    # A long is closed by selling; a short by buying back.
+    side = "BUY" if pos.get("action") == "SHORT" else "SELL"
+    try:
+        await groww.place_order(
+            symbol=pos["symbol"], quantity=qty, transaction_type=side,
+            order_type="MARKET", price=0.0, product=pos.get("product", "MIS"),
+            exchange="NSE",
+        )
+    except Exception as exc:
+        logger.error(
+            "Exit order FAILED for %s: %s", pos["symbol"], exc,
+            extra={"log_type": "live_trading_event", "event": "exit_failed",
+                   "symbol": pos["symbol"], "error": str(exc)},
+        )
+        return False
+
+    entry = _num(pos.get("entry_price"))
+    pnl = pnl_pct = None
+    if entry > 0 and price > 0:
+        per_share = (entry - price) if pos.get("action") == "SHORT" else (price - entry)
+        pnl = round(per_share * qty, 2)
+        pnl_pct = round(pnl / (entry * qty) * 100, 2)
+
+    await _append_history({
+        "symbol": pos["symbol"], "action": side, "quantity": qty,
+        "exit_price": price or None, "exit_time": _now_ist().strftime("%H:%M"),
+        "order_id": pos.get("order_id"), "pnl": pnl, "pnl_pct": pnl_pct,
+        "confidence": pos.get("confidence"), "reason": reason,
+        "source": pos.get("source"),
+    })
+    logger.info(
+        "Auto-exit placed for %s (%s) — %s",
+        pos["symbol"], pos.get("source") or "neuradex", reason,
+        extra={"log_type": "live_trading_event", "event": "auto_exit",
+               "symbol": pos["symbol"], "reason": reason, "pnl": pnl},
+    )
+    return True
+
+
+async def _decide_exit(pos: dict) -> tuple[bool, str, float]:
+    """Ask the same per-candle decision path the paper sessions use.
+
+    Returns (should_exit, reason, last_price). A position it cannot evaluate is
+    LEFT ALONE — an exit is a real order, and "no data" is not a sell signal.
+    """
+    from app.api.backtest import _intraday_indicators, _llm_decide, _tech_signal
+    from app.api.paper_trading import _fetch_candles_for_start
+
+    symbol = pos["symbol"]
+    now = _now_ist()
+    try:
+        candles, src = await _fetch_candles_for_start(symbol, now.strftime("%H:%M"))
+    except Exception as exc:
+        logger.warning("Auto-manage: candle fetch failed for %s: %s", symbol, exc)
+        return False, "", 0.0
+    if not candles:
+        logger.warning("Auto-manage: no candles for %s (%s) — holding", symbol, src)
+        return False, "", 0.0
+
+    idx = len(candles) - 1
+    candle = candles[idx]
+    price = _num(candle.get("close"))
+    ind = _intraday_indicators(candles, idx)
+    entry = _num(pos.get("entry_price"))
+    unreal = (price - entry) * _num(pos.get("quantity")) if entry > 0 else 0.0
+
+    dec = await _llm_decide(
+        symbol, now.strftime("%Y-%m-%d"), candle, ind,
+        "LONG", entry, unreal, 0.0,
+        _tech_signal(ind, "LONG", candle, entry),
+        candles[max(0, idx - 5):idx + 1],
+        getattr(settings, "OLLAMA_MODEL", "llama3.1:8b"),
+    )
+    action = str(dec.get("action", "HOLD")).upper()
+    if action == "SELL":
+        return True, f"AI exit — {dec.get('reason', 'signal')}", price
+    return False, "", price
+
+
+async def _auto_manage_loop() -> None:
+    """Every minute in market hours: reconcile, then let the AI manage what is open.
+
+    This is what puts a hand-placed Groww trade under auto control. It runs
+    whether or not the position originated here — an adopted trade is managed
+    exactly like one we placed, which is what was asked for.
+    """
+    while True:
+        try:
+            await asyncio.sleep(AUTO_MANAGE_SECS)
+            if _now_ist().weekday() >= 5 or not _is_market_open():
+                continue
+            if not await _is_enabled():
+                continue
+
+            await _reconcile_positions()
+
+            if not await _is_auto_execute():
+                continue                      # visible, but nothing acts on it
+
+            for pos in await _get_positions():
+                try:
+                    should_exit, reason, price = await _decide_exit(pos)
+                    if should_exit and await _exit_position(pos, price, reason):
+                        await _save_positions(
+                            [p for p in await _get_positions()
+                             if p["symbol"] != pos["symbol"]]
+                        )
+                except Exception:
+                    logger.exception("Auto-manage failed for %s", pos.get("symbol"))
+
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.warning("Auto-manage loop error: %s", exc)
