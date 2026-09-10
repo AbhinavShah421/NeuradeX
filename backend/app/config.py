@@ -115,9 +115,21 @@ class Settings(BaseSettings):
     TRAIN_FROM_STRATEGY_BACKTEST: bool = False
 
     # Intraday trade costs (basis points) so simulated P&L is net-of-cost.
-    TRADE_SLIPPAGE_BPS: float = 2.0   # per side — spread/slippage on the fill
-    TRADE_FEE_BPS: float = 3.0        # per side — brokerage + exchange + GST
-    TRADE_STT_BPS: float = 2.5        # sell side — Securities Transaction Tax
+    TRADE_SLIPPAGE_BPS: float = 2.0     # per side — spread/slippage on the fill
+    # Brokerage is the LOWER of a flat cap and a percentage (Groww: Rs20 / 0.05%),
+    # so it is not a basis-point constant — it depends on order value. The old
+    # flat TRADE_FEE_BPS=3.0 understated it by ~40% at the Rs5k positions this
+    # system trades, and omitted stamp duty entirely.
+    TRADE_BROKERAGE_PCT: float = 0.05   # per side, % of turnover
+    TRADE_BROKERAGE_CAP: float = 20.0   # per side, rupees — binds above ~Rs40,000
+    TRADE_EXCHANGE_BPS: float = 0.297   # per side — NSE transaction charge
+    TRADE_GST_PCT: float = 18.0         # on brokerage + exchange, not on taxes
+    TRADE_STT_BPS: float = 2.5          # sell side — Securities Transaction Tax
+    TRADE_STAMP_BPS: float = 0.3        # buy side — stamp duty (0.003%)
+    # Position size used when a caller asks for a cost rate without naming one.
+    # Median executed position is ~Rs5,003 — reporting against a larger, cheaper
+    # size is how a losing strategy looks viable on paper.
+    TRADE_TYPICAL_TURNOVER: float = 5000.0
 
     # Trade gate — how selective session entries are. Switchable at runtime from
     # the dashboard (stored in Redis); this is the default.
