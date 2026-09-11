@@ -247,7 +247,12 @@ async def get_sentiment(symbol: str):
 
 import json as _json
 import time as _time
+
 from datetime import timezone as _tz
+# A tick older than this is not a current price. Five minutes is generous for a
+# 1-second stream and still short enough that a dead feed reads as dead.
+_TICK_MAX_AGE_SEC = 300
+_IST = _tz(timedelta(hours=5, minutes=30))
 
 # The curated master (~300 names, with sector metadata) augmented with the FULL
 # NSE universe the scanner discovered (~2100), so "All Stocks" lists everything.
@@ -402,9 +407,39 @@ async def get_ltp_strict(req: PricesRequest):
     # 13:00 UTC, before any of this was deployed, so this path is unverified
     # against a live quote. Every branch below is written to return nothing rather
     # than something when that is the case.
-    source = "candle"
-    missing = list(symbols)
+    # ── Preferred source: the local 1-second tick store ──────────────────────
+    # The session runner writes it live from the Groww stream, so it is both
+    # fresher than any REST call and available when the REST API is not. That
+    # distinction stopped being theoretical on 2026-09-11: Groww had been 403ing
+    # for two days, this endpoint returned nothing, and the trade-executor's
+    # position monitor sat blind while MRPL and TNPETRO traded through their
+    # stops. The prices were on disk the whole time, six seconds old.
+    source = "ticks"
+    try:
+        from app.data.candle_store import read_ticks
+        today_ist = datetime.now(_IST).strftime("%Y-%m-%d")
+        cutoff = _time.time() - _TICK_MAX_AGE_SEC
+        for sym in symbols:
+            try:
+                df = read_ticks(sym, today_ist)
+            except Exception:
+                continue
+            if df is None or df.empty:
+                continue
+            last = df.iloc[-1]
+            # A stale tick is not a price. If the stream stopped an hour ago,
+            # saying so lets the caller fall through rather than act on it.
+            if float(last["ts"]) < cutoff:
+                continue
+            price = float(last["price"])
+            if price > 0 and price == price:
+                out[sym] = price
+    except Exception as exc:
+        logger.warning("tick-store LTP lookup failed: %s", exc)
+
+    missing = [s for s in symbols if s not in out]
     if missing:
+        source = "candle" if not out else "ticks+candle"
         now = datetime.now()
         start = now - timedelta(minutes=30)
 
