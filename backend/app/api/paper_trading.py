@@ -120,17 +120,23 @@ def _seconds_until_next_candle(current_candle_hhmm: str) -> int:
 
 
 def _is_market_open() -> bool:
+    from app.utils.market_calendar import is_trading_day
     n = _now_ist()
-    if n.weekday() >= 5:
+    if not is_trading_day(n):          # weekend or NSE holiday
         return False
     m = n.hour * 60 + n.minute
     return _MARKET_OPEN_MINUTES <= m <= _MARKET_CLOSE_MINUTES
 
 
 def _market_status_label() -> str:
+    from app.utils.market_calendar import is_trading_day
     n = _now_ist()
     if n.weekday() >= 5:
         return "weekend"
+    # Checked before the clock. A holiday used to read "open" all day, so session
+    # starts ran into empty data and reported the holiday as a data outage.
+    if not is_trading_day(n):
+        return "holiday"
     m = n.hour * 60 + n.minute
     if m < _MARKET_OPEN_MINUTES:
         return "pre_market"

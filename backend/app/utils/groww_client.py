@@ -789,7 +789,8 @@ _REFRESH_MARGIN = timedelta(minutes=20)
 
 
 def _in_keep_window(now: datetime) -> bool:
-    if now.weekday() >= 5:
+    from app.utils.market_calendar import is_trading_day
+    if not is_trading_day(now):          # weekend or NSE holiday
         return False
     start = now.replace(hour=_KEEP_FROM_IST[0], minute=_KEEP_FROM_IST[1], second=0, microsecond=0)
     end = now.replace(hour=_KEEP_UNTIL_IST[0], minute=_KEEP_UNTIL_IST[1], second=0, microsecond=0)

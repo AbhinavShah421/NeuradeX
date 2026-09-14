@@ -23,12 +23,29 @@ import os
 import random
 import time
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 
 import httpx
 import redis.asyncio as redis
 
 logger = logging.getLogger("autopilot")
 IST = timezone(timedelta(hours=5, minutes=30))
+
+# NSE trading holidays. Same data as backend/app/utils/nse_holidays.json — the
+# services share no code, so each carries a copy and the backend test suite fails
+# if they differ. Every market check here used to test only the weekday: on
+# 2026-09-14 (Ganesh Chaturthi) the paper tick retried a session start every minute
+# all day, and the backtest walk sat idle 09:00-15:40 for sessions that could
+# never start.
+_NSE_HOLIDAYS: dict[str, str] = json.loads(
+    Path(__file__).with_name("nse_holidays.json").read_text(encoding="utf-8")
+)["holidays"]
+
+
+def _is_trading_day(d) -> bool:
+    """A weekday that is not an NSE trading holiday."""
+    day = d.date() if isinstance(d, datetime) else d
+    return day.weekday() < 5 and day.isoformat() not in _NSE_HOLIDAYS
 
 BACKEND_URL   = os.getenv("BACKEND_URL", "http://backend:8000")
 WATCHLIST_KEY = "ai_engine:watchlist"
@@ -173,7 +190,7 @@ def _today() -> str:
 
 def _market_open() -> bool:
     n = _now_ist()
-    if n.weekday() >= 5:
+    if not _is_trading_day(n):          # weekend or NSE holiday
         return False
     m = n.hour * 60 + n.minute
     return MARKET_OPEN_MIN <= m <= MARKET_CLOSE_MIN
@@ -181,10 +198,11 @@ def _market_open() -> bool:
 
 def _backtest_allowed() -> bool:
     """Backtest may run only when paper trading isn't (and won't shortly be)
-    active: before the morning cutoff or after the evening resume on weekdays,
-    and freely on weekends."""
+    active: before the morning cutoff or after the evening resume on trading
+    days, and freely on weekends and NSE holidays — no paper session can start on
+    a holiday, so pausing the walk for one only throws a research day away."""
     n = _now_ist()
-    if n.weekday() >= 5:
+    if not _is_trading_day(n):
         return True
     m = n.hour * 60 + n.minute
     return (m < BT_MORNING_CUTOFF) or (m >= BT_EVENING_RESUME)
@@ -200,7 +218,7 @@ def _prev_trading_day(date_str: str | None) -> str:
         logger.warning("_prev_trading_day called with %r — falling back to today", date_str)
         date_str = _today()
     d = datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=1)
-    while d.weekday() >= 5:
+    while not _is_trading_day(d):       # skip weekends AND exchange holidays
         d -= timedelta(days=1)
     return d.strftime("%Y-%m-%d")
 

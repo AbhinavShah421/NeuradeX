@@ -1461,11 +1461,11 @@ async def _fetch_candles_up_to(symbol: str, date_str: str, up_to_time: str) -> t
 
 
 def _prev_trading_day(d: datetime) -> datetime:
-    """Return the most recent weekday (Mon–Fri) strictly before d."""
-    prev = d - timedelta(days=1)
-    while prev.weekday() >= 5:   # Saturday=5, Sunday=6
-        prev -= timedelta(days=1)
-    return prev
+    """Return the most recent NSE trading day strictly before d — weekends and
+    exchange holidays skipped — keeping d's time-of-day."""
+    from app.utils.market_calendar import prev_trading_day
+    p = prev_trading_day(d)
+    return d.replace(year=p.year, month=p.month, day=p.day)
 
 
 async def _fetch_full_day_candles(symbol: str, date_str: str, bar_seconds: int = 60) -> tuple[list[dict], str]:

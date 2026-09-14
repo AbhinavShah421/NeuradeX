@@ -767,8 +767,9 @@ async def _auto_squareoff_loop() -> None:
             now  = _now_ist()
             date = now.strftime("%Y-%m-%d")
 
-            if now.weekday() >= 5:
-                continue  # weekend
+            from app.utils.market_calendar import is_trading_day
+            if not is_trading_day(now):
+                continue  # weekend or NSE holiday
 
             cur_mins = now.hour * 60 + now.minute
             sqoff_mins = AUTO_SQUAREOFF_H * 60 + AUTO_SQUAREOFF_M

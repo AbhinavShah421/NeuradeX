@@ -66,8 +66,9 @@ def _decode_set(raw) -> set[str]:
 
 
 def _market_hours() -> bool:
+    from app.utils.market_calendar import is_trading_day
     now = datetime.now(IST)
-    if now.weekday() >= 5:                       # Sat / Sun
+    if not is_trading_day(now):                  # weekend or NSE holiday
         return False
     mins = now.hour * 60 + now.minute
     return (9 * 60 + 14) <= mins <= (15 * 60 + 31)   # ~09:14–15:31 IST (small margin)
@@ -403,15 +404,13 @@ async def backfill_symbols(symbols: list[str], date_str: str, concurrency: int =
 
 
 def _last_completed_trading_day(now: datetime) -> str:
-    """Most recent weekday whose session has already closed (post ~15:35 IST)."""
+    """Most recent NSE trading day whose session has already closed (post ~15:35 IST)."""
+    from app.utils.market_calendar import is_trading_day, prev_trading_day
     d = now.date()
     mins = now.hour * 60 + now.minute
-    if d.weekday() < 5 and mins >= (15 * 60 + 35):
+    if is_trading_day(d) and mins >= (15 * 60 + 35):
         return d.isoformat()
-    d -= timedelta(days=1)
-    while d.weekday() >= 5:
-        d -= timedelta(days=1)
-    return d.isoformat()
+    return prev_trading_day(d).isoformat()
 
 
 async def _auto_enrich_volume() -> None:

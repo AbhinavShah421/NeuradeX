@@ -1927,6 +1927,10 @@ async def start_session(req: StartSessionRequest):
                                      "available after the 15:30 IST close).")
         if req_date.weekday() >= 5:
             raise HTTPException(400, "Selected date is a weekend. Pick a weekday.")
+        from app.utils.market_calendar import holiday_name
+        if holiday_name(req_date):
+            raise HTTPException(400, f"NSE was closed on {req_date:%d %b %Y} "
+                                     f"({holiday_name(req_date)}). Pick a trading day.")
 
         all_candles, candle_src = await _fetch_full_day_candles(symbol, req.date)
         if not all_candles:
@@ -1962,6 +1966,14 @@ async def start_session(req: StartSessionRequest):
         mstatus = _market_status_label()
         if mstatus == "weekend":
             raise HTTPException(400, "Market is closed on weekends.")
+        if mstatus == "holiday":
+            # A definitive refusal. Before the calendar existed this fell through to
+            # the candle fetch and came back as a 503 "Retry shortly", which the
+            # autopilot retried every minute for the whole holiday.
+            from app.utils.market_calendar import holiday_name, next_trading_day
+            _d = _today_str()
+            raise HTTPException(400, f"NSE is closed today for {holiday_name(_d)}. "
+                                     f"Trading resumes {next_trading_day(_d):%a %d %b}.")
         if mstatus == "pre_market":
             raise HTTPException(400, "Market hasn't opened yet (NSE opens 09:15 IST).")
         cur = _current_candle_time()

@@ -1060,22 +1060,23 @@ async def exit_ab_report(days: int = 14) -> dict:
 # ── Background loop (runner/full role) ────────────────────────────────────────
 
 def _market_hours() -> bool:
+    from app.utils.market_calendar import is_trading_day
     now = datetime.now(IST)
-    if now.weekday() >= 5:
+    if not is_trading_day(now):
         return False
     mins = now.hour * 60 + now.minute
     return (9 * 60 + 14) <= mins <= (15 * 60 + 31)
 
 
 def _last_completed_trading_day(now: datetime) -> str:
+    # Holidays skipped too: the morning after one, a weekday-only walk picks the
+    # closed day, finds no ticks, and the nightly slot is spent on nothing.
+    from app.utils.market_calendar import is_trading_day, prev_trading_day
     d = now.date()
     mins = now.hour * 60 + now.minute
-    if d.weekday() < 5 and mins >= (15 * 60 + 35):
+    if is_trading_day(d) and mins >= (15 * 60 + 35):
         return d.isoformat()
-    d -= timedelta(days=1)
-    while d.weekday() >= 5:
-        d -= timedelta(days=1)
-    return d.isoformat()
+    return prev_trading_day(d).isoformat()
 
 
 async def _sync_learning_rates(trigger: str) -> None:

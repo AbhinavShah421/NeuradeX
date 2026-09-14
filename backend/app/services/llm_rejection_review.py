@@ -230,12 +230,11 @@ async def review_rejections(day: str | None = None, limit: int = _DAILY_CAP) -> 
     from app.database.postgres import engine
 
     if day is None:
+        from app.utils.market_calendar import is_trading_day, prev_trading_day
         now = datetime.now(IST)
         d = now.date()
-        if not (d.weekday() < 5 and (now.hour * 60 + now.minute) >= (15 * 60 + 35)):
-            d -= timedelta(days=1)
-        while d.weekday() >= 5:
-            d -= timedelta(days=1)
+        if not (is_trading_day(d) and (now.hour * 60 + now.minute) >= (15 * 60 + 35)):
+            d = prev_trading_day(d)     # skips weekends and NSE holidays
         day = d.isoformat()
 
     await _ensure_table()

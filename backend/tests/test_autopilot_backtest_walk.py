@@ -76,3 +76,28 @@ def test_stop_queue_leaves_the_day_resumable(autopilot):
     assert "symbols_remaining" not in src, (
         "stopping the queue must leave the day's remaining symbols pending"
     )
+
+
+# ── NSE holidays (added 2026-09-14) ──────────────────────────────────────────
+# On Ganesh Chaturthi the autopilot treated a closed Monday as a trading day:
+# the paper tick retried a session start every minute all day, and the backtest
+# walk sat idle 09:00-15:40 making room for sessions that could never start.
+
+def test_prev_trading_day_skips_nse_holidays(autopilot):
+    # Tue 2026-09-15 steps back past Ganesh Chaturthi (Mon 14) and the weekend to
+    # Fri 11, instead of replaying a day the exchange was closed.
+    assert autopilot._prev_trading_day("2026-09-15") == "2026-09-11"
+
+
+def test_a_holiday_is_not_a_market_day_and_frees_the_walk(autopilot, monkeypatch):
+    holiday_morning = autopilot.datetime(2026, 9, 14, 10, 50, tzinfo=autopilot.IST)
+    monkeypatch.setattr(autopilot, "_now_ist", lambda: holiday_morning)
+    assert autopilot._market_open() is False, "no paper-session retries on a holiday"
+    assert autopilot._backtest_allowed() is True, "the walk runs all day, as at a weekend"
+
+
+def test_an_ordinary_trading_morning_is_unchanged(autopilot, monkeypatch):
+    trading_morning = autopilot.datetime(2026, 9, 15, 10, 50, tzinfo=autopilot.IST)
+    monkeypatch.setattr(autopilot, "_now_ist", lambda: trading_morning)
+    assert autopilot._market_open() is True
+    assert autopilot._backtest_allowed() is False

@@ -1,0 +1,39 @@
+{
+  "_about": "NSE equity-segment TRADING holidays that fall on a weekday. Weekends are closed anyway and are not listed. Weekend special sessions (Budget Sunday, Diwali Muhurat) are deliberately not trading days: they are short or symbolic and automation must not run a full intraday day on them. autopilot-service/app/nse_holidays.json must stay identical to this file; backend/tests/test_market_calendar.py fails if they differ.",
+  "sources": {
+    "2025": "calendarlabs.com NSE market holidays 2025; weekday count 14 matches the independently reported total. Aug 27 (Ganesh Chaturthi) and the Oct 2 / Oct 21 / Oct 22 / Dec 25 closures corroborated separately. Not used by the backtest walk (it reaches back 90 trading days).",
+    "2026": "NSE-synced calendar (niftyscanner.in) cross-checked against groww.in and upstox.com. 15 Jan (Maharashtra municipal elections) was added by a later NSE circular and is confirmed by Business Standard, Upstox news and newsonair.gov.in; the retail lists written before it omit it."
+  },
+  "holidays": {
+    "2025-02-26": "Mahashivratri",
+    "2025-03-14": "Holi",
+    "2025-03-31": "Id-Ul-Fitr (Ramzan Id)",
+    "2025-04-10": "Shri Mahavir Jayanti",
+    "2025-04-14": "Dr. Baba Saheb Ambedkar Jayanti",
+    "2025-04-18": "Good Friday",
+    "2025-05-01": "Maharashtra Day",
+    "2025-08-15": "Independence Day",
+    "2025-08-27": "Ganesh Chaturthi",
+    "2025-10-02": "Mahatma Gandhi Jayanti / Dussehra",
+    "2025-10-21": "Diwali Laxmi Pujan",
+    "2025-10-22": "Diwali Balipratipada",
+    "2025-11-05": "Prakash Gurpurb Sri Guru Nanak Dev",
+    "2025-12-25": "Christmas",
+    "2026-01-15": "Municipal Corporation General Elections (Maharashtra)",
+    "2026-01-26": "Republic Day",
+    "2026-03-03": "Holi",
+    "2026-03-26": "Shri Ram Navami",
+    "2026-03-31": "Shri Mahavir Jayanti",
+    "2026-04-03": "Good Friday",
+    "2026-04-14": "Dr. Baba Saheb Ambedkar Jayanti",
+    "2026-05-01": "Maharashtra Day",
+    "2026-05-28": "Bakri Id",
+    "2026-06-26": "Muharram",
+    "2026-09-14": "Ganesh Chaturthi",
+    "2026-10-02": "Mahatma Gandhi Jayanti",
+    "2026-10-20": "Dussehra",
+    "2026-11-10": "Diwali Balipratipada",
+    "2026-11-24": "Prakash Gurpurb Sri Guru Nanak Dev",
+    "2026-12-25": "Christmas"
+  }
+}
