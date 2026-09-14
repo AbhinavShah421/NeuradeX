@@ -244,6 +244,37 @@ def day_coverage(symbol: str, date_str: str) -> dict:
     return out
 
 
+# Per-file row counts keyed on (mtime_ns, size).
+#
+# coverage() used to load every tick file with read_parquet just to take len() of
+# it, and coverage_summary() called coverage() again, so one request read all
+# ~9,700 files twice: 43.9 s measured on 2026-09-14. The route is async on a single
+# uvicorn worker, so that froze the whole backend API for every caller, and the only
+# UI caller (the Pattern Memory dataset panel) gives up after 15 s, so the panel
+# never loaded at all.
+#
+# A parquet footer already records its row count, so reading it touches a few KB
+# rather than the column: 0.75 s for all 9,722 files. A finished day's file never
+# changes, so its count is reused until its mtime or size does; only today's
+# growing files are re-read.
+_row_count_cache: dict[str, tuple[int, int, int]] = {}
+_row_count_guard = threading.Lock()
+
+
+def _row_count(fpath: str) -> tuple[int, int]:
+    """(rows, bytes) for one parquet file, from its footer, cached by mtime+size."""
+    st = os.stat(fpath)
+    with _row_count_guard:
+        hit = _row_count_cache.get(fpath)
+    if hit is not None and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
+        return hit[2], st.st_size
+    import pyarrow.parquet as pq
+    n = int(pq.ParquetFile(fpath).metadata.num_rows)
+    with _row_count_guard:
+        _row_count_cache[fpath] = (st.st_mtime_ns, st.st_size, n)
+    return n, st.st_size
+
+
 def coverage() -> list[dict]:
     """What the dataset holds: one row per symbol/day with tick count + size."""
     out: list[dict] = []
@@ -254,26 +285,27 @@ def coverage() -> list[dict]:
         if not os.path.isdir(sdir):
             continue
         for fname in sorted(os.listdir(sdir)):
+            # The writer's in-flight "<day>.parquet.tmp.<pid>" files fail this test,
+            # so a half-written day is never counted.
             if not fname.endswith(".parquet"):
                 continue
             fpath = os.path.join(sdir, fname)
             try:
-                n = len(pd.read_parquet(fpath, columns=["ts"]))
-                out.append({
-                    "symbol": symbol,
-                    "date":   fname[:-8],
-                    "ticks":  int(n),
-                    "bytes":  os.path.getsize(fpath),
-                })
+                n, size = _row_count(fpath)
             except Exception:
+                # Truncated or corrupt: skipped, not reported as a zero-tick day.
                 continue
+            out.append({"symbol": symbol, "date": fname[:-8], "ticks": n, "bytes": size})
     return out
 
 
-def coverage_summary() -> dict:
-    cov = coverage()
+def coverage_summary(cov: list[dict] | None = None) -> dict:
+    """Aggregate of coverage(). Pass the rows you already have — computing them
+    twice per request is half of what made the dataset endpoint take 44 s."""
+    if cov is None:
+        cov = coverage()
     return {
-        "symbols":     len(sorted({c["symbol"] for c in cov})),
+        "symbols":     len({c["symbol"] for c in cov}),
         "days":        len(cov),
         "total_ticks": sum(c["ticks"] for c in cov),
         "total_bytes": sum(c["bytes"] for c in cov),

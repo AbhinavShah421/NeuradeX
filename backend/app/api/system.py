@@ -335,7 +335,17 @@ async def candles_coverage():
     """What our own 1-second tick dataset holds — per symbol/day tick counts +
     size, plus an aggregate summary. Powers the dataset panel."""
     from app.data.candle_store import coverage, coverage_summary
-    return {"status": "success", "data": coverage(), "summary": coverage_summary()}
+
+    # Off the event loop. This is file I/O across ~10k parquet files and the
+    # backend runs a single uvicorn worker, so doing it inline froze every other
+    # request for as long as it took (44 s on 2026-09-14). The rows are computed
+    # once and the summary is built from them, not from a second walk of the store.
+    def _build():
+        rows = coverage()
+        return rows, coverage_summary(rows)
+
+    rows, summary = await asyncio.to_thread(_build)
+    return {"status": "success", "data": rows, "summary": summary}
 
 
 @router.post("/candles/enrich-volume")
