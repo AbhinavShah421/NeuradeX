@@ -939,22 +939,54 @@ _universe_cache: dict = {"date": None, "universe": None, "expires": 0.0}
 DEGRADED_UNIVERSE_TTL = int(os.getenv("SCAN_DEGRADED_UNIVERSE_TTL", "600"))
 
 
+# The boot-time DNS race. On a cold start the scanner can ask for the equity list
+# before the container's resolver is ready: both hosts fail with "Name or service
+# not known" in the same second, the directory fallback (~304 names) is used, and
+# DEGRADED_UNIVERSE_TTL only retries it ~10 minutes later. Measured in the logs:
+# degraded resolutions on 2026-09-03, 2026-09-08 (three in a row, ~30 minutes
+# narrow) and 2026-09-14 — roughly one boot in three, each costing the first
+# sweeps of the session a sixth of the market. Waiting a few seconds for DNS turns
+# that into a short delay; the degraded fallback stays as the backstop.
+#
+# Only TRANSPORT failures are retried — DNS, connect, timeout, i.e. nothing ever
+# reached a server. If any host answered at all (an HTTP error, or even an empty
+# 200), the network is up and waiting changes nothing, so that path behaves
+# exactly as before and falls through immediately.
+UNIVERSE_NET_RETRIES = int(os.getenv("SCAN_UNIVERSE_NET_RETRIES", "3"))
+UNIVERSE_NET_BACKOFF = float(os.getenv("SCAN_UNIVERSE_NET_BACKOFF", "5"))   # 5s, 10s, 20s
+_universe_sleep = asyncio.sleep          # indirection so tests don't actually wait
+
+
 async def _fetch_nse_equity_universe() -> dict[str, str]:
     """Every NSE-listed equity (EQ series) from the official equity master CSV."""
     import csv, io
     headers = {"User-Agent": _UA["User-Agent"], "Accept": "text/csv,application/csv,*/*"}
     rows: list[list[str]] = []
     last_exc: Exception | None = None
-    async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
-        for url in NSE_EQUITY_LIST_URLS:
-            try:
-                r = await client.get(url, headers=headers)
-                r.raise_for_status()
-                rows = list(csv.reader(io.StringIO(r.text)))
-                break
-            except Exception as exc:
-                last_exc = exc
-                logger.warning("NSE equity list fetch failed from %s (%s)", url, exc)
+
+    for attempt in range(UNIVERSE_NET_RETRIES + 1):
+        reached_a_server = False
+        async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
+            for url in NSE_EQUITY_LIST_URLS:
+                try:
+                    r = await client.get(url, headers=headers)
+                    reached_a_server = True
+                    r.raise_for_status()
+                    rows = list(csv.reader(io.StringIO(r.text)))
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    logger.warning("NSE equity list fetch failed from %s (%s)", url, exc)
+        if rows or reached_a_server or attempt == UNIVERSE_NET_RETRIES:
+            break
+        delay = UNIVERSE_NET_BACKOFF * (2 ** attempt)
+        logger.warning(
+            "NSE equity list unreachable on every host (network, attempt %d/%d) — "
+            "retrying in %.0fs before falling back to the directory",
+            attempt + 1, UNIVERSE_NET_RETRIES + 1, delay,
+        )
+        await _universe_sleep(delay)
+
     if not rows and last_exc is not None:
         raise last_exc
     if not rows:
