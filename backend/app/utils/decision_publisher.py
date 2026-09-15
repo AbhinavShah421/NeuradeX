@@ -1,4 +1,4 @@
-"""Publish the backend ensemble's decision to `ensemble.decision`.
+"""Publish a paper session's gated entry to the executor chain (`ensemble.raw`).
 
 This is the bridge that makes the intended chain real:
 
@@ -16,12 +16,20 @@ Re-implementing aggregation in ensemble-engine is what produced two divergent
 ensembles in the first place — one of which emitted 100% HOLD for its entire
 life because its confidence ceiling (0.560) sat below its own trade gate (0.60).
 
-DEFAULT OFF. `ENSEMBLE_PUBLISH_ENABLED=1` arms it. It is off because
-risk-engine gates on `weightedConfidence >= 0.60`, while this ensemble's
-confidence saturates at 0.95 whenever no agent votes the opposing direction —
-measured as the WORST-performing bucket (29.5% hit rate vs a 34.6% base). Until
-that is fixed, enabling this would feed the risk gate its least reliable signals
-marked maximally confident.
+Armed by default: env_default() treats a missing ENSEMBLE_PUBLISH_ENABLED as ON,
+and the Redis key ensemble:publish_enabled overrides it at runtime. (This
+docstring said "DEFAULT OFF" for weeks while the code defaulted on.)
+
+Since 2026-09-15 the ONLY producer is sessions_service._publish_entry_to_executor,
+which publishes an entry a paper session has actually opened — after its gate,
+validator, late-entry cutoff, daily loss breaker and cash check. Before that the
+producer was EnsembleEngine.decide(), which runs before any gate and published
+every call, so the executor bought exactly the entries the session gate refused.
+
+Still true: risk-engine gates on weightedConfidence >= 0.60, and this ensemble's
+confidence saturates at 0.95 whenever no agent votes against — measured as the
+WORST-performing bucket (29.5% hit rate vs a 34.6% base). The session gate now
+screens entries first, but that scale is not one to tune the risk threshold on.
 """
 from __future__ import annotations
 

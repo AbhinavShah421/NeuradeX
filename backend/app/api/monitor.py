@@ -173,12 +173,12 @@ _EDGES: list[dict] = [
     # `ensemble.decision`: decision_publisher deliberately avoids the latter
     # because risk-engine already consumes it, so publishing there would bypass
     # ensemble-engine's MLflow gate AND round-robin against risk-engine for the
-    # same messages. And the producer is `EnsembleEngine.decide()`, which during
-    # trading runs in the SESSION RUNNER, not the API container — so the map
-    # drew no link at all from the process that actually publishes. Verified
-    # live: 8,142 messages published and delivered on ensemble.raw.
+    # same messages. The producer is sessions_service._publish_entry_to_executor,
+    # which runs in the SESSION RUNNER and fires only when a paper session actually
+    # opens a position. Until 2026-09-15 it was EnsembleEngine.decide(), which
+    # published every call from any container; the old backend->ensemble edge is
+    # removed because the API container no longer produces to ensemble.raw.
     {"from": "runner",    "to": "ensemble",  "kind": "amqp", "queue": "ensemble.raw"},
-    {"from": "backend",   "to": "ensemble",  "kind": "amqp", "queue": "ensemble.raw"},
     {"from": "ensemble",  "to": "risk",      "kind": "amqp", "queue": "ensemble.decision"},
     {"from": "risk",      "to": "executor",  "kind": "amqp", "queue": "risk.validated"},
     {"from": "executor",  "to": "feedback",  "kind": "amqp", "queue": "trade.outcomes.feedback"},

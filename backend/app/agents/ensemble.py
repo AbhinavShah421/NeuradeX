@@ -446,24 +446,12 @@ class EnsembleEngine:
             veto            = veto,
         )
 
-        # Bridge to the execution chain (ensemble.raw -> ensemble-engine ->
-        # risk-engine -> trade-executor). Hooked HERE, at decide(), because this
-        # is the one point every caller passes through. It was originally placed
-        # in sessions_service._ensemble_decision, but the live paper-trading path
-        # is paper_trading.py -> _llm_decide -> engine.decide() and never touches
-        # that helper — so with publishing armed, 60 live decisions produced 0
-        # messages and the chain sat silent.
-        #
-        # Replay/backtest are excluded: feeding simulated bars to a live risk
-        # engine would place orders off history.
-        if mode not in ("replay", "backtest"):
-            try:
-                from app.utils.decision_publisher import publish_decision
-                await publish_decision(decision, symbol, {
-                    "price": candles[-1].get("close") if candles else 0.0,
-                    "atr": (context.get("indicators") or {}).get("atr", 0.0),
-                })
-            except Exception:
-                logger.debug("decision publish skipped", exc_info=True)
-
+        # No publishing here. decide() runs BEFORE any session gate, and until
+        # 2026-09-15 it fed every call straight to the executor chain: 537 raw
+        # decisions in one session day, approved by risk-engine on confidence
+        # alone, which bought exactly the entries the gate refused as falling
+        # knives. It also fired for any caller without an explicit mode — the
+        # market scanner, the AI Engine analyze API, strategy-backtest training.
+        # The chain is now fed only by an entry a paper session actually opens:
+        # see sessions_service._publish_entry_to_executor.
         return decision

@@ -679,6 +679,60 @@ def _timing_block_reason(ind: dict, candle: dict) -> str:
             f"price {'above' if price >= vwap else 'below'} VWAP")
 
 
+async def _publish_entry_to_executor(s: dict, symbol: str, decision, candle: dict,
+                                     ind: dict) -> bool:
+    """Send a paper session's ACTUAL entry to the executor chain.
+
+    Before 2026-09-15 the chain was fed from EnsembleEngine.decide(), which runs
+    BEFORE the session gate. Every per-minute ensemble call reached risk-engine —
+    537 raw decisions from 6 symbols that day — and risk-engine approves on
+    confidence alone. The executor bought 8 times, and at each of those exact
+    minutes the session gate had refused the same symbol as a counter-trend
+    falling knife; 6 of 7 closed trades hit their stop (Rs -587). Over its first
+    12 closed trades that route won 25% and lost Rs 746.
+
+    Now the executor receives only what a session really entered: after the
+    co-signer check, trend filter, validator, late-entry cutoff, daily loss
+    breaker and cash check. Both routes trade the same decisions.
+
+    The call sits inside _step's entry block, not in a helper the live path could
+    bypass: an earlier post-gate hook in _ensemble_decision published nothing
+    because the paper path of the time never called it.
+
+    Best-effort: a broker problem must never break the session that produced it.
+    """
+    if (s.get("mode") or "").lower() != "paper" or decision is None:
+        return False
+    try:
+        from types import SimpleNamespace
+        from app.utils.decision_publisher import publish_decision
+        # The gate can enter on score while the ensemble's own action was HOLD,
+        # and risk-engine skips anything that is not BUY — so the message says
+        # BUY. Confidence, agreement and votes stay the ensemble's real numbers.
+        entry = SimpleNamespace(
+            action="BUY",
+            confidence=float(getattr(decision, "confidence", 0.0) or 0.0),
+            agent_agreement=float(getattr(decision, "agent_agreement", 0.0) or 0.0),
+            agents=list(getattr(decision, "agents", []) or []),
+        )
+        sent = await publish_decision(entry, symbol, {
+            "price": candle.get("close", 0.0),
+            "atr": (ind or {}).get("atr", 0.0),
+        })
+        if sent:
+            logger.info(
+                "Published gated paper entry to the executor chain: %s @ %s",
+                symbol, candle.get("close"),
+                extra={"log_type": "ai_engine", "event": "gated_entry_published",
+                       "symbol": symbol, "price": candle.get("close"),
+                       "confidence": entry.confidence},
+            )
+        return sent
+    except Exception:
+        logger.warning("gated entry publish failed for %s", symbol, exc_info=True)
+        return False
+
+
 async def _step(s: dict, window: list[dict], force_close: bool) -> None:
     """Run one candle: decide, execute against the session's position, update state."""
     if not window:
@@ -718,6 +772,7 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
     agents = s.get("agents", [])
     conf   = 0.6
     reason = ""
+    decision = None     # the ensemble's verdict this bar; None on a forced exit
     if not (force_close and pos_status == "LONG"):
         decision, agents = await _ensemble_decision(symbol, window, s["capital"], pos_status,
                                                       s.get("mode", "paper"), date=s.get("date"))
@@ -1380,6 +1435,11 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
                 "entry_conf": conf,
             }
             trade_executed = {"action": "BUY", "price": fill, "quantity": qty, "pnl": None, "time": candle["time"]}
+            # Mirror THIS entry to the executor chain: the position the session just
+            # opened, after every gate, the late-entry cutoff, the daily loss breaker
+            # and the cash check. Paper only — see _publish_entry_to_executor.
+            if s.get("mode") == "paper":
+                await _publish_entry_to_executor(s, symbol, decision, candle, ind)
             # LLM shadow review of this entry's dossier — logged + persisted,
             # never acted on (paper/live only: replay must stay deterministic,
             # and back-filling verdicts on historical bars would be meaningless).
