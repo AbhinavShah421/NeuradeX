@@ -98,6 +98,34 @@ BEHAVIOURS: tuple[Behaviour, ...] = (
         ),
     ),
     Behaviour(
+        env="AUTOPILOT_TRADE_PROMOTIONS",
+        read_in="autopilot-service/app/autopilot.py:515",
+        default="0 (off) as of 2026-08-31 — paper trading ignores A-grade promotions",
+        affects_trades=True,
+        status="INCONCLUSIVE",
+        measured_on=date(2026, 8, 31),
+        evidence=(
+            "The scanner's own nightly evaluator scored its promoted picks at "
+            "26.1% realized accuracy and -0.39% average realized return over 153 "
+            "picks (ai_engine:agrade_eval:latest, 2026-08-25) while the same "
+            "picks carried win_probability labels of 0.82-0.95 — realized is "
+            "about a third of advertised, so the label is not a calibrated "
+            "probability. Individual examples are severe: KRONOX promoted at "
+            "win_probability 0.95 closed -9.36%. This is consistent with the "
+            "positional-setups study, which placed the promotion rule (buying "
+            "intraday strength) in the worst measured cell of 40 setups. "
+            "August paper trading overall: 79 trades, 34% win rate, -0.24%/trade "
+            "net. Disarming affects only whether the autopilot OPENS sessions on "
+            "promoted names — the scanner still writes live_promotions:{date}, so "
+            "the watch UI and the evaluator keep working and the series stays "
+            "continuous for future measurement. "
+            "Caveat: the evaluator's picks are scanner-level, a superset of what "
+            "the autopilot actually traded, so this is an indictment of the "
+            "promotion SIGNAL rather than a clean A/B of the trading path. "
+            "Rollback: AUTOPILOT_TRADE_PROMOTIONS=1."
+        ),
+    ),
+    Behaviour(
         env="NEURADEX_GRACE_UPSIDE",
         read_in="backend/app/services/backtest_service.py:863",
         default="off — the 10-minute entry grace also suspends target and trail",

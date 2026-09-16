@@ -68,6 +68,15 @@ PAPER_TICK  = int(os.getenv("AUTOPILOT_TICK_SECS", "60"))
 # sessions hold longer than this. 0 = disabled (positions exit on the normal
 # intraday/ensemble rules + end-of-day square-off).
 MAX_HOLD_MIN = int(os.getenv("AUTOPILOT_MAX_HOLD_MINUTES", "0"))
+# Whether paper trading also acts on the scanner's intraday A-grade promotions.
+# OFF by default since 2026-08-31: the scanner's own evaluator measured the
+# promoted picks at 26.1% realized accuracy / -0.39% avg return per pick while
+# their win_probability labels claimed 0.82-0.95, and the promotion rule sits
+# in the worst cell of the positional-setups study (buying strength). The
+# scanner keeps writing live_promotions:{date} so the watch UI and the nightly
+# evaluator still work - only trading on them is disarmed. Rollback:
+# AUTOPILOT_TRADE_PROMOTIONS=1. See backend/app/research/registry.py.
+TRADE_PROMOTIONS = os.getenv("AUTOPILOT_TRADE_PROMOTIONS", "0") == "1"
 BT_SPEED      = int(os.getenv("AUTOPILOT_BACKTEST_SPEED", "1"))        # 1x — dense, real-like
 BT_BATCH_SIZE = int(os.getenv("AUTOPILOT_BACKTEST_BATCH_SIZE", "7"))    # concurrent sessions per batch
 BT_POLL       = int(os.getenv("AUTOPILOT_BACKTEST_POLL", "15"))         # seconds between queue checks
@@ -523,12 +532,13 @@ async def _do_paper_tick() -> None:
         return
 
     # Paper trading acts on committed high-conviction picks (precision tier),
-    # most-convicted first, plus any A-grade names the scanner's live watcher
-    # promoted intraday. If neither tier has anything, never sit the day out:
-    # fall back to the single most-convicted watchlist stock so every trading
-    # day starts with at least one live session for the agents.
+    # most-convicted first, plus - only when AUTOPILOT_TRADE_PROMOTIONS=1 -
+    # any A-grade names the scanner's live watcher promoted intraday. If
+    # neither tier has anything, never sit the day out: fall back to the single
+    # most-convicted watchlist stock so every trading day starts with at least
+    # one live session for the agents.
     committed = await _committed_symbols()
-    promoted = await _live_promoted_symbols()
+    promoted = (await _live_promoted_symbols()) if TRADE_PROMOTIONS else []
     syms = committed + [s for s in promoted if s not in committed]
     if not syms:
         syms = await _top_conviction_symbols(1)
@@ -870,6 +880,7 @@ async def status() -> dict:
             "watchlist_size": len(syms),
             "committed_size": len(committed),
             "source": "committed",
+            "trade_promotions": TRADE_PROMOTIONS,
             "sessions": [{"id": s["id"], "symbol": s["symbol"],
                           "pnl": s.get("pnl", 0.0)} for s in paper_running],
         },
