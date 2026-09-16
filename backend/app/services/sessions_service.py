@@ -679,6 +679,32 @@ def _timing_block_reason(ind: dict, candle: dict) -> str:
             f"price {'above' if price >= vwap else 'below'} VWAP")
 
 
+_ENTRY_HOOK_KEY = "ai_engine:gated_entry_hook"
+
+
+async def _record_entry_hook(symbol: str, mode: str, published: bool, why: str,
+                             candle: dict) -> None:
+    """Leave proof that the entry hook ran, whatever it decided.
+
+    Without this, the only evidence is a log line that a PAPER entry produces —
+    and paper entries are rare enough that the hook sat unverified for days. A
+    replay or backtest entry now writes `published: false, why: not paper`, which
+    still proves the call site inside _step's entry block executes.
+    """
+    try:
+        import json as _json
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+        from app.utils.redis_client import cache_set
+        await cache_set(_ENTRY_HOOK_KEY, _json.dumps({
+            "at": _dt.now(_tz(_td(hours=5, minutes=30))).isoformat(timespec="seconds"),
+            "symbol": symbol, "mode": mode, "published": bool(published),
+            "why": why, "candle_time": candle.get("time"),
+            "price": candle.get("close"),
+        }), expire=7 * 24 * 3600)
+    except Exception:
+        logger.debug("entry-hook heartbeat write failed", exc_info=True)
+
+
 async def _publish_entry_to_executor(s: dict, symbol: str, decision, candle: dict,
                                      ind: dict) -> bool:
     """Send a paper session's ACTUAL entry to the executor chain.
@@ -699,9 +725,18 @@ async def _publish_entry_to_executor(s: dict, symbol: str, decision, candle: dic
     bypass: an earlier post-gate hook in _ensemble_decision published nothing
     because the paper path of the time never called it.
 
+    Every call records a heartbeat (see _record_entry_hook) so that "the hook ran"
+    is answerable from Redis rather than by grepping for a log line that only a
+    paper entry can produce.
+
     Best-effort: a broker problem must never break the session that produced it.
     """
-    if (s.get("mode") or "").lower() != "paper" or decision is None:
+    mode = (s.get("mode") or "").lower()
+    if mode != "paper":
+        await _record_entry_hook(symbol, mode, False, f"not paper ({mode or 'unset'})", candle)
+        return False
+    if decision is None:
+        await _record_entry_hook(symbol, mode, False, "no ensemble decision this bar", candle)
         return False
     try:
         from types import SimpleNamespace
@@ -727,9 +762,12 @@ async def _publish_entry_to_executor(s: dict, symbol: str, decision, candle: dic
                        "symbol": symbol, "price": candle.get("close"),
                        "confidence": entry.confidence},
             )
-        return sent
+        await _record_entry_hook(symbol, mode, bool(sent), "" if sent else
+                                 "publisher disabled or broker unreachable", candle)
+        return bool(sent)
     except Exception:
         logger.warning("gated entry publish failed for %s", symbol, exc_info=True)
+        await _record_entry_hook(symbol, mode, False, "publish raised", candle)
         return False
 
 
@@ -1437,9 +1475,11 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
             trade_executed = {"action": "BUY", "price": fill, "quantity": qty, "pnl": None, "time": candle["time"]}
             # Mirror THIS entry to the executor chain: the position the session just
             # opened, after every gate, the late-entry cutoff, the daily loss breaker
-            # and the cash check. Paper only — see _publish_entry_to_executor.
-            if s.get("mode") == "paper":
-                await _publish_entry_to_executor(s, symbol, decision, candle, ind)
+            # and the cash check. Called for EVERY mode on purpose — the helper's own
+            # guard is what stops replay/backtest publishing, and routing them through
+            # it means their entries also prove this call site runs. A paper-only `if`
+            # here left the hook unobservable until a rare gated paper BUY happened.
+            await _publish_entry_to_executor(s, symbol, decision, candle, ind)
             # LLM shadow review of this entry's dossier — logged + persisted,
             # never acted on (paper/live only: replay must stay deterministic,
             # and back-filling verdicts on historical bars would be meaningless).
