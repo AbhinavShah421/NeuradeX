@@ -989,7 +989,10 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         if has_reliable_buy:
             score += 10
         else:
-            blocked.append("no proven BUY voter (gbm/meanrev/memory/day_structure) "
+            # day_structure is deliberately NOT in this list: it is excluded from
+            # buy_voters above, so it can never co-sign. Naming it here described a
+            # path the code does not have.
+            blocked.append("no proven BUY voter (gbm/meanrev/memory) "
                            "co-signed (-10)")
         rel_dissent = max((float(a.get("confidence") or 0) for a in agents
                            if a.get("action") == "SELL"

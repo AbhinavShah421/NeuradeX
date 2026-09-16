@@ -309,6 +309,16 @@ def recompute_score(ctx: dict) -> Optional[dict]:
 
     buy_voters = {a.get("agent_name") for a in agents if a.get("action") == "BUY"}
     buy_voters.discard(None)
+    # day_structure is never a BUY voter here — mirror _step exactly. Its vote is
+    # a position-in-range statement, not directional conviction: its SELLs were
+    # excluded from panel dissent on 2026-07-14, and 2026-07-16 BANKINDIA lost on
+    # a sentiment + day_structure "consensus". Omitting this carve-out made the
+    # rebuild credit a 10-point reliable co-sign that the gate had refused, so the
+    # two scores differed by exactly 10 and this validator blocked entries the
+    # gate legitimately wanted — 76 of them in 30 days, every one already above
+    # the gate floor. Pinned by test_scored_gate.py::
+    # test_day_structure_buy_not_counted_as_consensus.
+    buy_voters.discard("day_structure")
     # `_step` may drop a cold-start memory vote from the count; honour the count
     # it derived rather than recomputing that carve-out, since it depends on the
     # memory agent's own case count.

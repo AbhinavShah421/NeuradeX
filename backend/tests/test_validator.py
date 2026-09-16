@@ -327,3 +327,50 @@ def test_recomputation_abstains_when_raw_inputs_are_absent():
     but this one has nothing to verify against."""
     assert recompute_score(ctx()) is None
     assert validate_entry(ctx(score=86.0)).ok
+
+
+# ── The day_structure carve-out (added 2026-09-16) ──────────────────────────
+# recompute_score credited a reliable co-sign for a day_structure BUY that _step
+# never counts, so the two scores differed by exactly 10 and this validator
+# blocked entries the gate legitimately wanted: 76 in 30 days, every one delta 10
+# and already above the gate floor. The gate is right — day_structure reports
+# position in the day's range, not direction (2026-07-16 BANKINDIA lost on a
+# sentiment + day_structure "consensus").
+
+
+def test_a_day_structure_buy_is_not_a_reliable_cosign(inverted):
+    agents = [{"agent_name": "technical", "action": "BUY"},
+              {"agent_name": "momentum", "action": "BUY"},
+              {"agent_name": "day_structure", "action": "BUY"}]
+    got = recompute_score(rctx(agents=agents, buy_votes=2))
+    assert got["components"]["reliable_cosign"] == 0.0, (
+        "day_structure is excluded from buy_voters in _step; crediting it here is "
+        "exactly what produced the 10-point disagreement"
+    )
+
+
+def test_day_structure_does_not_rescue_a_thin_consensus(inverted):
+    # _step counts one BUY voter here, day_structure being dropped, so the
+    # rebuild must not quietly score it as two.
+    agents = [{"agent_name": "technical", "action": "BUY"},
+              {"agent_name": "day_structure", "action": "BUY"}]
+    got = recompute_score(rctx(agents=agents, buy_votes=1))
+    assert got["components"]["reliable_cosign"] == 0.0
+    assert got["components"]["consensus"] == 8.0
+
+
+def test_a_gate_score_without_the_cosign_is_not_a_disagreement(inverted):
+    """The regression: the gate scores these WITHOUT a co-sign, and the rebuild
+    must reach the same number instead of vetoing a legitimate entry."""
+    only_ds = [{"agent_name": "technical", "action": "BUY"},
+               {"agent_name": "momentum", "action": "BUY"},
+               {"agent_name": "day_structure", "action": "BUY"}]
+    rebuilt = recompute_score(rctx(agents=only_ds, buy_votes=2))
+    assert validate_entry(rctx(agents=only_ds, buy_votes=2,
+                               score=rebuilt["score"])).ok
+
+
+def test_real_cosigners_still_earn_the_ten(inverted):
+    agents = AGENTS_3BUY + [{"agent_name": "day_structure", "action": "BUY"}]
+    got = recompute_score(rctx(agents=agents))
+    assert got["components"]["reliable_cosign"] == 10.0
