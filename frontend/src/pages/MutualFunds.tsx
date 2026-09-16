@@ -87,6 +87,40 @@ const MutualFunds: React.FC = () => {
   };
   const removeFund = async (code: number) => { try { await apiService.mfRemoveHolding(code); setScan(null); loadHoldings(); } catch {} };
 
+  // CAS import
+  const [casOpen, setCasOpen] = useState(false);
+  const [casFile, setCasFile] = useState<File | null>(null);
+  const [casPassword, setCasPassword] = useState('');
+  const [casParsing, setCasParsing] = useState(false);
+  const [casError, setCasError] = useState('');
+  const [casResult, setCasResult] = useState<any>(null);
+  const [casRows, setCasRows] = useState<any[]>([]);
+  const [casImporting, setCasImporting] = useState(false);
+
+  const parseCas = async () => {
+    if (!casFile) return;
+    setCasParsing(true); setCasError(''); setCasResult(null);
+    try {
+      const res = await apiService.mfParseCas(casFile, casPassword) as any;
+      setCasResult(res.data);
+      setCasRows((res.data.proposed ?? []).map((r: any) => ({ ...r, include: true })));
+    } catch (e: any) {
+      setCasError(e?.response?.data?.detail || 'Could not parse this PDF.');
+    } finally { setCasParsing(false); }
+  };
+  const importCas = async () => {
+    const rows = casRows.filter(r => r.include && r.schemeCode);
+    if (!rows.length) return;
+    setCasImporting(true);
+    try {
+      await apiService.mfImportCas(rows.map(r => ({ schemeCode: r.schemeCode, units: r.units, invested: r.invested })));
+      setCasOpen(false); setCasFile(null); setCasPassword(''); setCasResult(null); setCasRows([]); setScan(null);
+      loadHoldings();
+    } catch (e: any) {
+      setCasError(e?.response?.data?.detail || 'Import failed.');
+    } finally { setCasImporting(false); }
+  };
+
   const runScan = async () => {
     setLoadingScan(true);
     try { setScan((await apiService.mfScan() as any).data); } catch {} finally { setLoadingScan(false); }
@@ -113,18 +147,13 @@ const MutualFunds: React.FC = () => {
       <div className="nd-card" style={{ padding: 0 }}>
         {/* Scrolls horizontally instead of overflowing the whole page — 4 tabs
             don't fit a 390px screen at this padding/font-size. */}
-        <div style={{
-          display: 'flex', borderBottom: '1px solid var(--nd-border)', padding: '0 16px',
-          overflowX: 'auto', scrollbarWidth: 'none', WebkitOverflowScrolling: 'touch',
-        }}>
-          {([['holdings', 'My Funds'], ['optimize', 'Optimize'], ['screener', 'Screener'], ['all', 'All Funds']] as [Tab, string][]).map(([id, label]) => (
-            <button key={id} onClick={() => setTab(id)} style={{
-              padding: '12px 16px', border: 'none', background: 'none', cursor: 'pointer', fontSize: 13,
-              fontWeight: tab === id ? 700 : 500, color: tab === id ? 'var(--nd-green)' : 'var(--nd-text-2)',
-              borderBottom: tab === id ? '2px solid var(--nd-green)' : '2px solid transparent', marginBottom: -1,
-              whiteSpace: 'nowrap', flexShrink: 0,
-            }}>{label}</button>
-          ))}
+        <div style={{ padding: '12px 16px 16px' }}>
+          <div className="nd-tabs" role="tablist" aria-label="Mutual funds section">
+            {([['holdings', 'My Funds'], ['optimize', 'Optimize'], ['screener', 'Screener'], ['all', 'All Funds']] as [Tab, string][]).map(([id, label]) => (
+              <button key={id} role="tab" aria-selected={tab === id}
+                onClick={() => setTab(id)}>{label}</button>
+            ))}
+          </div>
         </div>
 
         {tab === 'holdings' && (
@@ -156,10 +185,84 @@ const MutualFunds: React.FC = () => {
                   {holdings.totalGain != null && <div className="nd-card" style={{ padding: '10px 14px' }}><div style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>Total gain</div><div style={{ fontSize: 15, fontWeight: 700, color: pctColor(holdings.totalGain) }}>₹{inr(holdings.totalGain)}</div></div>}
                 </>
               )}
-              <button onClick={runScan} disabled={loadingScan || !funds.length} style={{ marginLeft: 'auto', padding: '9px 16px', borderRadius: 8, border: '1px solid var(--nd-purple)', background: loadingScan ? 'transparent' : 'var(--nd-purple)', color: loadingScan ? 'var(--nd-purple)' : '#fff', fontWeight: 700, fontSize: 12.5, cursor: funds.length ? 'pointer' : 'default' }}>
+              <button onClick={() => setCasOpen(o => !o)} style={{ marginLeft: 'auto', padding: '9px 16px', borderRadius: 8, border: '1px solid var(--nd-border)', background: 'transparent', color: 'var(--nd-text-2)', fontWeight: 700, fontSize: 12.5, cursor: 'pointer' }}>
+                ⬆ Import from CAS
+              </button>
+              <button onClick={runScan} disabled={loadingScan || !funds.length} style={{ padding: '9px 16px', borderRadius: 8, border: '1px solid var(--nd-purple)', background: loadingScan ? 'transparent' : 'var(--nd-purple)', color: loadingScan ? 'var(--nd-purple)' : '#fff', fontWeight: 700, fontSize: 12.5, cursor: funds.length ? 'pointer' : 'default' }}>
                 {loadingScan ? 'Scanning…' : '✨ AI scan & replace'}
               </button>
             </div>
+
+            {casOpen && (
+              <div className="nd-card" style={{ padding: '14px 16px', marginBottom: 16 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 4 }}>Import from CAS statement</div>
+                <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginBottom: 10 }}>
+                  Upload the CAMS/KFinTech Consolidated Account Statement PDF (emailed to you, or from Groww's app under
+                  Reports → CAS). It covers every AMC you hold, not just Groww. The PDF is usually password-protected
+                  with your PAN, or PAN+date of birth.
+                </div>
+                {!casResult ? (
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                    <input type="file" accept="application/pdf" onChange={e => setCasFile(e.target.files?.[0] ?? null)}
+                      style={{ fontSize: 12, color: 'var(--nd-text-2)', flex: '1 1 220px' }} />
+                    <input className="nd-input" type="password" style={{ width: 160 }} placeholder="PDF password"
+                      value={casPassword} onChange={e => setCasPassword(e.target.value)} />
+                    <button onClick={parseCas} disabled={!casFile || casParsing}
+                      style={{ padding: '9px 16px', borderRadius: 8, border: 'none', background: casFile ? 'var(--nd-green)' : 'var(--nd-border)', color: '#fff', fontWeight: 700, fontSize: 12.5, cursor: casFile ? 'pointer' : 'default' }}>
+                      {casParsing ? 'Parsing…' : 'Parse statement'}
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginBottom: 8 }}>{casResult.note}</div>
+                    {casRows.length > 0 && (
+                      <div style={{ overflowX: 'auto', marginBottom: 10 }}>
+                        <table style={{ minWidth: 560, width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                          <thead><tr style={{ color: 'var(--nd-text-3)', fontSize: 10.5 }}>
+                            {['', 'Matched fund', 'Units', 'Invested ₹'].map((h, i) => (
+                              <th key={i} style={{ textAlign: i === 0 ? 'center' : i === 1 ? 'left' : 'right', padding: '4px 8px' }}>{h}</th>
+                            ))}
+                          </tr></thead>
+                          <tbody>
+                            {casRows.map((r, i) => (
+                              <tr key={i} style={{ borderTop: '1px solid var(--nd-border)' }}>
+                                <td style={{ textAlign: 'center', padding: '4px 8px' }}>
+                                  <input type="checkbox" checked={r.include} onChange={e => setCasRows(rs => rs.map((x, j) => j === i ? { ...x, include: e.target.checked } : x))} />
+                                </td>
+                                <td style={{ padding: '4px 8px', maxWidth: 240 }}>
+                                  <div style={{ fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={r.matchedName}>{r.matchedName}</div>
+                                  <div style={{ fontSize: 10, color: 'var(--nd-text-3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={r.casName}>from: {r.casName}</div>
+                                </td>
+                                <td style={{ padding: '4px 8px', textAlign: 'right' }}>{r.units ?? '—'}</td>
+                                <td style={{ padding: '4px 8px', textAlign: 'right' }}>
+                                  <input className="nd-input" style={{ width: 100, textAlign: 'right' }} value={r.invested ?? ''}
+                                    placeholder="optional"
+                                    onChange={e => { const v = e.target.value.replace(/[^0-9.]/g, ''); setCasRows(rs => rs.map((x, j) => j === i ? { ...x, invested: v ? +v : null } : x)); }} />
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                    {casResult.unmatchedCount > 0 && (
+                      <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginBottom: 10 }}>
+                        {casResult.unmatchedCount} fund(s) in the statement couldn't be confidently matched and were left out —
+                        add those manually with the search box above if needed.
+                      </div>
+                    )}
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <button onClick={importCas} disabled={casImporting || !casRows.some(r => r.include)}
+                        style={{ padding: '9px 16px', borderRadius: 8, border: 'none', background: 'var(--nd-green)', color: '#fff', fontWeight: 700, fontSize: 12.5, cursor: 'pointer' }}>
+                        {casImporting ? 'Importing…' : `Import ${casRows.filter(r => r.include).length} fund(s)`}
+                      </button>
+                      <button onClick={() => { setCasResult(null); setCasRows([]); }} style={{ padding: '9px 16px', borderRadius: 8, border: '1px solid var(--nd-border)', background: 'transparent', color: 'var(--nd-text-2)', fontWeight: 600, fontSize: 12.5, cursor: 'pointer' }}>Start over</button>
+                    </div>
+                  </>
+                )}
+                {casError && <div style={{ fontSize: 11.5, color: 'var(--nd-red)', marginTop: 8 }}>{casError}</div>}
+              </div>
+            )}
 
             {!funds.length ? (
               <div style={{ textAlign: 'center', padding: 40, color: 'var(--nd-text-3)', fontSize: 13 }}>No funds yet — search above and add the funds you hold.</div>

@@ -473,6 +473,26 @@ class ApiService {
     const response = await this.api.get('/api/mutual-funds/all', { params: { q, page, limit }, timeout: 60000 });
     return response.data;
   }
+  async mfParseCas(file: File, password: string): Promise<ApiResponse<any>> {
+    const form = new FormData();
+    form.append('file', file);
+    form.append('password', password);
+    // This instance defaults every request to Content-Type: application/json,
+    // which for a FormData body makes axios JSON-encode it instead of sending
+    // multipart (see transformRequest's hasJSONContentType branch). Overriding
+    // it here to multipart/form-data avoids that; axios still lets the
+    // browser fill in the real boundary since it detects the FormData body.
+    const response = await this.api.post('/api/mutual-funds/cas/parse', form, {
+      headers: { 'Content-Type': 'multipart/form-data' }, timeout: 60000,
+    });
+    return response.data;
+  }
+  async mfImportCas(rows: { schemeCode: number; units?: number | null; invested?: number | null }[]): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/mutual-funds/cas/import',
+      rows.map(r => ({ scheme_code: r.schemeCode, units: r.units, invested: r.invested })),
+      { timeout: 40000 });
+    return response.data;
+  }
 
   async getAlerts(): Promise<ApiResponse<any>> {
     try {
@@ -1474,13 +1494,21 @@ class ApiService {
     return response.data;
   }
 
+  async liveReconcile(): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/live-trading/reconcile', {}, { timeout: 20000 });
+    return response.data;
+  }
+
   async liveSquareoff(payload: { symbol?: string } = {}): Promise<ApiResponse<any>> {
     const response = await this.api.post('/api/live-trading/squareoff', payload);
     return response.data;
   }
 
+  /** Open live positions. The endpoint reconciles against Groww first, so a
+   *  trade placed by hand in the Groww app appears here tagged
+   *  source="groww_manual". Timeout is generous because it makes a broker call. */
   async livePositions(): Promise<ApiResponse<any>> {
-    const response = await this.api.get('/api/live-trading/positions');
+    const response = await this.api.get('/api/live-trading/positions', { timeout: 20000 });
     return response.data;
   }
 

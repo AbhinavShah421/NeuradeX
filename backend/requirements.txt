@@ -45,6 +45,9 @@ requests==2.32.3
 aiohttp==3.9.1
 websockets==12.0
 pyotp==2.9.0          # TOTP codes for headless Groww token refresh
+casparser==0.7.2      # Parses CAMS/KFinTech Consolidated Account Statement PDFs
+                       # for mutual-fund holdings import (Groww's API doesn't expose MF)
+python-multipart==0.0.9   # Required by FastAPI's File()/Form() (CAS PDF upload)
 
 # Logging
 python-json-logger==2.0.7
