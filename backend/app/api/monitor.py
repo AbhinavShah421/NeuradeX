@@ -109,6 +109,19 @@ _VOTE_AGENTS: list[tuple[str, str, str]] = [
     ("day_structure", "Day Structure", "backend/app/agents/day_structure.py"),
 ]
 
+# Shadow research roles are visible separately from vote agents: they produce
+# review context, never weighted BUY/SELL/HOLD votes or learned vote statistics.
+_RESEARCH_AGENTS: list[dict] = [
+    {"id": "research_fundamentals", "label": "Fundamentals", "doc": "research_fundamentals",
+     "source": "backend/app/agents/fundamentals_analyst.py", "needs_fundamentals_key": True},
+    {"id": "research_bull", "label": "Bull Researcher", "doc": "research_bull",
+     "source": "backend/app/agents/research_debate.py"},
+    {"id": "research_bear", "label": "Bear Researcher", "doc": "research_bear",
+     "source": "backend/app/agents/research_debate.py"},
+    {"id": "research_manager", "label": "Research Manager", "doc": "research_manager",
+     "source": "backend/app/agents/research_debate.py"},
+]
+
 _NODES: list[dict] = [
     {"id": "ngrok",      "label": "ngrok",           "layer": "edge",      "container": "stock-prediction-ngrok"},
     {"id": "nginx",      "label": "Nginx",           "layer": "edge",      "container": "stock-prediction-nginx",      "probe": "http", "url": "http://nginx:80/"},
@@ -144,6 +157,10 @@ _NODES: list[dict] = [
     {"id": f"vote_{aid}", "label": label, "layer": "vote",
      "kind": "inprocess", "agent": aid, "source": src}
     for aid, label, src in _VOTE_AGENTS
+] + [
+    {"id": agent["id"], "label": agent["label"], "layer": "agents",
+     "kind": "research", **agent}
+    for agent in _RESEARCH_AGENTS
 ] + [
     {**c, "kind": "component"} for c in _COMPONENTS
 ]
@@ -224,6 +241,17 @@ _EDGES: list[dict] = [
     # return edge per agent would double the line count for no new information.
     {"from": "runner", "to": f"vote_{aid}", "kind": "call"}
     for aid, _, _ in _VOTE_AGENTS
+] + [
+    {"from": "backend", "to": "research_fundamentals", "kind": "call"},
+    {"from": "backend", "to": "research_bull", "kind": "call"},
+    {"from": "backend", "to": "research_bear", "kind": "call"},
+    {"from": "runner", "to": "research_fundamentals", "kind": "call"},
+    {"from": "runner", "to": "research_bull", "kind": "call"},
+    {"from": "runner", "to": "research_bear", "kind": "call"},
+    {"from": "research_fundamentals", "to": "research_bull", "kind": "evidence"},
+    {"from": "research_fundamentals", "to": "research_bear", "kind": "evidence"},
+    {"from": "research_bull", "to": "research_manager", "kind": "review"},
+    {"from": "research_bear", "to": "research_manager", "kind": "review"},
 ]
 
 
@@ -946,6 +974,9 @@ async def snapshot(force: bool = False):
     # In-process agents have no container of their own; they live and die with
     # the session runner, so their health is its health.
     runner_up = containers.get("stock-prediction-session-runner", {}).get("running")
+    backend_up = containers.get("stock-prediction-backend", {}).get("running")
+    research_enabled = bool(settings.TRADINGAGENTS_SHADOW_REVIEW_ENABLED)
+    fundamentals_key_configured = bool(settings.ALPHA_VANTAGE_KEY)
 
     nodes = []
     for spec in _NODES:
@@ -980,6 +1011,34 @@ async def snapshot(force: bool = False):
                 "weight": st.get("weight"), "buyRate": st.get("buyRate"),
                 "baseRate": st.get("baseRate"), "lift": st.get("lift"),
                 "predictions": st.get("predictions"),
+                "github": f"{_GITHUB_BASE}/{spec['source']}",
+            })
+            continue
+        if spec.get("kind") == "research":
+            host_up = bool(runner_up or backend_up)
+            configured = research_enabled and (
+                not spec.get("needs_fundamentals_key") or fundamentals_key_configured
+            )
+            if not host_up:
+                role_status = "host down"
+            elif not research_enabled:
+                role_status = "shadow disabled"
+            elif spec.get("needs_fundamentals_key") and not fundamentals_key_configured:
+                role_status = "API key missing"
+            else:
+                role_status = "shadow enabled"
+            nodes.append({
+                "id": spec["id"], "label": spec["label"], "layer": spec["layer"],
+                "kind": "research", "agent": spec["id"], "doc": spec["doc"],
+                "source": spec["source"], "container": None,
+                "host": "stock-prediction-session-runner",
+                "execution_hosts": ["stock-prediction-backend", "stock-prediction-session-runner"],
+                "running": host_up, "state": "in-process" if host_up else "host down",
+                "research_enabled": research_enabled,
+                "provider_configured": fundamentals_key_configured if spec.get("needs_fundamentals_key") else None,
+                "configured": configured, "status_text": role_status,
+                "health": None, "log_severity": "ok", "probe_ok": None,
+                "probe_detail": role_status,
                 "github": f"{_GITHUB_BASE}/{spec['source']}",
             })
             continue
@@ -1204,6 +1263,23 @@ async def component_detail(node_id: str):
             "stats": stats,
             # Its log lines carry the runner's service name, filtered to the
             # ensemble logger so you see the votes rather than the whole runner.
+            "kibana": _kibana_links("session-runner", dv),
+            "kibanaReady": dv is not None,
+        }
+
+    if spec and spec.get("kind") == "research":
+        from app.api.component_docs import for_research_agent
+        return {
+            "id": node_id, "label": spec["label"], "container": None,
+            "kind": "research", "agent": spec["id"],
+            "docs": for_research_agent(spec["doc"]),
+            "runtime": {
+                "state": "in-process in backend API and session runner",
+                "enabled": bool(settings.TRADINGAGENTS_SHADOW_REVIEW_ENABLED),
+                "providerConfigured": bool(settings.ALPHA_VANTAGE_KEY)
+                if spec.get("needs_fundamentals_key") else None,
+                "voting": False,
+            },
             "kibana": _kibana_links("session-runner", dv),
             "kibanaReady": dv is not None,
         }

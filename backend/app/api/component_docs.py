@@ -237,6 +237,77 @@ _DOCS: dict[str, dict] = {
             "whichever is live and the tests pin both.",
         ],
     },
+    "research_fundamentals": {
+        "role": "Loads company overview metrics as optional, non-point-in-time research context. It is not an intraday voter.",
+        "language": "Python · cached async data fetch",
+        "entry": ("backend/app/agents/fundamentals_analyst.py", "get_fundamentals_report"),
+        "flow": [
+            ("Read the cached report", "backend/app/agents/fundamentals_analyst.py", "get_fundamentals_report",
+             "Returns only an available report inside its 24-hour cache window; no timestamp or expired data is not served."),
+            ("Refresh off the decision path", "backend/app/agents/fundamentals_analyst.py", "refresh_fundamentals",
+             "On a cache miss and configured key, schedules one background Alpha Vantage OVERVIEW fetch per symbol."),
+            ("Normalize and bound fields", "backend/app/agents/fundamentals_analyst.py", "normalize_overview",
+             "Keeps finite typed metrics and provider/as-of provenance; API errors and empty payloads abstain."),
+            ("Exclude historical replay", "backend/app/agents/research_debate.py", "review_signals",
+             "Alpha Vantage overview is not point-in-time data, so replay/backtest research does not consume it."),
+        ],
+        "gotchas": [
+            "Requires ALPHA_VANTAGE_KEY; the System Map reports whether a key is configured, never its value.",
+            "Alpha Vantage OVERVIEW has no reliable historical as-of date. It is shadow context only and must not train replay/backtest decisions.",
+            "No usable data is reported as unavailable; the analyst never fills missing company metrics from model memory.",
+        ],
+    },
+    "research_bull": {
+        "role": "Builds the strongest evidence-based positive case from existing NeuradeX signals and available fundamentals; shadow-only.",
+        "language": "Python · async LLM research role",
+        "entry": ("backend/app/agents/research_debate.py", "review_signals"),
+        "flow": [
+            ("Receive bounded evidence", "backend/app/agents/research_debate.py", "review_signals",
+             "Reads existing agent signals, indicators, position context, and available fundamentals; report text is treated as untrusted data."),
+            ("Make the bull case", "backend/app/agents/research_debate.py", "role_call",
+             "Runs alongside the bear researcher and returns an argument, evidence references, and key risks."),
+            ("Hand both cases to the manager", "backend/app/agents/research_debate.py", "review_signals",
+             "The research manager receives both independent cases; none of these roles casts a learned vote."),
+        ],
+        "gotchas": [
+            "Runs only when TRADINGAGENTS_SHADOW_REVIEW_ENABLED is true and is not an order instruction.",
+            "Malformed output or an LLM timeout drops the shadow review; the normal ensemble decision remains unchanged.",
+        ],
+    },
+    "research_bear": {
+        "role": "Challenges the positive thesis and identifies evidence-backed downside and omitted risks; shadow-only.",
+        "language": "Python · async LLM research role",
+        "entry": ("backend/app/agents/research_debate.py", "review_signals"),
+        "flow": [
+            ("Receive the same evidence packet", "backend/app/agents/research_debate.py", "review_signals",
+             "Uses the same bounded agent evidence, position context, and available fundamentals as the bull researcher."),
+            ("Challenge the positive thesis", "backend/app/agents/research_debate.py", "role_call",
+             "Runs independently in parallel with the bull researcher and returns counterarguments and key risks."),
+            ("Hand both cases to the manager", "backend/app/agents/research_debate.py", "review_signals",
+             "Its case is weighed with the bull case by the research manager, not counted as a SELL vote."),
+        ],
+        "gotchas": [
+            "Runs only when TRADINGAGENTS_SHADOW_REVIEW_ENABLED is true and is not an order instruction.",
+            "A bearish argument is research text, not a position exit; deterministic session and risk controls remain authoritative.",
+        ],
+    },
+    "research_manager": {
+        "role": "Synthesizes the separate bull/bear cases into a structured shadow recommendation and action notes.",
+        "language": "Python · async LLM synthesis role",
+        "entry": ("backend/app/agents/research_debate.py", "review_signals"),
+        "flow": [
+            ("Wait for both researchers", "backend/app/agents/research_debate.py", "review_signals",
+             "The two independent cases are required; an incomplete debate produces no manager result."),
+            ("Weigh evidence, not speaking order", "backend/app/agents/research_debate.py", "manager_prompt",
+             "The structured result includes action, confidence, rationale, strategic actions, and risk notes."),
+            ("Keep recommendation in shadow output", "backend/app/agents/ensemble.py", "decide",
+             "The review is attached to analysis metadata, not to the vote list, weights, or execution chain."),
+        ],
+        "gotchas": [
+            "The recommendation is not executable and is disabled by default.",
+            "The LLM review can be unavailable; failure never bypasses or weakens deterministic risk gates.",
+        ],
+    },
     "wk_sectors": {
         "role": "Ranks sectors by median move weighted by breadth, over the one universe sweep.",
         "language": "Python",
@@ -505,6 +576,16 @@ def for_vote_agent(agent: str, label: str, source: str) -> dict:
         "gotchas": _AGENT_NOTES.get(agent, []) + [
             "No container: if the session runner is down, this agent is not running either.",
         ],
+    }
+
+
+def for_research_agent(agent: str) -> dict:
+    """Full code/flow documentation for a non-voting shadow research role."""
+    return for_component(agent) or {
+        "role": "Shadow research role; not an ensemble voter.",
+        "language": "Python · in-process",
+        "flow": [], "endpoints": [], "consumes": [], "publishes": [],
+        "tables": [], "gotchas": [],
     }
 
 

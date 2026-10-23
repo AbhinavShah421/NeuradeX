@@ -9,6 +9,7 @@ import { inr } from '../../utils/format';
 // ── Live session detail modal (what's happening inside a running session) ──────
 
 const SESS_ACTION_COLOR: Record<string, string> = { BUY: '#34d399', SELL: '#fb5c7d', HOLD: '#fbbf24' };
+const REPLAY_SPEEDS = [1, 2, 5, 10, 30, 60] as const;
 const SESS_AGENT_COLOR: Record<string, string> = {
   technical: '#38bdf8', sentiment: '#06b6d4', macro: '#fbbf24', pattern: '#8b5cf6', rl: '#10b981',
   gbm: '#14b8a6', regime: '#a78bfa', anomaly: '#ec4899', momentum: '#eab308', memory: '#64748b',
@@ -441,6 +442,7 @@ const LiveSessionsPanel: React.FC = () => {
   const [savingBatch, setSavingBatch] = useState(false);
   const [speed, setSpeed] = useState<number | null>(null);
   const [savingSpeed, setSavingSpeed] = useState(false);
+  const [changingSessionSpeed, setChangingSessionSpeed] = useState<string | null>(null);
   // Real Groww MIS positions, including ones placed by hand in the Groww app.
   // Separate from `sessions`, which are paper/backtest runners.
   const [livePositions, setLivePositions] = useState<any[]>([]);
@@ -496,6 +498,17 @@ const LiveSessionsPanel: React.FC = () => {
     try { await apiService.sessionStop(id); await load(); } catch { /* ignore */ } finally { setBusy(null); }
   };
 
+  const changeSessionSpeed = async (id: string, nextSpeed: number) => {
+    setChangingSessionSpeed(id);
+    try {
+      await apiService.sessionSpeed(id, nextSpeed);
+      setSessions(current => current.map(session => session.id === id
+        ? { ...session, speed: nextSpeed }
+        : session));
+    } catch { /* keep the last reported speed */ }
+    finally { setChangingSessionSpeed(null); }
+  };
+
   if (!sessions.length && !livePositions.length) return null;
   const totalPnl = sessions.reduce((s, x) => s + (x.pnl ?? 0), 0);
 
@@ -507,7 +520,7 @@ const LiveSessionsPanel: React.FC = () => {
         <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>{sessions.length} running</span>
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
           {/* Replay speed — candles advanced per step in new backtest sessions */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }} title="Backtest replay speed — candles advanced per step (applies to newly started sessions).">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }} title="Playback rate for newly started backtest sessions. Running sessions have their own speed selector.">
             <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>Speed</span>
             <select
               value={speed ?? ''} disabled={savingSpeed || speed == null}
@@ -515,8 +528,8 @@ const LiveSessionsPanel: React.FC = () => {
               style={{ padding: '4px 6px', borderRadius: 6, border: '1px solid var(--nd-border)',
                 background: 'var(--nd-surface)', color: 'var(--nd-text-1)', fontSize: 12, fontWeight: 600,
                 cursor: 'pointer', outline: 'none', opacity: savingSpeed ? 0.6 : 1 }}>
-              {speed != null && ![1, 2, 5, 10, 30, 60].includes(speed) && <option value={speed}>{speed}×</option>}
-              {[1, 2, 5, 10, 30, 60].map(n => <option key={n} value={n}>{n}×</option>)}
+              {speed != null && !REPLAY_SPEEDS.includes(speed as typeof REPLAY_SPEEDS[number]) && <option value={speed}>{speed}×</option>}
+              {REPLAY_SPEEDS.map(n => <option key={n} value={n}>{n}×</option>)}
             </select>
             {savingSpeed && <span className="material-icons nd-spin" style={{ fontSize: 14, color: 'var(--nd-text-3)' }}>autorenew</span>}
           </div>
@@ -540,10 +553,10 @@ const LiveSessionsPanel: React.FC = () => {
         </div>
       </div>
       <div style={{ overflowX: 'auto' }}>
-        <table style={{ width: '100%', minWidth: 540, borderCollapse: 'collapse', fontSize: 12 }}>
+        <table style={{ width: '100%', minWidth: 600, borderCollapse: 'collapse', fontSize: 12 }}>
           <thead>
             <tr style={{ color: 'var(--nd-text-3)', textAlign: 'left' }}>
-              {['Symbol', 'Mode', 'Position', 'Hold cap', 'P&L', 'Trades', ''].map(h => (
+              {['Symbol', 'Mode', 'Position', 'Speed', 'Hold cap', 'P&L', 'Trades', ''].map(h => (
                 <th key={h} style={{ padding: '6px 10px', fontWeight: 500 }}>{h}</th>
               ))}
             </tr>
@@ -560,6 +573,21 @@ const LiveSessionsPanel: React.FC = () => {
                 </td>
                 <td style={{ padding: '7px 10px' }}>
                   <span style={{ fontWeight: 600, color: s.position === 'LONG' ? 'var(--nd-green)' : 'var(--nd-text-3)' }}>{s.position ?? 'NONE'}</span>
+                </td>
+                <td style={{ padding: '7px 10px' }}>
+                  {s.mode === 'paper' ? <span style={{ color: 'var(--nd-text-3)' }}>—</span> : (
+                    <select
+                      aria-label={`Replay speed for ${s.symbol}`}
+                      title="Change speed for this running session"
+                      value={s.speed ?? 1}
+                      disabled={changingSessionSpeed === s.id}
+                      onClick={e => e.stopPropagation()}
+                      onChange={e => changeSessionSpeed(s.id, Number(e.target.value))}
+                      style={{ padding: '3px 5px', borderRadius: 5, border: '1px solid var(--nd-border)',
+                        background: 'var(--nd-surface)', color: 'var(--nd-text-1)', fontSize: 11 }}>
+                      {REPLAY_SPEEDS.map(n => <option key={n} value={n}>{n}×</option>)}
+                    </select>
+                  )}
                 </td>
                 <td style={{ padding: '7px 10px', color: 'var(--nd-text-2)' }}>{s.maxHoldMinutes ? `${s.maxHoldMinutes}m` : '—'}</td>
                 <td style={{ padding: '7px 10px', fontWeight: 600, color: (s.pnl ?? 0) >= 0 ? 'var(--nd-green)' : 'var(--nd-red)' }}>

@@ -751,12 +751,12 @@ const SystemMap: React.FC = () => {
                        transform={`translate(${p.x},${p.y})`}>
                       {/* In-process agents get a dashed outline: they are code
                           inside the runner, not a container you can restart. */}
-                      <rect width={NODE_W} height={NODE_H} rx="9"
+                          <rect width={NODE_W} height={NODE_H} rx="9"
                             fill={isSel ? 'rgba(56,189,248,.16)'
                                   : isFocus ? 'rgba(56,189,248,.10)' : 'rgba(13,21,36,.92)'}
                             stroke={ring}
                             strokeWidth={isSel || isFocus ? 2.2 : (isUp || isDown_) ? 1.8 : 1.2}
-                            strokeDasharray={n.kind === 'inprocess' || n.kind === 'component' ? '5 3' : undefined} />
+                            strokeDasharray={n.kind === 'inprocess' || n.kind === 'component' || n.kind === 'research' ? '5 3' : undefined} />
                       <rect width="3.5" height={NODE_H} rx="2" fill={col} />
                       <text x="14" y="23" fill={C.text} style={{ fontSize: 12.5, fontWeight: 600 }}>
                         {n.label.length > 17 ? n.label.slice(0, 16) + '…' : n.label}
@@ -765,6 +765,8 @@ const SystemMap: React.FC = () => {
                             style={{ fontSize: 10, fontFamily: 'ui-monospace, monospace' }}>
                         {n.kind === 'component'
                           ? `in ${(n.host ?? '').replace('stock-prediction-', '') || 'process'}`
+                          : n.kind === 'research'
+                          ? n.statusText ?? 'shadow research'
                           : n.kind === 'inprocess'
                           ? `w ${n.weight ?? '—'}${n.lift != null
                               ? ` · ${n.lift >= 0 ? '+' : ''}${(n.lift * 100).toFixed(1)}pp` : ''}`
@@ -1005,7 +1007,20 @@ const SystemMap: React.FC = () => {
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(130px,1fr))', gap: 8, marginBottom: 16 }}>
-              {selected.kind === 'inprocess' ? (
+              {selected.kind === 'research' ? (
+                <>
+                  <KV k="Runs in" v="session-runner" />
+                  <KV k="State" v={selected.running ? 'in-process' : 'host down'}
+                      c={selected.running ? C.ok : C.down} />
+                  <KV k="Shadow review" v={selected.researchEnabled ? 'enabled' : 'disabled'}
+                      c={selected.researchEnabled ? C.ok : C.idle} />
+                  {selected.providerConfigured != null && (
+                    <KV k="Fundamentals provider" v={selected.providerConfigured ? 'configured' : 'not configured'}
+                        c={selected.providerConfigured ? C.ok : C.warn} />
+                  )}
+                  <KV k="Ensemble vote" v="no · research only" c={C.dim} />
+                </>
+              ) : selected.kind === 'inprocess' ? (
                 <>
                   <KV k="Runs in" v="session-runner" />
                   <KV k="State" v={selected.running ? 'in-process' : 'host down'}

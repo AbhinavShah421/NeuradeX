@@ -733,7 +733,7 @@ services:
       RABBITMQ_PORT: "5672"
       RABBITMQ_USER: guest
       RABBITMQ_PASSWORD: guest
-      MIN_CONFIDENCE: "0.60"
+      MIN_CONFIDENCE: "0.40"
       MAX_POSITION_PCT: "0.05"
       MAX_RISK_PCT: "0.02"
       ATR_STOP_MULT: "2.0"

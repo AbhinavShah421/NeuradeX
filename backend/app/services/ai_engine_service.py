@@ -105,6 +105,7 @@ async def analyze(req: AnalyzeRequest):
         "agent_agreement": decision.agent_agreement,
         "risk_score":      decision.risk_score,
         "reasoning":       decision.reasoning,
+        "research_review": decision.research_review,
         "timestamp":       decision.timestamp.isoformat() if decision.timestamp else None,
         "agents": [
             {

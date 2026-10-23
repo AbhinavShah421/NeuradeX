@@ -7,10 +7,12 @@ import SessionPostmortem from './SessionPostmortem';
 import { getErrorMessage } from '../utils/errors';
 
 // ── Session data shapes (server-side trading session state) ───────────────────
+const REPLAY_SPEEDS = [1, 2, 5, 10, 30, 60] as const;
+
 interface SessionSummary {
   id: string;
   status: string;
-  mode?: 'replay' | 'paper';
+  mode?: 'replay' | 'backtest' | 'paper';
   symbol: string;
   date?: string;
   currentTime?: string;
@@ -49,6 +51,7 @@ interface SessionTrade {
 interface SessionDetail {
   id: string;
   status: string;
+  mode?: 'replay' | 'backtest' | 'paper';
   symbol: string;
   date?: string;
   currentTime?: string;
@@ -186,9 +189,10 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
     const cached = detailCache.current.get(selectedId);
     if (cached) setDetail(cached);
     loadDetail(selectedId);
-    const t = setInterval(() => { if (selectedRef.current) loadDetail(selectedRef.current); }, 2500);
+    const t = setInterval(() => { if (selectedRef.current) loadDetail(selectedRef.current); },
+      detail?.mode === 'paper' ? 2500 : 1000);
     return () => clearInterval(t);
-  }, [selectedId, loadDetail]);
+  }, [selectedId, loadDetail, detail?.mode, detail?.speed]);
 
   const startSession = async () => {
     setStarting(true); setError(null);
@@ -265,7 +269,7 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
           <Field label="Capital (₹)"><input className="nd-input" type="number" inputMode="numeric" value={capital} onChange={e => setCapital(e.target.value)} style={fieldStyle} /></Field>
           <Field label="Speed">
             <select className="nd-select" value={speed} onChange={e => setSpeed(parseInt(e.target.value))} style={fieldStyle}>
-              {[1, 2, 5, 10].map(s => <option key={s} value={s}>{s}×</option>)}
+              {REPLAY_SPEEDS.map(s => <option key={s} value={s}>{s}×</option>)}
             </select>
           </Field>
           <Field label="Entry timing">
@@ -333,7 +337,7 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
               {detail.dataSource && <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 6, background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', color: 'var(--nd-text-3)' }}>{detail.dataSource}</span>}
             </div>
             <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-              {detail.status === 'running' && [1, 2, 5, 10].map(sp => (
+              {detail.status === 'running' && REPLAY_SPEEDS.map(sp => (
                 <button key={sp} onClick={() => changeSpeed(detail.id, sp)}
                   style={{ ...btnGhost, background: detail.speed === sp ? 'var(--nd-green)' : 'transparent', color: detail.speed === sp ? '#fff' : 'var(--nd-text-2)', borderColor: detail.speed === sp ? 'var(--nd-green)' : 'var(--nd-border)' }}>{sp}×</button>
               ))}

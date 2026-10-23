@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import httpx
 import os
+import time
 import uuid
 from datetime import datetime, timedelta
 
@@ -50,7 +51,10 @@ from app.api.backtest import (
 logger = get_logger(__name__)
 
 _TICK_SECONDS = 10         # background loop cadence (was 5 — doubled to halve runner CPU)
-SPEEDS        = (1, 2, 5, 10)
+_REPLAY_POLL_SECONDS = 1.0
+_SPEED_MIN    = 1
+_SPEED_MAX    = 120
+_next_paper_step_at: dict[str, float] = {}
 
 # ── Trade gate ────────────────────────────────────────────────────────────────
 # How selective session entries are; switchable at runtime from the dashboard.
@@ -161,7 +165,7 @@ TRADE_GATES = {
                "min_buy": 2, "need_reliable": True, "min_grade": "C", "score_min": 78,
                "desc": "Needs 2+ agents voting BUY including pattern or sentiment (the proven BUY voters), a non-bearish ensemble, and a C+ pattern. Balanced."},
     "loose":  {"label": "Loose",  "require_buy": False, "min_conf": 0.0,  "max_conf": 1.01, "override_ceiling": 1.01,
-               "min_buy": 2, "need_reliable": False, "min_grade": "D", "reliable_single": True, "score_min": 65,
+               "min_buy": 2, "need_reliable": False, "min_grade": "D", "reliable_single": True, "score_min": 30,
                "desc": "Needs 2 BUY votes OR one high-precision agent; pattern grade not enforced. Most trades — for training volume (lower win-rate)."},
 }
 _gate_cache = {"mode": "", "ts": 0.0}
@@ -340,6 +344,10 @@ class StartSessionRequest(BaseModel):
 
 class SpeedRequest(BaseModel):
     speed: int
+
+
+def _normalise_speed(speed: int) -> int:
+    return speed if _SPEED_MIN <= speed <= _SPEED_MAX else _SPEED_MIN
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1662,14 +1670,14 @@ async def _advance_replay(s: dict) -> None:
     if idx >= n - 1:
         s["status"] = "done"
         return
-    steps  = max(1, int(s.get("speed", 1)))
+    steps = max(_SPEED_MIN, min(_SPEED_MAX, int(s.get("speed", 1) or 1)))
     target = min(idx + steps, n - 1)
-    for j in range(idx + 1, target + 1):
-        window = allc[: j + 1]
-        await _step(s, window, force_close=(j == n - 1))
-        s["current_idx"] = j
-        await asyncio.sleep(0.05)  # 50ms yield between replay steps — lets HTTP requests through
-    if s["current_idx"] >= n - 1:
+    for candle_idx in range(idx + 1, target + 1):
+        window = allc[: candle_idx + 1]
+        await _step(s, window, force_close=(candle_idx == n - 1))
+        s["current_idx"] = candle_idx
+        await asyncio.sleep(0)  # let API requests run between candle decisions
+    if target >= n - 1:
         s["status"] = "done"
 
 
@@ -1949,33 +1957,53 @@ async def session_runner_loop() -> None:
                 logger.debug("risk guard evaluation skipped", exc_info=True)
 
             if not running:
+                _next_paper_step_at.clear()
                 _idle_ticks += 1
                 sleep_secs = min(30, _TICK_SECONDS * (1 + _idle_ticks // 3))
                 await asyncio.sleep(sleep_secs)
                 continue
 
             _idle_ticks = 0
+            replay_ids: set[str] = set()
+            active_ids = {item["id"] for item in running}
+            for session_id in _next_paper_step_at.keys() - active_ids:
+                _next_paper_step_at.pop(session_id, None)
+
             for s_slim in running:
                 # Stale-check only needs created_at — slim blob has it.
                 if await _auto_stop_stale(s_slim):
                     continue
+                session_id = s_slim["id"]
+                is_replay = s_slim.get("mode") in ("replay", "backtest")
+                if is_replay:
+                    replay_ids.add(session_id)
+                elif time.monotonic() < _next_paper_step_at.get(session_id, 0.0):
+                    continue
                 # Replay/backtest sessions need all_candles to advance; load the
                 # full blob (slim + candles) only for the session being processed.
                 # Paper sessions don't use all_candles so the slim blob suffices.
-                if s_slim.get("mode") in ("replay", "backtest"):
-                    s = await get_session(s_slim["id"])
+                if is_replay:
+                    s = await get_session(session_id)
                     if not s:
                         continue
                 else:
                     s = s_slim
+                step_started = time.monotonic()
                 await _advance(s)
+                step_finished = time.monotonic()
+                if not is_replay:
+                    _next_paper_step_at[session_id] = max(
+                        step_started + _TICK_SECONDS, step_finished)
                 await asyncio.sleep(0)  # yield between sessions
+
+            sleep_secs = _REPLAY_POLL_SECONDS if replay_ids else _TICK_SECONDS
+            await asyncio.sleep(sleep_secs)
 
         except asyncio.CancelledError:
             break
         except Exception as exc:
             logger.error("session runner error: %s", exc)
-        await asyncio.sleep(_TICK_SECONDS)
+            await asyncio.sleep(_TICK_SECONDS)
 
 
 async def _already_backtested(symbol: str, date: str) -> bool:
@@ -1995,7 +2023,7 @@ async def _already_backtested(symbol: str, date: str) -> bool:
 async def start_session(req: StartSessionRequest):
     symbol = req.symbol.upper()
     mode   = req.mode if req.mode in ("replay", "paper", "backtest") else "replay"
-    speed  = req.speed if req.speed in SPEEDS else 1
+    speed  = _normalise_speed(req.speed)
     model  = req.model or getattr(settings, "LLM_MODEL", "llama3.2")
     sid    = uuid.uuid4().hex[:12]
     now    = datetime.now(IST)
@@ -2217,7 +2245,7 @@ async def set_speed(session_id: str, req: SpeedRequest):
     s = await get_session(session_id)
     if not s:
         raise HTTPException(404, "Session not found.")
-    s["speed"] = req.speed if req.speed in SPEEDS else 1
+    s["speed"] = _normalise_speed(req.speed)
     await save_session(s)
     return {"status": "success", "data": _summary(s)}
 

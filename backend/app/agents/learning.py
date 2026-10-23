@@ -104,6 +104,14 @@ def _vote_was_correct(action: str, trade_won: bool) -> bool:
         return trade_won
     return not trade_won
 
+
+def _summarize_action_stats(action_stats: list[dict]) -> tuple[int, int, float]:
+    """Return evaluated vote totals using the same rows as the action breakdown."""
+    total = sum(int(stat.get("total") or 0) for stat in action_stats)
+    correct = sum(int(stat.get("correct") or 0) for stat in action_stats)
+    accuracy = round(correct / total, 3) if total else 0.0
+    return total, correct, accuracy
+
 _DDL_STATEMENTS = [
     """CREATE TABLE IF NOT EXISTS ai_engine_predictions (
     id              SERIAL PRIMARY KEY,
@@ -743,8 +751,8 @@ class LearningSystem:
 
             result = []
             for r in rows:
-                total   = r[2] or 0
-                correct = r[3] or 0
+                action_stats = by_action_map.get(r[0], [])
+                total, correct, accuracy = _summarize_action_stats(action_stats)
                 db_weight = round(float(r[1]), 3)
                 # If a registry override exists, that's the effective weight the
                 # ensemble actually uses — show it so Pattern Memory stays in sync.
@@ -756,9 +764,10 @@ class LearningSystem:
                     "weight_pinned":  r[0] in registry_overrides,
                     "total":          total,
                     "correct":        correct,
-                    "accuracy":       round(correct / total, 3) if correct > 0 and total > 0 else 0.0,
+                    "accuracy":       accuracy,
+                    "recorded_predictions": r[2] or 0,
                     "total_reward":   round(float(r[4]), 4),
-                    "by_action":      by_action_map.get(r[0], []),
+                    "by_action":      action_stats,
                 })
             # Re-sort by effective weight (registry overrides can change the order)
             result.sort(key=lambda x: x["weight"], reverse=True)

@@ -10,7 +10,7 @@ Locks in the three repairs:
      20-trade run can't earn a 2× factor.
 """
 from app.agents.learning import (
-    _vote_was_correct, _shrunk_rate, _DECAY_PER_TRADE,
+    _vote_was_correct, _summarize_action_stats, _shrunk_rate, _DECAY_PER_TRADE,
     _ABSTAIN_CREDIT, _VETO_ONLY_AGENTS,
 )
 from app.agents.ensemble import _action_factor
@@ -32,6 +32,19 @@ def test_sell_vote_correct_when_trade_lost():
 def test_hold_vote_correct_when_trade_lost():
     assert _vote_was_correct("HOLD", trade_won=False) is True
     assert _vote_was_correct("HOLD", trade_won=True) is False
+
+
+def test_agent_accuracy_summary_uses_evaluated_action_rows():
+    actions = [
+        {"action": "BUY", "total": 124, "correct": 49},
+        {"action": "SELL", "total": 4, "correct": 3},
+        {"action": "HOLD", "total": 10, "correct": 7},
+    ]
+    assert _summarize_action_stats(actions) == (138, 59, 0.428)
+
+
+def test_agent_accuracy_summary_handles_no_completed_votes():
+    assert _summarize_action_stats([]) == (0, 0, 0.0)
 
 
 # ── 2. Lift-over-base action factor ──────────────────────────────────────────

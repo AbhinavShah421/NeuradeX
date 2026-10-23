@@ -25,12 +25,12 @@ async def _fetch_recent_news(symbol: str, window_minutes: int = 60) -> list[dict
     return []
 
 
-def _build_signal(symbol: str, aggregated: dict) -> dict:
+def _build_signal(symbol: str, aggregated: dict) -> dict | None:
     net = aggregated["net_sentiment"]
     count = aggregated["article_count"]
 
     if count == 0:
-        signal, confidence, reason = "HOLD", 0.50, "no recent news"
+        return None
     elif net > 0.15:
         signal = "BUY"
         confidence = min(0.55 + net * 0.5, 0.85)
@@ -97,6 +97,9 @@ async def start_consuming(rabbitmq_url: str) -> None:
 
                                 aggregated = aggregate_scores(scored)
                                 sig_msg = _build_signal(symbol, aggregated)
+                                if sig_msg is None:
+                                    logger.debug("No sentiment vote for %s: no recent news", symbol)
+                                    continue
 
                                 await signal_exchange.publish(
                                     aio_pika.Message(

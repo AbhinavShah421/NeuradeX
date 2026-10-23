@@ -70,6 +70,11 @@ class Settings(BaseSettings):
     LLM_MAX_TOKENS: int = 512
     LLM_TEMPERATURE: float = 0.7
 
+    # Optional TradingAgents-style analyst debate. Shadow-only: this review is
+    # recorded for evaluation and never participates in a trading decision.
+    TRADINGAGENTS_SHADOW_REVIEW_ENABLED: bool = False
+    TRADINGAGENTS_SHADOW_REVIEW_TIMEOUT: float = 8.0
+
     # Auth / JWT
     JWT_SECRET: str = "neuradex-jwt-secret-change-in-production"
     JWT_EXPIRE_HOURS: int = 24

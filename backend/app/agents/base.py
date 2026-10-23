@@ -38,6 +38,8 @@ class EnsembleDecision:
     # gate's confident-override ceiling — so entry gates must honor this flag
     # rather than inferring intent from action+confidence.
     veto:            str                = ""
+    # Research-only LLM review. It is excluded from voting and learning.
+    research_review: Optional[dict]     = None
 
 
 class BaseAgent(ABC):

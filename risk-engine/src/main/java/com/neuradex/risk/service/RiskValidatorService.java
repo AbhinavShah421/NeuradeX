@@ -16,7 +16,7 @@ public class RiskValidatorService {
 
     private final RabbitTemplate rabbitTemplate;
 
-    @Value("${risk.min-confidence:0.60}")
+    @Value("${risk.min-confidence:0.40}")
     private double minConfidence;
 
     @Value("${risk.max-position-pct:0.05}")

@@ -1484,10 +1484,10 @@ async def _fetch_full_day_candles(symbol: str, date_str: str, bar_seconds: int =
             return bars, "tickstore"
     except Exception:
         logger.debug("Tick-store read failed for %s %s, falling back to provider", symbol, date_str, exc_info=True)
-    # 2) Fall back to the historical provider (1-min floor; we request 5-min bars).
+    # 2) Fall back to the historical provider at the same 1-minute resolution.
     try:
         from app.data.providers import fetch_intraday
-        candles, source = await fetch_intraday(symbol, date_str, 5)
+        candles, source = await fetch_intraday(symbol, date_str, 1)
         if source == "simulated" or not candles:
             return [], "none"
         return candles, source

@@ -73,7 +73,7 @@ const AgentDetailSheet: React.FC<{ agent: LearningAgent; rank: number; onClose: 
             <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--nd-text-3)', marginBottom: 6 }}>Live Accuracy</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 10 }}>
               <span style={{ fontSize: 38, fontWeight: 800, color: col, lineHeight: 1 }}>{pct}%</span>
-              <span style={{ fontSize: 12, color: 'var(--nd-text-3)', lineHeight: 1.6 }}>{a.correct} correct<br />{a.total} predictions</span>
+              <span style={{ fontSize: 12, color: 'var(--nd-text-3)', lineHeight: 1.6 }}>{a.correct} correct<br />{a.total} evaluated votes</span>
             </div>
             <div style={{ height: 8, background: 'var(--nd-border)', borderRadius: 4, overflow: 'hidden' }}>
               <div style={{ width: `${pct}%`, height: '100%', background: col, borderRadius: 4 }} />

@@ -231,6 +231,17 @@ class EnsembleEngine:
         # mean-reversion in chop; damp directional voices in high-vol regimes.
         regime = self._apply_regime(signals)
 
+        # TradingAgents-style research debate is opt-in and shadow-only. Keep
+        # it out of the vote and downstream learning attribution.
+        research_review = None
+        try:
+            from .research_debate import review_signals
+            research_review = await review_signals(symbol, signals, mode=mode, context=context)
+        except Exception:
+            logger.debug("shadow research review unavailable", exc_info=True)
+        if research_review:
+            context["research_review"] = research_review
+
         # ── Action-specific weighted vote ───────────────────────────────────────
         # Each agent's contribution is scaled by how accurate IT specifically is
         # for the action it just voted — a BUY voter is weighted by its BUY rate,
@@ -444,6 +455,7 @@ class EnsembleEngine:
             timestamp       = datetime.now(),
             vote_mode       = vote_mode,
             veto            = veto,
+            research_review = research_review,
         )
 
         # No publishing here. decide() runs BEFORE any session gate, and until

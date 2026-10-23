@@ -17,7 +17,10 @@ Training mechanisms built in:
      direction opposes price momentum (overbought + bullish news, oversold + bearish).
 """
 from __future__ import annotations
+import math
 import os
+import time
+from datetime import datetime, timezone
 from .base import AgentSignal, BaseAgent
 from app.utils.elk_logger import get_logger
 
@@ -26,6 +29,7 @@ logger = get_logger(__name__)
 # ── Hard-coded gate defaults (env-overridable) ────────────────────────────────
 NEWS_MIN_CONFIDENCE = float(os.getenv("NEWS_MIN_CONFIDENCE", "0.7"))
 NEWS_MIN_SCORE      = float(os.getenv("NEWS_MIN_SCORE", "0.4"))
+_MAX_LIVE_SENTIMENT_AGE = 90 * 60
 
 # Dynamic gate bounds — never tighten past ceil, never relax past floor
 _GATE_FLOOR_CONF  = 0.55
@@ -83,6 +87,39 @@ def _classify_catalyst(catalyst: str, summary: str) -> str:
         if any(k in text for k in keywords):
             return category
     return "unknown"
+
+
+def _score_matches_sentiment(sentiment: str, score: float) -> bool:
+    if not math.isfinite(score) or not 0 < abs(score) <= 1:
+        return False
+    return (sentiment == "positive" and score > 0) or \
+           (sentiment == "negative" and score < 0)
+
+
+def _sentiment_payload_is_fresh(data: dict, date: str | None = None,
+                                now: float | None = None) -> bool:
+    """Validate the requested replay date or the live payload's own timestamp."""
+    if date:
+        return data.get("date") in (None, date)
+
+    timestamp = data.get("fetched_at")
+    if timestamp is None:
+        timestamp = data.get("updated_at")
+    try:
+        if isinstance(timestamp, (int, float)):
+            fetched_at = float(timestamp)
+        elif isinstance(timestamp, str):
+            parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            fetched_at = parsed.timestamp()
+        else:
+            return False
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+    age = (time.time() if now is None else now) - fetched_at
+    return -300 <= age <= _MAX_LIVE_SENTIMENT_AGE
 
 
 # ── Dynamic gate calibration ──────────────────────────────────────────────────
@@ -335,15 +372,23 @@ class SentimentAgent(BaseAgent):
             logger.debug("news sentiment read failed for %s: %s", symbol, exc)
             return abstain
 
+        if not _sentiment_payload_is_fresh(d, date=date):
+            abstain.reasoning = "News sentiment is stale or missing a valid timestamp — abstaining"
+            abstain.indicators["status"] = "stale"
+            return abstain
+
         if int(d.get("headlines_count", 0)) <= 0:
             return abstain
 
         sentiment = str(d.get("sentiment", "neutral")).lower()
         try:
-            score = abs(float(d.get("score", 0) or 0))
+            score = float(d.get("score", 0) or 0)
             conf  = float(d.get("confidence", 0) or 0)
         except (TypeError, ValueError):
             return abstain
+        if not _score_matches_sentiment(sentiment, score):
+            return abstain
+        score = abs(score)
         catalyst = str(d.get("catalyst", "") or "").strip()
         summary  = str(d.get("summary",  "") or "").strip()
         has_catalyst = catalyst.lower() not in _VAGUE_CATALYSTS
@@ -383,6 +428,7 @@ class SentimentAgent(BaseAgent):
                 "catalyst_mult": mult,
                 "headlines":    d.get("headlines_count"),
                 "provider":     d.get("provider"),
+                "fetched_at":   d.get("fetched_at") or d.get("updated_at"),
                 "finbert_net":  finbert_net,
                 "date":         d.get("date"),
                 "min_conf_used": min_conf,
