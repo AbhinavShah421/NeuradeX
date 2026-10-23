@@ -112,6 +112,16 @@ CREATE TABLE IF NOT EXISTS session_decisions (
 CREATE INDEX IF NOT EXISTS idx_session_decisions_session
     ON session_decisions (session_id, candle_time);
 
+-- The System Map's learning-loop probe asks max(created_at) and max(cf_labeled_at)
+-- on every poll. Without these, each is a parallel seq scan of the whole table —
+-- measured 31 s on 1.39M rows / 3.1 GB on 2026-09-14 — and concurrent polls piled
+-- up until the backend's 20-connection pool was exhausted, which took every other
+-- backend DB call down with it. With them, both are index-only scans under 1 ms.
+CREATE INDEX IF NOT EXISTS idx_session_decisions_created_at
+    ON session_decisions (created_at);
+CREATE INDEX IF NOT EXISTS idx_session_decisions_cf_labeled_at
+    ON session_decisions (cf_labeled_at);
+
 -- rl_experiences (RL replay buffer) was dropped 2026-08-16: no producer ever
 -- sent the `state` field it required (trade-executor's TradeOutcome DTO never
 -- carried one) and no consumer read it — model-trainer trains PPO from OHLCV

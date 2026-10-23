@@ -5,6 +5,7 @@ services:
   postgres:
     image: timescale/timescaledb:latest-pg15
     container_name: stock-prediction-postgres
+    restart: unless-stopped
     environment:
       POSTGRES_USER: stock_user
       POSTGRES_PASSWORD: stock_password
@@ -37,33 +38,10 @@ services:
           memory: 768M
           cpus: '0.5'
 
-  mongodb:
-    image: mongo:6
-    container_name: stock-prediction-mongodb
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: stock_admin
-      MONGO_INITDB_ROOT_PASSWORD: stock_password
-      MONGO_INITDB_DATABASE: stock_prediction
-    ports:
-      - "27017:27017"
-    volumes:
-      - mongodb_data:/data/db
-    healthcheck:
-      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - stock-prediction-network
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: '0.5'
-
   redis:
     image: redis:7-alpine
     container_name: stock-prediction-redis
+    restart: unless-stopped
     ports:
       - "6379:6379"
     volumes:
@@ -84,6 +62,7 @@ services:
   rabbitmq:
     image: rabbitmq:3.12-management-alpine
     container_name: stock-prediction-rabbitmq
+    restart: unless-stopped
     environment:
       RABBITMQ_DEFAULT_USER: guest
       RABBITMQ_DEFAULT_PASS: guest
@@ -105,36 +84,10 @@ services:
           memory: 256M
           cpus: '0.3'
 
-  influxdb:
-    image: influxdb:2-alpine
-    container_name: stock-prediction-influxdb
-    environment:
-      DOCKER_INFLUXDB_INIT_MODE: setup
-      DOCKER_INFLUXDB_INIT_USERNAME: stock_user
-      DOCKER_INFLUXDB_INIT_PASSWORD: stock_password
-      DOCKER_INFLUXDB_INIT_ORG: stock-org
-      DOCKER_INFLUXDB_INIT_BUCKET: stock-metrics
-      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: stock-token
-    ports:
-      - "8086:8086"
-    volumes:
-      - influxdb_data:/var/lib/influxdb2
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - stock-prediction-network
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-          cpus: '0.3'
-
   elasticsearch:
     image: elasticsearch:8.11.0
     container_name: stock-prediction-elasticsearch
+    restart: unless-stopped
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=false
@@ -187,6 +140,7 @@ services:
   kibana:
     image: kibana:8.11.0
     container_name: stock-prediction-kibana
+    restart: unless-stopped
     environment:
       - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
       - xpack.security.enabled=false
@@ -214,8 +168,8 @@ services:
           memory: 768M
           cpus: '0.3'
 
-  # phpMyAdmin-style DB browser for Postgres/TimescaleDB (also speaks MongoDB
-  # via server type dropdown). http://localhost:8080 — server: postgres,
+  # phpMyAdmin-style DB browser for Postgres/TimescaleDB.
+  # http://localhost:8080 — server: postgres,
   # user: stock_user, password: stock_password, db: stock_prediction_db.
   adminer:
     image: adminer:latest
@@ -240,6 +194,7 @@ services:
   mlflow:
     image: ghcr.io/mlflow/mlflow:v2.10.0
     container_name: stock-prediction-mlflow
+    restart: unless-stopped
     ports:
       - "5000:5000"
     volumes:
@@ -277,14 +232,13 @@ services:
       context: ./backend
       dockerfile: ../docker/Dockerfile.backend
     container_name: stock-prediction-backend
+    restart: unless-stopped
     env_file:
       - ./backend/.env
     environment:
       POSTGRES_HOST: postgres
-      MONGODB_HOST: mongodb
       REDIS_HOST: redis
       RABBITMQ_HOST: rabbitmq
-      INFLUXDB_HOST: influxdb
       LLM_API_URL: ${LLM_API_URL:-http://ollama:11434}
       ELASTICSEARCH_URL: http://elasticsearch:9200
       LLM_PROVIDER: ollama
@@ -318,13 +272,9 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      mongodb:
-        condition: service_healthy
       redis:
         condition: service_healthy
       rabbitmq:
-        condition: service_healthy
-      influxdb:
         condition: service_healthy
       elasticsearch:
         condition: service_healthy
@@ -348,14 +298,13 @@ services:
       context: ./backend
       dockerfile: ../docker/Dockerfile.backend
     container_name: stock-prediction-session-runner
+    restart: unless-stopped
     env_file:
       - ./backend/.env
     environment:
       POSTGRES_HOST: postgres
-      MONGODB_HOST: mongodb
       REDIS_HOST: redis
       RABBITMQ_HOST: rabbitmq
-      INFLUXDB_HOST: influxdb
       LLM_API_URL: ${LLM_API_URL:-http://ollama:11434}
       ELASTICSEARCH_URL: http://elasticsearch:9200
       LLM_PROVIDER: ollama
@@ -401,11 +350,11 @@ services:
       context: ./market-data-service
       dockerfile: Dockerfile
     container_name: stock-prediction-market-data
+    restart: unless-stopped
     env_file:
       - ./backend/.env
     environment:
       POSTGRES_HOST: postgres
-      MONGODB_HOST: mongodb
       REDIS_HOST: redis
       RABBITMQ_HOST: rabbitmq
       ELASTICSEARCH_URL: http://elasticsearch:9200
@@ -419,8 +368,6 @@ services:
       - "8001:8001"
     depends_on:
       postgres:
-        condition: service_healthy
-      mongodb:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -436,37 +383,6 @@ services:
 
   # ── Phase 2: Agent Services ───────────────────────────────────────────────────
 
-  technical-agent:
-    build:
-      context: ./technical-agent
-      dockerfile: Dockerfile
-    container_name: stock-prediction-technical-agent
-    env_file:
-      - ./backend/.env
-    environment:
-      POSTGRES_HOST: postgres
-      REDIS_HOST: redis
-      RABBITMQ_HOST: rabbitmq
-      ELASTICSEARCH_URL: http://elasticsearch:9200
-      SERVICE_NAME: technical-agent
-      SERVICE_PORT: "8002"
-      MLFLOW_TRACKING_URI: http://mlflow:5000
-      CANDLE_HISTORY_LIMIT: "200"
-    ports:
-      - "8002:8002"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
-    networks:
-      - stock-prediction-network
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-          cpus: '0.3'
-
   sentiment-agent:
     build:
       context: ./sentiment-agent
@@ -475,7 +391,6 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      MONGODB_HOST: mongodb
       RABBITMQ_HOST: rabbitmq
       ELASTICSEARCH_URL: http://elasticsearch:9200
       SERVICE_NAME: sentiment-agent
@@ -494,8 +409,6 @@ services:
     volumes:
       - finbert_cache:/root/.cache/huggingface
     depends_on:
-      mongodb:
-        condition: service_healthy
       rabbitmq:
         condition: service_healthy
     networks:
@@ -510,104 +423,12 @@ services:
           memory: 2048M
           cpus: '1.0'
 
-  macro-agent:
-    build:
-      context: ./macro-agent
-      dockerfile: Dockerfile
-    container_name: stock-prediction-macro-agent
-    env_file:
-      - ./backend/.env
-    environment:
-      REDIS_HOST: redis
-      RABBITMQ_HOST: rabbitmq
-      ELASTICSEARCH_URL: http://elasticsearch:9200
-      SERVICE_NAME: macro-agent
-      SERVICE_PORT: "8004"
-      MACRO_REFRESH_SECONDS: "3600"
-    ports:
-      - "8004:8004"
-    depends_on:
-      redis:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
-    networks:
-      - stock-prediction-network
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-          cpus: '0.2'
-
-  pattern-agent:
-    build:
-      context: ./pattern-agent
-      dockerfile: Dockerfile
-    container_name: stock-prediction-pattern-agent
-    env_file:
-      - ./backend/.env
-    environment:
-      POSTGRES_HOST: postgres
-      RABBITMQ_HOST: rabbitmq
-      ELASTICSEARCH_URL: http://elasticsearch:9200
-      SERVICE_NAME: pattern-agent
-      SERVICE_PORT: "8005"
-      CANDLE_HISTORY_LIMIT: "100"
-    ports:
-      - "8005:8005"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
-    networks:
-      - stock-prediction-network
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-          cpus: '0.3'
-
-  rl-agent:
-    build:
-      context: ./rl-agent
-      dockerfile: Dockerfile
-    container_name: stock-prediction-rl-agent
-    env_file:
-      - ./backend/.env
-    environment:
-      POSTGRES_HOST: postgres
-      RABBITMQ_HOST: rabbitmq
-      REDIS_HOST: redis
-      ELASTICSEARCH_URL: http://elasticsearch:9200
-      SERVICE_NAME: rl-agent
-      SERVICE_PORT: "8006"
-      MLFLOW_TRACKING_URI: http://mlflow:5000
-      POLICY_MODEL_NAME: "rl-trading-policy"
-    ports:
-      - "8006:8006"
-    volumes:
-      - rl_models:/app/models
-    depends_on:
-      postgres:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
-    networks:
-      - stock-prediction-network
-    deploy:
-      resources:
-        limits:
-          memory: 384M   # 139MB actual; 384M gives headroom for PPO training bursts
-          cpus: '0.5'
-
-  # ── Phase 3: Ensemble Decision Engine ────────────────────────────────────────
-
   ensemble-engine:
     build:
       context: ./ensemble-engine
       dockerfile: Dockerfile
     container_name: stock-prediction-ensemble-engine
+    restart: unless-stopped
     env_file:
       - ./backend/.env
     environment:
@@ -641,6 +462,7 @@ services:
       context: ./feedback-service
       dockerfile: Dockerfile
     container_name: stock-prediction-feedback-service
+    restart: unless-stopped
     env_file:
       - ./backend/.env
     environment:
@@ -717,6 +539,7 @@ services:
       context: ./autopilot-service
       dockerfile: Dockerfile
     container_name: stock-prediction-autopilot
+    restart: unless-stopped
     environment:
       REDIS_HOST: redis
       REDIS_PORT: "6379"
@@ -727,6 +550,10 @@ services:
       AUTOPILOT_CAPITAL: "50000"
       AUTOPILOT_TICK_SECS: "60"
       AUTOPILOT_MAX_HOLD_MINUTES: "0"
+      # A-grade promotions disarmed 2026-08-31: 26.1% realized accuracy vs
+      # 0.82-0.95 advertised win_probability (scanner's own evaluator).
+      # Set "1" to resume trading them; the watch UI keeps working either way.
+      AUTOPILOT_TRADE_PROMOTIONS: "0"
       AUTOPILOT_BACKTEST_SPEED: "1"
       AUTOPILOT_BACKTEST_BATCH_SIZE: "7"
       AUTOPILOT_BACKTEST_POLL: "15"
@@ -824,6 +651,7 @@ services:
       context: ./sentiment-service
       dockerfile: Dockerfile
     container_name: stock-prediction-sentiment
+    restart: unless-stopped
     environment:
       REDIS_HOST: redis
       REDIS_PORT: "6379"
@@ -856,6 +684,7 @@ services:
       context: ./model-trainer
       dockerfile: Dockerfile
     container_name: stock-prediction-model-trainer
+    restart: unless-stopped
     env_file:
       - ./backend/.env
     environment:
@@ -898,12 +727,13 @@ services:
       context: ./risk-engine
       dockerfile: Dockerfile
     container_name: stock-prediction-risk-engine
+    restart: unless-stopped
     environment:
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_PORT: "5672"
       RABBITMQ_USER: guest
       RABBITMQ_PASSWORD: guest
-      MIN_CONFIDENCE: "0.60"
+      MIN_CONFIDENCE: "0.40"
       MAX_POSITION_PCT: "0.05"
       MAX_RISK_PCT: "0.02"
       ATR_STOP_MULT: "2.0"
@@ -929,6 +759,7 @@ services:
       context: ./trade-executor
       dockerfile: Dockerfile
     container_name: stock-prediction-trade-executor
+    restart: unless-stopped
     env_file:
       - ./backend/.env
     environment:
@@ -937,6 +768,10 @@ services:
       RABBITMQ_USER: guest
       RABBITMQ_PASSWORD: guest
       PAPER_TRADING_MODE: "true"
+      # The position monitor prices held symbols through the backend and reloads
+      # open positions from feedback-service at boot.
+      BACKEND_URL: "http://backend:8000"
+      FEEDBACK_URL: "http://feedback-service:8012"
     ports:
       - "8011:8011"
     depends_on:
@@ -957,6 +792,7 @@ services:
       context: ./frontend
       dockerfile: ../docker/Dockerfile.frontend
     container_name: stock-prediction-frontend
+    restart: unless-stopped
     ports:
       - "3000:3000"
     environment:
@@ -977,6 +813,7 @@ services:
       context: ./docs-site
       dockerfile: Dockerfile
     container_name: stock-prediction-docs
+    restart: unless-stopped
     ports:
       - "3001:3001"
     networks:
@@ -1010,6 +847,7 @@ services:
   nginx:
     image: nginx:alpine
     container_name: stock-prediction-nginx
+    restart: unless-stopped
     ports:
       - "80:80"
       - "443:443"
@@ -1032,10 +870,8 @@ volumes:
   # it a restart re-ingests every container log from the beginning.
   filebeat_data:
   postgres_data:
-  mongodb_data:
   redis_data:
   rabbitmq_data:
-  influxdb_data:
   elasticsearch_data:
   mlflow_data:
   finbert_cache:

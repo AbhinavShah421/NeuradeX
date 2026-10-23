@@ -11,7 +11,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 import socketio
 from app.config import settings
-from app.database.mongodb import init_mongodb, close_mongodb
 from app.database.postgres import init_postgres, close_postgres
 from app.utils.redis_client import init_redis, close_redis
 from app.api import stocks, predictions, portfolio, risk, orders, agent, backtest, auth, paper_trading, ai_engine, mlflow_proxy, sessions, user_settings, mutual_funds, delivery_paper, live_trading, system, recordings, monitor
@@ -38,7 +37,6 @@ async def lifespan(app: FastAPI):
 
     try:
         await init_postgres()
-        await init_mongodb()
         await init_redis()
 
         # Load Groww credentials from DB (set via the UI). Never from .env.
@@ -139,6 +137,22 @@ async def lifespan(app: FastAPI):
             except Exception as exc:
                 logger.warning("Could not schedule LLM rejection review: %s", exc)
 
+            # Keep the agent-culpability baseline warm. It is a full-corpus
+            # scan (~1M decisions x ~12 agent votes) that two UI post-mortem
+            # paths read; computing it inline took 107s on 2026-09-08 and blew
+            # nginx's 90s timeout, so the first click after the 12h cache
+            # expired returned 504. Those paths now serve it warm or not at
+            # all, which only works if something keeps it warm.
+            try:
+                from app.services.session_postmortem import culpability_baseline_loop
+                app.state.culpability_baseline_task = asyncio.create_task(
+                    culpability_baseline_loop())
+                logger.info("Agent culpability baseline warm-up scheduled",
+                            extra={"log_type": "app_lifecycle",
+                                   "event": "culpability_baseline_scheduled"})
+            except Exception as exc:
+                logger.warning("Could not schedule culpability baseline: %s", exc)
+
             # Background runner that advances live trading sessions server-side
             try:
                 from app.api.sessions import session_runner_loop
@@ -221,6 +235,17 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning("Could not start live squareoff loop: %s", exc)
 
+        # Auto-manage loop — reconciles the live book against Groww every minute
+        # (so a trade placed by hand in the Groww app becomes visible and managed)
+        # and lets the AI exit what is open when auto-execute is armed.
+        try:
+            from app.api.live_trading import _auto_manage_loop
+            app.state.live_manage_task = asyncio.create_task(_auto_manage_loop())
+            logger.info("Live trading auto-manage scheduled",
+                        extra={"log_type": "app_lifecycle", "event": "live_manage_scheduled"})
+        except Exception as exc:
+            logger.warning("Could not start live auto-manage loop: %s", exc)
+
         # Autopilot now runs as its own microservice (autopilot-service:8015) — it
         # owns the paper + backtest training loops and starts sessions via the API.
         # The backend only reads/writes the enable flags and serves status.
@@ -260,7 +285,6 @@ async def lifespan(app: FastAPI):
             if task:
                 task.cancel()
         await close_postgres()
-        await close_mongodb()
         await close_redis()
         logger.info("Cleanup complete", extra={"log_type": "app_lifecycle", "event": "shutdown_complete"})
     except Exception as e:

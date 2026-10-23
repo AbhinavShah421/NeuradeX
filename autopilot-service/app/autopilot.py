@@ -23,12 +23,29 @@ import os
 import random
 import time
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 
 import httpx
 import redis.asyncio as redis
 
 logger = logging.getLogger("autopilot")
 IST = timezone(timedelta(hours=5, minutes=30))
+
+# NSE trading holidays. Same data as backend/app/utils/nse_holidays.json — the
+# services share no code, so each carries a copy and the backend test suite fails
+# if they differ. Every market check here used to test only the weekday: on
+# 2026-09-14 (Ganesh Chaturthi) the paper tick retried a session start every minute
+# all day, and the backtest walk sat idle 09:00-15:40 for sessions that could
+# never start.
+_NSE_HOLIDAYS: dict[str, str] = json.loads(
+    Path(__file__).with_name("nse_holidays.json").read_text(encoding="utf-8")
+)["holidays"]
+
+
+def _is_trading_day(d) -> bool:
+    """A weekday that is not an NSE trading holiday."""
+    day = d.date() if isinstance(d, datetime) else d
+    return day.weekday() < 5 and day.isoformat() not in _NSE_HOLIDAYS
 
 BACKEND_URL   = os.getenv("BACKEND_URL", "http://backend:8000")
 WATCHLIST_KEY = "ai_engine:watchlist"
@@ -51,6 +68,15 @@ PAPER_TICK  = int(os.getenv("AUTOPILOT_TICK_SECS", "60"))
 # sessions hold longer than this. 0 = disabled (positions exit on the normal
 # intraday/ensemble rules + end-of-day square-off).
 MAX_HOLD_MIN = int(os.getenv("AUTOPILOT_MAX_HOLD_MINUTES", "0"))
+# Whether paper trading also acts on the scanner's intraday A-grade promotions.
+# OFF by default since 2026-08-31: the scanner's own evaluator measured the
+# promoted picks at 26.1% realized accuracy / -0.39% avg return per pick while
+# their win_probability labels claimed 0.82-0.95, and the promotion rule sits
+# in the worst cell of the positional-setups study (buying strength). The
+# scanner keeps writing live_promotions:{date} so the watch UI and the nightly
+# evaluator still work - only trading on them is disarmed. Rollback:
+# AUTOPILOT_TRADE_PROMOTIONS=1. See backend/app/research/registry.py.
+TRADE_PROMOTIONS = os.getenv("AUTOPILOT_TRADE_PROMOTIONS", "0") == "1"
 BT_SPEED      = int(os.getenv("AUTOPILOT_BACKTEST_SPEED", "1"))        # 1x — dense, real-like
 BT_BATCH_SIZE = int(os.getenv("AUTOPILOT_BACKTEST_BATCH_SIZE", "7"))    # concurrent sessions per batch
 BT_POLL       = int(os.getenv("AUTOPILOT_BACKTEST_POLL", "15"))         # seconds between queue checks
@@ -173,7 +199,7 @@ def _today() -> str:
 
 def _market_open() -> bool:
     n = _now_ist()
-    if n.weekday() >= 5:
+    if not _is_trading_day(n):          # weekend or NSE holiday
         return False
     m = n.hour * 60 + n.minute
     return MARKET_OPEN_MIN <= m <= MARKET_CLOSE_MIN
@@ -181,18 +207,27 @@ def _market_open() -> bool:
 
 def _backtest_allowed() -> bool:
     """Backtest may run only when paper trading isn't (and won't shortly be)
-    active: before the morning cutoff or after the evening resume on weekdays,
-    and freely on weekends."""
+    active: before the morning cutoff or after the evening resume on trading
+    days, and freely on weekends and NSE holidays — no paper session can start on
+    a holiday, so pausing the walk for one only throws a research day away."""
     n = _now_ist()
-    if n.weekday() >= 5:
+    if not _is_trading_day(n):
         return True
     m = n.hour * 60 + n.minute
     return (m < BT_MORNING_CUTOFF) or (m >= BT_EVENING_RESUME)
 
 
-def _prev_trading_day(date_str: str) -> str:
+def _prev_trading_day(date_str: str | None) -> str:
+    # Defensive: a None or malformed cursor used to raise straight out of
+    # _do_backtest_step, and because the loop retries every BT_POLL seconds
+    # without ever persisting state, one bad value crash-looped the backtest
+    # walk for eleven days. Degrading to "yesterday" keeps the walk moving and
+    # leaves the mistake visible in the log rather than in a silent stall.
+    if not date_str:
+        logger.warning("_prev_trading_day called with %r — falling back to today", date_str)
+        date_str = _today()
     d = datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=1)
-    while d.weekday() >= 5:
+    while not _is_trading_day(d):       # skip weekends AND exchange holidays
         d -= timedelta(days=1)
     return d.strftime("%Y-%m-%d")
 
@@ -497,12 +532,13 @@ async def _do_paper_tick() -> None:
         return
 
     # Paper trading acts on committed high-conviction picks (precision tier),
-    # most-convicted first, plus any A-grade names the scanner's live watcher
-    # promoted intraday. If neither tier has anything, never sit the day out:
-    # fall back to the single most-convicted watchlist stock so every trading
-    # day starts with at least one live session for the agents.
+    # most-convicted first, plus - only when AUTOPILOT_TRADE_PROMOTIONS=1 -
+    # any A-grade names the scanner's live watcher promoted intraday. If
+    # neither tier has anything, never sit the day out: fall back to the single
+    # most-convicted watchlist stock so every trading day starts with at least
+    # one live session for the agents.
     committed = await _committed_symbols()
-    promoted = await _live_promoted_symbols()
+    promoted = (await _live_promoted_symbols()) if TRADE_PROMOTIONS else []
     syms = committed + [s for s in promoted if s not in committed]
     if not syms:
         syms = await _top_conviction_symbols(1)
@@ -684,31 +720,48 @@ async def _do_backtest_step() -> None:
         if pending:
             await _save_bt_state(st)
             return
-
-        # Batch done — start the next one if symbols remain.
-        if syms_remaining:
-            ids = await _start_batch(syms_remaining, cursor)
-            remaining = syms_remaining[bs:]
-            batch_idx += 1
-            total = st.get("queue_total", len(_BT_UNIVERSE))
-            n_batches = -(-total // bs)
-            st.update({
-                "queue": ids, "queue_pending": len(ids),
-                "symbols_remaining": remaining, "batch_idx": batch_idx,
-            })
-            await _save_bt_state(st)
-            logger.info(
-                "backtest %s — batch %d/%d started (%d sessions, %d remaining)",
-                cursor, batch_idx, n_batches, len(ids), len(remaining),
-            )
-            return
-
-        # All batches for this date done → advance cursor.
         st["queue"] = []
         st["queue_pending"] = 0
 
+    # ── No live batch, symbols still pending → start the next batch ───────────
+    # This used to be nested inside `if queue:`, so it was only reachable when a
+    # batch finished on its own. The morning cutoff also empties `queue` (via
+    # _stop_backtest_queue) while leaving `symbols_remaining` populated, and that
+    # state fell straight through to the "day complete" branch below with
+    # queue_date=None — crashing the loop every 15s, all evening, from
+    # 2026-08-21 until 2026-09-01. Resuming here is also the correct behaviour
+    # on its own terms: a day interrupted at batch 2 of 3 must finish its
+    # symbols, not be written off as a completed day.
+    if syms_remaining:
+        day = st.get("queue_date") or cursor
+        ids = await _start_batch(syms_remaining, day)
+        remaining = syms_remaining[bs:]
+        if not ids:
+            # Nothing would start (no data for these symbols on this date).
+            # Drop them rather than spin — the day-complete branch takes over.
+            logger.warning("backtest %s — no sessions started for %d symbols, dropping",
+                           day, len(syms_remaining))
+            st["symbols_remaining"] = []
+            await _save_bt_state(st)
+            return
+        batch_idx += 1
+        total = st.get("queue_total", len(_BT_UNIVERSE))
+        n_batches = -(-total // bs)
+        st.update({
+            "queue": ids, "queue_date": day, "queue_pending": len(ids),
+            "symbols_remaining": remaining, "batch_idx": batch_idx,
+        })
+        await _save_bt_state(st)
+        logger.info(
+            "backtest %s — batch %d/%d started (%d sessions, %d remaining)",
+            day, batch_idx, n_batches, len(ids), len(remaining),
+        )
+        return
+
     # ── All batches complete → step back to previous trading day ──────────────
-    done_date = st.get("queue_date", cursor)
+    # `.get(key, default)` is not enough: _stop_backtest_queue writes an explicit
+    # None, and an existing key never falls back to the default.
+    done_date = st.get("queue_date") or cursor
     days_back = st.get("days_back", 0) + 1
     next_cursor = _prev_trading_day(done_date)
     if days_back >= BT_DAYS_BACK:
@@ -827,6 +880,7 @@ async def status() -> dict:
             "watchlist_size": len(syms),
             "committed_size": len(committed),
             "source": "committed",
+            "trade_promotions": TRADE_PROMOTIONS,
             "sessions": [{"id": s["id"], "symbol": s["symbol"],
                           "pnl": s.get("pnl", 0.0)} for s in paper_running],
         },

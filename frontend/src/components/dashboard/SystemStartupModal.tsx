@@ -129,7 +129,7 @@ const SystemStartupModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
                 }}>
                   <span className="material-icons" style={{
                     fontSize: 22,
-                    background: allLive ? '#00b386' : 'linear-gradient(135deg,#a78bfa,#67e8f9)',
+                    background: allLive ? '#2dd4bf' : 'linear-gradient(135deg,#a78bfa,#67e8f9)',
                     WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
                     backgroundClip: 'text',
                   }}>{allLive ? 'verified' : 'hub'}</span>
@@ -143,7 +143,7 @@ const SystemStartupModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
                 </div>
                 <div style={{
                   fontSize: 19, fontWeight: 800, letterSpacing: 0.4, lineHeight: 1.15,
-                  background: allLive ? '#00b386' : 'linear-gradient(120deg,#e2d9f3 0%,#a5f3fc 100%)',
+                  background: allLive ? '#2dd4bf' : 'linear-gradient(120deg,#e2d9f3 0%,#a5f3fc 100%)',
                   WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', backgroundClip: 'text',
                 }}>
                   {allLive ? 'All Systems Live' : 'Initializing Systems'}
@@ -162,7 +162,7 @@ const SystemStartupModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
                 height: '100%', borderRadius: 2,
                 width: `${pct}%`,
                 background: allLive
-                  ? '#00b386'
+                  ? '#2dd4bf'
                   : 'linear-gradient(90deg, #7c3aed 0%, #06b6d4 50%, #a78bfa 100%)',
                 backgroundSize: '200% 100%',
                 animation: !allLive ? 'nd-shimmer-bar 2s linear infinite' : 'none',
@@ -201,8 +201,8 @@ const SystemStartupModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
                   )}
                   <div style={{
                     width: 8, height: 8, borderRadius: '50%',
-                    background: svc.status === 'ok' ? '#00b386'
-                      : svc.status === 'error' ? '#f59e0b'
+                    background: svc.status === 'ok' ? '#2dd4bf'
+                      : svc.status === 'error' ? '#fbbf24'
                       : 'rgba(148,163,184,0.35)',
                     boxShadow: svc.status === 'ok' ? '0 0 8px rgba(0,179,134,0.9)'
                       : svc.status === 'error' ? '0 0 7px rgba(245,158,11,0.7)'
@@ -237,8 +237,8 @@ const SystemStartupModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
                   background: svc.status === 'ok' ? 'rgba(0,179,134,0.13)'
                     : svc.status === 'error' ? 'rgba(245,158,11,0.1)'
                     : 'rgba(148,163,184,0.07)',
-                  color: svc.status === 'ok' ? '#00b386'
-                    : svc.status === 'error' ? '#f59e0b'
+                  color: svc.status === 'ok' ? '#2dd4bf'
+                    : svc.status === 'error' ? '#fbbf24'
                     : 'rgba(148,163,184,0.45)',
                   border: `1px solid ${svc.status === 'ok' ? 'rgba(0,179,134,0.28)'
                     : svc.status === 'error' ? 'rgba(245,158,11,0.22)'

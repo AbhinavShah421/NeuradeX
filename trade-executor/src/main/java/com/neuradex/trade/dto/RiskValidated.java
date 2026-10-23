@@ -29,8 +29,11 @@ public class RiskValidated {
     @JsonProperty("risk_pct")
     private double riskPct;
 
+    // Vote objects ({signal, confidence, weight}), not bare strings — the
+    // ensemble started emitting the richer shape 2026-08-17. Typed as String
+    // here until 2026-08-18, which made Jackson reject every approved trade.
     @JsonProperty("agent_votes")
-    private Map<String, String> agentVotes;
+    private Map<String, Object> agentVotes;
 
     @JsonProperty("validated_at")
     private String validatedAt;

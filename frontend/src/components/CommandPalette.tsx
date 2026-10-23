@@ -63,6 +63,8 @@ const CommandPalette: React.FC = () => {
     { id: 'funds',  label: 'Mutual Funds',       icon: 'savings',          run: () => go('/mutual-funds'),           keywords: 'mf sip' },
     { id: 'models', label: 'Model Registry',     icon: 'model_training',   run: () => go('/models'),                 keywords: 'mlflow' },
     { id: 'set',    label: 'Settings',           icon: 'settings',         run: () => go('/settings'),               keywords: 'config broker groww creds' },
+    { id: 'ctrl',   label: 'Trading Controls',   icon: 'tune',             run: () => go('/controls'),               keywords: 'gate ensemble score_min dominance thresholds knobs tuning' },
+    { id: 'map',    label: 'System Map',         icon: 'hub',              run: () => go('/system-map'),             keywords: 'architecture health topology faults' },
     { id: 'theme',  label: `Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`, icon: theme === 'dark' ? 'light_mode' : 'dark_mode', run: () => { setTheme(theme === 'dark' ? 'light' : 'dark'); setOpen(false); }, keywords: 'dark light appearance' },
   ], [theme]); // eslint-disable-line react-hooks/exhaustive-deps
 

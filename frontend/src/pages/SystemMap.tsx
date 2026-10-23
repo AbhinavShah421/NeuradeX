@@ -84,6 +84,7 @@ const SystemMap: React.FC = () => {
   const [openCall, setOpenCall] = useState<string | null>(null);
   const [reqs, setReqs] = useState<Record<string, any>>({});
   const [store, setStore] = useState<any>(null);
+  const [pubFlag, setPubFlag] = useState<any>(null);
   const [storeBusy, setStoreBusy] = useState<string | null>(null);
   const [hoverId, setHoverId] = useState<string | null>(null);
   const [onlyApi, setOnlyApi] = useState(false);
@@ -184,7 +185,10 @@ const SystemMap: React.FC = () => {
     if (view === 'map' && !store) {
       apiService.getLogStore().then(setStore).catch(() => setStore(null));
     }
-  }, [view, store]);
+    if (view === 'map' && !pubFlag) {
+      apiService.getPublishFlag().then(setPubFlag).catch(() => setPubFlag(null));
+    }
+  }, [view, store, pubFlag]);
 
   const runStoreAction = useCallback(async (label: string, fn: () => Promise<any>) => {
     setStoreBusy(label);
@@ -747,19 +751,23 @@ const SystemMap: React.FC = () => {
                        transform={`translate(${p.x},${p.y})`}>
                       {/* In-process agents get a dashed outline: they are code
                           inside the runner, not a container you can restart. */}
-                      <rect width={NODE_W} height={NODE_H} rx="9"
+                          <rect width={NODE_W} height={NODE_H} rx="9"
                             fill={isSel ? 'rgba(56,189,248,.16)'
                                   : isFocus ? 'rgba(56,189,248,.10)' : 'rgba(13,21,36,.92)'}
                             stroke={ring}
                             strokeWidth={isSel || isFocus ? 2.2 : (isUp || isDown_) ? 1.8 : 1.2}
-                            strokeDasharray={n.kind === 'inprocess' ? '5 3' : undefined} />
+                            strokeDasharray={n.kind === 'inprocess' || n.kind === 'component' || n.kind === 'research' ? '5 3' : undefined} />
                       <rect width="3.5" height={NODE_H} rx="2" fill={col} />
                       <text x="14" y="23" fill={C.text} style={{ fontSize: 12.5, fontWeight: 600 }}>
                         {n.label.length > 17 ? n.label.slice(0, 16) + '…' : n.label}
                       </text>
                       <text x="14" y="41" fill={C.dim}
                             style={{ fontSize: 10, fontFamily: 'ui-monospace, monospace' }}>
-                        {n.kind === 'inprocess'
+                        {n.kind === 'component'
+                          ? `in ${(n.host ?? '').replace('stock-prediction-', '') || 'process'}`
+                          : n.kind === 'research'
+                          ? n.statusText ?? 'shadow research'
+                          : n.kind === 'inprocess'
                           ? `w ${n.weight ?? '—'}${n.lift != null
                               ? ` · ${n.lift >= 0 ? '+' : ''}${(n.lift * 100).toFixed(1)}pp` : ''}`
                           : n.running === false ? 'STOPPED'
@@ -833,21 +841,47 @@ const SystemMap: React.FC = () => {
                 </div>
               )}
               {faults.map((f: any, i: number) => (
-                <div key={i} style={{
-                  borderLeft: `3px solid ${f.severity === 'critical' ? C.down : C.warn}`,
-                  background: 'rgba(255,255,255,.02)', padding: '9px 11px',
-                  borderRadius: 6, marginBottom: 7,
-                }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 3 }}>
-                    <span style={{ fontSize: 11, fontWeight: 700, color: f.severity === 'critical' ? C.down : C.warn,
-                                   fontFamily: 'ui-monospace, monospace', letterSpacing: '.08em' }}>
-                      {f.severity.toUpperCase()}
-                    </span>
-                    <span style={{ fontSize: 10, color: C.dim, fontFamily: 'ui-monospace, monospace' }}>{f.kind}</span>
-                  </div>
-                  <div style={{ fontSize: 12.5, lineHeight: 1.45 }}>{f.message}</div>
-                </div>
+                <FaultCard key={i} f={f} />
               ))}
+            </Panel>
+
+            <Panel title="EXECUTION CHAIN">
+              {!pubFlag && <div style={{ color: C.dim, fontSize: 12 }}>reading flag…</div>}
+              {pubFlag && (
+                <>
+                  <div style={{ fontSize: 11, color: C.dim, lineHeight: 1.5, marginBottom: 10 }}>
+                    backend ensemble → ensemble-engine (MLflow gate) → risk-engine → trade-executor
+                  </div>
+                  <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <span style={{
+                      fontFamily: 'ui-monospace, monospace', fontSize: 11, fontWeight: 700,
+                      color: pubFlag.enabled ? C.ok : C.idle,
+                    }}>
+                      {pubFlag.enabled ? '● PUBLISHING' : '○ DISARMED'}
+                    </span>
+                    <button
+                      onClick={() => {
+                        const next = !pubFlag.enabled;
+                        if (next && !window.confirm(
+                          'Arm the execution chain? Decisions will reach '
+                          + 'risk-engine and, if they clear its 0.60 gate, '
+                          + 'trade-executor (paper mode). Confidence is '
+                          + 'de-saturated but measured NON-PREDICTIVE '
+                          + '(out-of-sample correlation ~0).')) return;
+                        apiService.setPublishFlag(next).then(setPubFlag).catch(() => {});
+                      }}
+                      style={{
+                        background: pubFlag.enabled ? 'rgba(251,92,125,.10)' : 'rgba(45,212,191,.12)',
+                        border: `1px solid ${pubFlag.enabled ? C.down : C.ok}`,
+                        color: pubFlag.enabled ? C.down : C.ok,
+                        borderRadius: 7, padding: '6px 13px', fontSize: 11.5,
+                        fontWeight: 600, cursor: 'pointer',
+                      }}>
+                      {pubFlag.enabled ? 'Disarm' : 'Arm'}
+                    </button>
+                  </div>
+                </>
+              )}
             </Panel>
 
             <Panel title="LOG STORE">
@@ -973,7 +1007,20 @@ const SystemMap: React.FC = () => {
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(130px,1fr))', gap: 8, marginBottom: 16 }}>
-              {selected.kind === 'inprocess' ? (
+              {selected.kind === 'research' ? (
+                <>
+                  <KV k="Runs in" v="session-runner" />
+                  <KV k="State" v={selected.running ? 'in-process' : 'host down'}
+                      c={selected.running ? C.ok : C.down} />
+                  <KV k="Shadow review" v={selected.researchEnabled ? 'enabled' : 'disabled'}
+                      c={selected.researchEnabled ? C.ok : C.idle} />
+                  {selected.providerConfigured != null && (
+                    <KV k="Fundamentals provider" v={selected.providerConfigured ? 'configured' : 'not configured'}
+                        c={selected.providerConfigured ? C.ok : C.warn} />
+                  )}
+                  <KV k="Ensemble vote" v="no · research only" c={C.dim} />
+                </>
+              ) : selected.kind === 'inprocess' ? (
                 <>
                   <KV k="Runs in" v="session-runner" />
                   <KV k="State" v={selected.running ? 'in-process' : 'host down'}
@@ -1159,6 +1206,88 @@ const panel: React.CSSProperties = {
   background: C.panel, border: `1px solid ${C.edge}`, borderRadius: 12,
   backdropFilter: 'blur(6px)',
 };
+
+/** One fault, with what to do about it.
+ *
+ *  The message alone leaves the reader to work out the remedy every time, and
+ *  it is the same short list each time — read that container's log, restart
+ *  that service, re-run the loop that consumed its slot without doing work. So
+ *  the backend ships `actions` alongside every fault and this renders them.
+ *
+ *  Criticals open expanded: something is down and the next step should be on
+ *  screen. Warnings open collapsed but say how many steps they carry, because
+ *  six warnings with four steps each is a wall of text that gets scrolled past
+ *  — which is the failure mode this panel exists to avoid.
+ */
+const FaultCard: React.FC<{ f: any }> = ({ f }) => {
+  const critical = f.severity === 'critical';
+  const actions: string[] = f.actions ?? [];
+  const [open, setOpen] = useState(critical);
+  const hue = critical ? C.down : C.warn;
+
+  return (
+    <div style={{
+      borderLeft: `3px solid ${hue}`,
+      background: 'rgba(255,255,255,.02)', padding: '9px 11px',
+      borderRadius: 6, marginBottom: 7,
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 3 }}>
+        <span style={{ fontSize: 11, fontWeight: 700, color: hue,
+                       fontFamily: 'ui-monospace, monospace', letterSpacing: '.08em' }}>
+          {f.severity.toUpperCase()}
+        </span>
+        <span style={{ fontSize: 10, color: C.dim, fontFamily: 'ui-monospace, monospace' }}>{f.kind}</span>
+      </div>
+      <div style={{ fontSize: 12.5, lineHeight: 1.45 }}>{f.message}</div>
+
+      {actions.length > 0 && (
+        <>
+          <button
+            onClick={() => setOpen(o => !o)}
+            style={{
+              marginTop: 7, background: 'transparent', border: 'none', padding: 0,
+              color: hue, cursor: 'pointer', fontSize: 11,
+              fontFamily: 'ui-monospace, monospace', letterSpacing: '.06em',
+            }}>
+            {open ? '▾' : '▸'} what to do ({actions.length})
+          </button>
+          {open && (
+            <ol style={{
+              margin: '7px 0 1px', paddingLeft: 18, display: 'flex',
+              flexDirection: 'column', gap: 5,
+            }}>
+              {actions.map((a, j) => (
+                <li key={j} style={{ fontSize: 11.5, lineHeight: 1.5, color: C.text }}>
+                  {renderAction(a)}
+                </li>
+              ))}
+            </ol>
+          )}
+        </>
+      )}
+    </div>
+  );
+};
+
+/** Set the runnable part of an action in monospace so a command or an endpoint
+ *  reads as something to copy rather than as prose. Anything that starts with a
+ *  shell verb, or an HTTP verb and a path, qualifies; everything else is left
+ *  alone rather than guessed at. */
+function renderAction(text: string): React.ReactNode {
+  const m = text.match(/((?:docker|POST|GET|npm|curl)\s+[^\n]*)$/);
+  if (!m) return text;
+  const head = text.slice(0, m.index);
+  return (
+    <>
+      {head}
+      <code style={{
+        fontFamily: 'ui-monospace, monospace', fontSize: 11,
+        background: 'rgba(56,189,248,.10)', color: C.accent,
+        padding: '1px 5px', borderRadius: 4, wordBreak: 'break-all',
+      }}>{m[1]}</code>
+    </>
+  );
+}
 
 const Panel: React.FC<{ title: string; children: React.ReactNode }> = ({ title, children }) => (
   <div style={{ ...panel, padding: 14 }}>

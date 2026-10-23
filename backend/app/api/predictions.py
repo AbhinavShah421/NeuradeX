@@ -312,7 +312,7 @@ async def get_accuracy_stats():
         async with engine.begin() as conn:
             # ── Closed trades (the evidence for win-rate / return / sharpe) ──────
             rows = (await conn.execute(text(
-                "SELECT pnl_pct, pnl_abs, outcome, trade_source "
+                "SELECT pnl_pct, pnl_abs, outcome, trade_source, created_at::date "
                 "FROM trade_records WHERE outcome IN ('WIN','LOSS') ORDER BY created_at ASC"
             ))).fetchall()
 
@@ -373,7 +373,20 @@ async def get_accuracy_stats():
             for s, d in sorted(by_source.items())
         ]
 
+        # ── Net expectancy — the objective ──────────────────────────────────
+        # Win rate below is a description of the strategy's shape, not a target.
+        # It can be lifted to any value by tightening the exit, which is why
+        # nothing is tuned against it. `expectancy` is what says whether a trade
+        # is worth taking: gross edge minus the cost of getting in and out.
+        # pnl_pct is stored as a fraction, so it is scaled to percent here.
+        from app.utils.expectancy import compute as _expectancy
+        exp = _expectancy(
+            [float(r[0]) * 100 for r in intraday_rows if r[0] is not None],
+            day_of=[r[4] for r in intraday_rows if r[0] is not None],
+        )
+
         stats = {
+            "expectancy":          exp.as_dict(),
             "accuracy_rate":       round(accuracy_rate, 4),
             "total_predictions":   total_preds,
             "correct_predictions": correct_preds,

@@ -213,7 +213,7 @@ const AIAgentPage: React.FC = () => {
                 <span style={{
                   flexShrink: 0, width: 22, height: 22, borderRadius: '50%',
                   display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700, color: '#fff',
-                  background: i < loadStep ? 'var(--nd-green)' : i === loadStep ? '#3b82f6' : 'var(--nd-text-3)',
+                  background: i < loadStep ? 'var(--nd-green)' : i === loadStep ? '#38bdf8' : 'var(--nd-text-3)',
                 }}>
                   {i < loadStep ? '✓' : i + 1}
                 </span>

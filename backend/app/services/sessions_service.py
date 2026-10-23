@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import httpx
 import os
+import time
 import uuid
 from datetime import datetime, timedelta
 
@@ -33,6 +34,7 @@ from typing import Optional
 
 from app.config import settings
 from app.utils.elk_logger import get_logger
+from app.utils.price_levels import build_levels
 from app.utils.session_store import (
     save_session, get_session, get_session_slim, delete_session,
     list_sessions, list_sessions_slim, list_running_sessions,
@@ -49,7 +51,10 @@ from app.api.backtest import (
 logger = get_logger(__name__)
 
 _TICK_SECONDS = 10         # background loop cadence (was 5 — doubled to halve runner CPU)
-SPEEDS        = (1, 2, 5, 10)
+_REPLAY_POLL_SECONDS = 1.0
+_SPEED_MIN    = 1
+_SPEED_MAX    = 120
+_next_paper_step_at: dict[str, float] = {}
 
 # ── Trade gate ────────────────────────────────────────────────────────────────
 # How selective session entries are; switchable at runtime from the dashboard.
@@ -160,7 +165,7 @@ TRADE_GATES = {
                "min_buy": 2, "need_reliable": True, "min_grade": "C", "score_min": 78,
                "desc": "Needs 2+ agents voting BUY including pattern or sentiment (the proven BUY voters), a non-bearish ensemble, and a C+ pattern. Balanced."},
     "loose":  {"label": "Loose",  "require_buy": False, "min_conf": 0.0,  "max_conf": 1.01, "override_ceiling": 1.01,
-               "min_buy": 2, "need_reliable": False, "min_grade": "D", "reliable_single": True, "score_min": 65,
+               "min_buy": 2, "need_reliable": False, "min_grade": "D", "reliable_single": True, "score_min": 30,
                "desc": "Needs 2 BUY votes OR one high-precision agent; pattern grade not enforced. Most trades — for training volume (lower win-rate)."},
 }
 _gate_cache = {"mode": "", "ts": 0.0}
@@ -341,6 +346,10 @@ class SpeedRequest(BaseModel):
     speed: int
 
 
+def _normalise_speed(speed: int) -> int:
+    return speed if _SPEED_MIN <= speed <= _SPEED_MAX else _SPEED_MIN
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _idx_for_time(all_candles: list[dict], hhmm: str) -> int:
@@ -395,6 +404,12 @@ def _detail(s: dict) -> dict:
         "candles":          candles,
         "prev_day_candles": s.get("prev_day_candles", []),
         "prev_day_date":    s.get("prev_day_date"),
+        # Prior-day / multi-day S/R for the chart to draw. DISPLAY ONLY — never
+        # read by _step or any agent; test_price_levels.py pins that boundary.
+        # Named prior_levels, not levels: agents/levels.py already produces an
+        # INTRADAY clustered map surfaced as levels_res/levels_sup, and a live
+        # veto consumes it. Keeping the names apart stops the two being confused.
+        "prior_levels":     s.get("prior_levels", {}),
         "trades_list":      s.get("trades", []),
         "position_detail":  s.get("position", {}),
         "metrics":          s.get("metrics", {}),
@@ -420,6 +435,7 @@ async def _ensemble_decision(symbol: str, candles: list[dict], capital: float, p
          "reasoning": a.reasoning, "indicators": a.indicators}
         for a in decision.agents
     ]
+
     return decision, agents
 
 
@@ -502,6 +518,66 @@ async def _persist_session_decision(session_id: str, symbol: str, decision: dict
         logger.debug("persist_session_decision failed: %s", exc)
 
 
+async def _prior_levels_for(symbol: str, as_of: str,
+                            spot: float | None = None) -> dict:
+    """Prior-day / multi-day S/R for the chart. DISPLAY ONLY.
+
+    `as_of` is the session's own date: levels are built from days strictly
+    before it, so a replay of a past day sees exactly what was knowable that
+    morning and never the day it is replaying.
+
+    Never raises — a provider failure means no lines, not a failed session.
+    """
+    from datetime import datetime as _dt, timedelta as _td
+    from app.data.providers import fetch_daily
+    try:
+        end = _dt.strptime(as_of, "%Y-%m-%d")
+        daily, _src = await fetch_daily(symbol, end - _td(days=40), end)
+        if daily:
+            return build_levels(daily[-15:], spot=spot, today=as_of)
+    except Exception:
+        logger.debug("prior levels unavailable for %s @ %s", symbol, as_of, exc_info=True)
+    return {}
+
+
+def _session_provenance(s: dict) -> dict:
+    """What data this session actually ran on.
+
+    Until 2026-08-20 none of this was persisted. `data_source` was set on the
+    in-memory session and shown in the list view, but never written to
+    session_metadata — 0 of 2,363 rows carried it — so after the fact there was
+    no way to tell whether a backtest had run on real candles or on the seeded
+    random walk `_simulate_intraday_5min` substitutes when providers return
+    nothing. Silent synthetic data in a results table can invalidate months of
+    conclusions retroactively.
+
+    `bar_interval_min` matters for the same reason: backtests run on 5-minute
+    bars for dates the own candle dataset does not cover and 1-minute bars for
+    those it does (the boundary is 2026-08-10), and results either side are not
+    comparable.
+    """
+    candles = s.get("candles") or []
+
+    interval = None
+    times = [c.get("time") for c in candles[:12] if c.get("time")]
+    mins = []
+    for t in times:
+        try:
+            hh, mm = str(t).split(":")[:2]
+            mins.append(int(hh) * 60 + int(mm))
+        except (ValueError, TypeError):
+            continue
+    gaps = [b - a for a, b in zip(mins, mins[1:]) if b > a]
+    if gaps:
+        interval = min(gaps)
+
+    return {
+        "data_source": s.get("data_source"),
+        "bar_interval_min": interval,
+        "bars_loaded": len(candles),
+    }
+
+
 async def _finalize_session(s: dict) -> None:
     """Persist session summary to session_metadata. Called once when session reaches a terminal state."""
     if s.get("_finalized"):
@@ -543,9 +619,14 @@ async def _finalize_session(s: dict) -> None:
                 "tc":      len(sells),
                 "wc":      wins,
                 "pnl_abs": metrics.get("total_pnl", 0),
-                "pnl_pct": metrics.get("total_return_pct", 0),
+                # _compute_metrics emits "total_pnl_pct"; this read the non-existent
+                # "total_return_pct" until 2026-08-19, so session_metadata.total_pnl_pct
+                # was persistently 0 while the JSONB snapshot held the true value.
+                "pnl_pct": metrics.get("total_pnl_pct", 0),
                 "candles": s.get("current_idx", 0),
-                "data":    _json.dumps(metrics),
+                # Provenance travels with the metrics so real-vs-simulated and
+                # bar size are auditable after the fact, without a schema change.
+                "data":    _json.dumps({**metrics, **_session_provenance(s)}),
             })
         logger.info("Session finalized to DB", extra={
             "log_type": "session_event", "event": "session_finalized",
@@ -566,6 +647,12 @@ _WARMUP_BARS = 30           # min bars before ANY entry — RSI(14)/SMA20 return
 _MEM_VOTE_MIN_CASES = 3     # memory BUY counts toward consensus only with this many
                             # similar cases behind it (its own ensemble gate arms at 8)
 _PAPER_DROP_CANDLES = 6     # N consecutive lower closes = drop pattern (3 was triggering on normal chop)
+# Risk-based position sizing (2026-08-20). NEURADEX_RISK_SIZING=0 restores the
+# legacy 95%-of-cash formula. Registered in app/research/registry.py.
+_RISK_SIZING = os.getenv("NEURADEX_RISK_SIZING", "1").strip().lower() not in ("0", "false", "no")
+_RISK_PCT    = float(os.getenv("NEURADEX_RISK_PCT", "0.01") or 0.01)
+_MAX_POS_PCT = float(os.getenv("NEURADEX_MAX_POS_PCT", "0.95") or 0.95)
+
 _LOSS_COOLDOWN_MIN  = 10    # after a losing exit, block new entries for this many minutes
                             # (stops the system re-scalping the same chop range — the
                             #  TITAN-style 6-losing-round-trips-in-an-afternoon pattern)
@@ -598,6 +685,98 @@ def _timing_block_reason(ind: dict, candle: dict) -> str:
             f"a trend continuation (SMA5≥SMA20 & momentum>0.18%), or a momentum breakout "
             f"(momentum>0.35% & price>VWAP). Now: RSI {rsi:.0f}, momentum {mom:+.2f}%, "
             f"price {'above' if price >= vwap else 'below'} VWAP")
+
+
+_ENTRY_HOOK_KEY = "ai_engine:gated_entry_hook"
+
+
+async def _record_entry_hook(symbol: str, mode: str, published: bool, why: str,
+                             candle: dict) -> None:
+    """Leave proof that the entry hook ran, whatever it decided.
+
+    Without this, the only evidence is a log line that a PAPER entry produces —
+    and paper entries are rare enough that the hook sat unverified for days. A
+    replay or backtest entry now writes `published: false, why: not paper`, which
+    still proves the call site inside _step's entry block executes.
+    """
+    try:
+        import json as _json
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+        from app.utils.redis_client import cache_set
+        await cache_set(_ENTRY_HOOK_KEY, _json.dumps({
+            "at": _dt.now(_tz(_td(hours=5, minutes=30))).isoformat(timespec="seconds"),
+            "symbol": symbol, "mode": mode, "published": bool(published),
+            "why": why, "candle_time": candle.get("time"),
+            "price": candle.get("close"),
+        }), expire=7 * 24 * 3600)
+    except Exception:
+        logger.debug("entry-hook heartbeat write failed", exc_info=True)
+
+
+async def _publish_entry_to_executor(s: dict, symbol: str, decision, candle: dict,
+                                     ind: dict) -> bool:
+    """Send a paper session's ACTUAL entry to the executor chain.
+
+    Before 2026-09-15 the chain was fed from EnsembleEngine.decide(), which runs
+    BEFORE the session gate. Every per-minute ensemble call reached risk-engine —
+    537 raw decisions from 6 symbols that day — and risk-engine approves on
+    confidence alone. The executor bought 8 times, and at each of those exact
+    minutes the session gate had refused the same symbol as a counter-trend
+    falling knife; 6 of 7 closed trades hit their stop (Rs -587). Over its first
+    12 closed trades that route won 25% and lost Rs 746.
+
+    Now the executor receives only what a session really entered: after the
+    co-signer check, trend filter, validator, late-entry cutoff, daily loss
+    breaker and cash check. Both routes trade the same decisions.
+
+    The call sits inside _step's entry block, not in a helper the live path could
+    bypass: an earlier post-gate hook in _ensemble_decision published nothing
+    because the paper path of the time never called it.
+
+    Every call records a heartbeat (see _record_entry_hook) so that "the hook ran"
+    is answerable from Redis rather than by grepping for a log line that only a
+    paper entry can produce.
+
+    Best-effort: a broker problem must never break the session that produced it.
+    """
+    mode = (s.get("mode") or "").lower()
+    if mode != "paper":
+        await _record_entry_hook(symbol, mode, False, f"not paper ({mode or 'unset'})", candle)
+        return False
+    if decision is None:
+        await _record_entry_hook(symbol, mode, False, "no ensemble decision this bar", candle)
+        return False
+    try:
+        from types import SimpleNamespace
+        from app.utils.decision_publisher import publish_decision
+        # The gate can enter on score while the ensemble's own action was HOLD,
+        # and risk-engine skips anything that is not BUY — so the message says
+        # BUY. Confidence, agreement and votes stay the ensemble's real numbers.
+        entry = SimpleNamespace(
+            action="BUY",
+            confidence=float(getattr(decision, "confidence", 0.0) or 0.0),
+            agent_agreement=float(getattr(decision, "agent_agreement", 0.0) or 0.0),
+            agents=list(getattr(decision, "agents", []) or []),
+        )
+        sent = await publish_decision(entry, symbol, {
+            "price": candle.get("close", 0.0),
+            "atr": (ind or {}).get("atr", 0.0),
+        })
+        if sent:
+            logger.info(
+                "Published gated paper entry to the executor chain: %s @ %s",
+                symbol, candle.get("close"),
+                extra={"log_type": "ai_engine", "event": "gated_entry_published",
+                       "symbol": symbol, "price": candle.get("close"),
+                       "confidence": entry.confidence},
+            )
+        await _record_entry_hook(symbol, mode, bool(sent), "" if sent else
+                                 "publisher disabled or broker unreachable", candle)
+        return bool(sent)
+    except Exception:
+        logger.warning("gated entry publish failed for %s", symbol, exc_info=True)
+        await _record_entry_hook(symbol, mode, False, "publish raised", candle)
+        return False
 
 
 async def _step(s: dict, window: list[dict], force_close: bool) -> None:
@@ -639,6 +818,7 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
     agents = s.get("agents", [])
     conf   = 0.6
     reason = ""
+    decision = None     # the ensemble's verdict this bar; None on a forced exit
     if not (force_close and pos_status == "LONG"):
         decision, agents = await _ensemble_decision(symbol, window, s["capital"], pos_status,
                                                       s.get("mode", "paper"), date=s.get("date"))
@@ -657,7 +837,15 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
     elif pos_status == "NONE":
         # Entry is governed by the selected trade gate (strict / gentle / loose).
         gate_mode = await get_trade_gate()
-        gate = TRADE_GATES[gate_mode]
+        # Runtime overrides from the control page layer over the shipped preset.
+        # Merged (not replaced) so an override only has to name the one field it
+        # changes, and a preset gaining a new field keeps its shipped value.
+        gate = dict(TRADE_GATES[gate_mode])
+        try:
+            from app.services.controls import gate_overrides
+            gate.update(await gate_overrides(gate_mode))
+        except Exception:
+            logger.debug("gate overrides unavailable; using shipped preset", exc_info=True)
         blocked: list[str] = []
         # Genuine BUY support: which agents independently voted BUY, and whether
         # any of them is a high-precision agent (sentiment/pattern/memory/gbm).
@@ -809,7 +997,10 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         if has_reliable_buy:
             score += 10
         else:
-            blocked.append("no proven BUY voter (gbm/meanrev/memory/day_structure) "
+            # day_structure is deliberately NOT in this list: it is excluded from
+            # buy_voters above, so it can never co-sign. Naming it here described a
+            # path the code does not have.
+            blocked.append("no proven BUY voter (gbm/meanrev/memory) "
                            "co-signed (-10)")
         rel_dissent = max((float(a.get("confidence") or 0) for a in agents
                            if a.get("action") == "SELL"
@@ -1062,6 +1253,38 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
                                    f"(model P(up) {psig.get('p_up')}, memory WR {psig.get('memory_winrate')})")
             except Exception as exc:
                 logger.debug("pattern gate skipped: %s", exc)
+        # ── Final validator ───────────────────────────────────────────────────
+        # Runs LAST, after every strategy veto above, and can only block. The
+        # chain above encodes opinions about which setups are worth taking; this
+        # verifies the invariants that must hold whatever the strategy thinks —
+        # the price is real, the bar actually traded, the decision genuinely
+        # satisfies the gate it claims to have cleared. It exists because a
+        # zero-priced trade and a zero-volume forming candle have both reached
+        # production here without anything erroring. See agents/validator.py.
+        if enter:
+            try:
+                from app.agents.validator import build_context, validate_entry
+                verdict = validate_entry(build_context(
+                    symbol=symbol, candle=candle, gate=gate, score=score,
+                    confidence=conf, buy_votes=buy_votes,
+                    position_status=pos_status, mode=s.get("mode", "paper"),
+                    session=s,
+                    # Raw inputs, so the validator can rebuild the score itself
+                    # rather than trusting the total this function accumulated.
+                    agents=agents, indicators=ind, ens_action=ens_action, tsig=tsig,
+                ))
+                s["last_validation"] = verdict.to_dict()
+                if not verdict.ok:
+                    enter = False
+                    blocked.append(f"validator: {verdict.as_reason()}")
+            except Exception as exc:
+                # The validator failing is not a reason to trade unchecked. It
+                # is the last thing standing between a decision and real money,
+                # so an unusable validator blocks rather than abstains.
+                logger.error("validator unavailable — blocking entry: %s", exc, exc_info=True)
+                enter = False
+                blocked.append(f"validator unavailable ({exc}) — refusing to enter unchecked")
+
         action = "BUY" if enter else "HOLD"
         if action == "BUY":
             reason = (f"Entry [score {score:.0f}/{gate.get('score_min', 78)}]: {buy_votes} agents voted BUY "
@@ -1214,12 +1437,38 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         action = "HOLD"
         reason = "Session trade complete — running for agent learning only."
 
+    # ── Daily loss breaker: block new entries once the day's limit is hit ─────
+    # Entries only. Stops, trails and square-off must keep firing after a halt —
+    # halting exits would strand open risk, the opposite of the intent.
+    # Paper only: replay/backtest must stay deterministic.
+    if action == "BUY" and (s.get("mode") or "").lower() == "paper":
+        try:
+            from app.services.risk_guard import entry_halted
+            halt_reason = await entry_halted()
+        except Exception:
+            halt_reason = None
+        if halt_reason:
+            action = "HOLD"
+            blocked.append(f"daily loss limit — {halt_reason}")
+            reason = f"Daily loss limit hit ({halt_reason}) — no new entries today."
+
     trade_executed = None
 
     if action == "BUY" and pos["status"] == "NONE":
         from app.utils.trade_costs import buy_fill
         fill = buy_fill(candle["close"])          # market buy fills above the close (slippage)
-        qty = max(1, int(s["cash"] * 0.95 / fill))
+        # Risk-based sizing: a stop-out costs ~capital*RISK_PCT regardless of how
+        # wide the stop is, so a volatile name and a quiet one cost the same.
+        # Flat 95%-of-cash sizing is why the more volatile post-2026-08-10
+        # universe (0.714% avg move vs 0.569%) enlarged rupee losses on its own.
+        # Bounded by the old formula, so this can only shrink a position.
+        if _RISK_SIZING:
+            from app.utils.position_sizing import risk_qty, stop_pct_for
+            qty = risk_qty(s.get("capital") or s["cash"], s["cash"], fill,
+                           stop_pct_for(ind.get("atr", 0.0), candle["close"]),
+                           risk_pct=_RISK_PCT, max_pos_pct=_MAX_POS_PCT)
+        else:
+            qty = max(1, int(s["cash"] * 0.95 / fill))
         cost = qty * fill
         if cost <= s["cash"]:
             s["cash"] -= cost
@@ -1235,6 +1484,13 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
                 "entry_conf": conf,
             }
             trade_executed = {"action": "BUY", "price": fill, "quantity": qty, "pnl": None, "time": candle["time"]}
+            # Mirror THIS entry to the executor chain: the position the session just
+            # opened, after every gate, the late-entry cutoff, the daily loss breaker
+            # and the cash check. Called for EVERY mode on purpose — the helper's own
+            # guard is what stops replay/backtest publishing, and routing them through
+            # it means their entries also prove this call site runs. A paper-only `if`
+            # here left the hook unobservable until a rare gated paper BUY happened.
+            await _publish_entry_to_executor(s, symbol, decision, candle, ind)
             # LLM shadow review of this entry's dossier — logged + persisted,
             # never acted on (paper/live only: replay must stay deterministic,
             # and back-filling verdicts on historical bars would be meaningless).
@@ -1414,14 +1670,14 @@ async def _advance_replay(s: dict) -> None:
     if idx >= n - 1:
         s["status"] = "done"
         return
-    steps  = max(1, int(s.get("speed", 1)))
+    steps = max(_SPEED_MIN, min(_SPEED_MAX, int(s.get("speed", 1) or 1)))
     target = min(idx + steps, n - 1)
-    for j in range(idx + 1, target + 1):
-        window = allc[: j + 1]
-        await _step(s, window, force_close=(j == n - 1))
-        s["current_idx"] = j
-        await asyncio.sleep(0.05)  # 50ms yield between replay steps — lets HTTP requests through
-    if s["current_idx"] >= n - 1:
+    for candle_idx in range(idx + 1, target + 1):
+        window = allc[: candle_idx + 1]
+        await _step(s, window, force_close=(candle_idx == n - 1))
+        s["current_idx"] = candle_idx
+        await asyncio.sleep(0)  # let API requests run between candle decisions
+    if target >= n - 1:
         s["status"] = "done"
 
 
@@ -1690,34 +1946,64 @@ async def session_runner_loop() -> None:
             # Redis I/O per tick under heavy backtest load.
             running = await list_running_sessions()
 
+            # Daily loss breaker — evaluated here so it runs the whole trading
+            # day (autopilot's own limit stops being checked after ~12:30) and
+            # sees open positions (autopilot's counts only closed sessions).
+            # Self-throttling to ~30s; cheap when nothing is running.
+            try:
+                from app.services.risk_guard import evaluate_and_flag
+                await evaluate_and_flag()
+            except Exception:
+                logger.debug("risk guard evaluation skipped", exc_info=True)
+
             if not running:
+                _next_paper_step_at.clear()
                 _idle_ticks += 1
                 sleep_secs = min(30, _TICK_SECONDS * (1 + _idle_ticks // 3))
                 await asyncio.sleep(sleep_secs)
                 continue
 
             _idle_ticks = 0
+            replay_ids: set[str] = set()
+            active_ids = {item["id"] for item in running}
+            for session_id in _next_paper_step_at.keys() - active_ids:
+                _next_paper_step_at.pop(session_id, None)
+
             for s_slim in running:
                 # Stale-check only needs created_at — slim blob has it.
                 if await _auto_stop_stale(s_slim):
                     continue
+                session_id = s_slim["id"]
+                is_replay = s_slim.get("mode") in ("replay", "backtest")
+                if is_replay:
+                    replay_ids.add(session_id)
+                elif time.monotonic() < _next_paper_step_at.get(session_id, 0.0):
+                    continue
                 # Replay/backtest sessions need all_candles to advance; load the
                 # full blob (slim + candles) only for the session being processed.
                 # Paper sessions don't use all_candles so the slim blob suffices.
-                if s_slim.get("mode") in ("replay", "backtest"):
-                    s = await get_session(s_slim["id"])
+                if is_replay:
+                    s = await get_session(session_id)
                     if not s:
                         continue
                 else:
                     s = s_slim
+                step_started = time.monotonic()
                 await _advance(s)
+                step_finished = time.monotonic()
+                if not is_replay:
+                    _next_paper_step_at[session_id] = max(
+                        step_started + _TICK_SECONDS, step_finished)
                 await asyncio.sleep(0)  # yield between sessions
+
+            sleep_secs = _REPLAY_POLL_SECONDS if replay_ids else _TICK_SECONDS
+            await asyncio.sleep(sleep_secs)
 
         except asyncio.CancelledError:
             break
         except Exception as exc:
             logger.error("session runner error: %s", exc)
-        await asyncio.sleep(_TICK_SECONDS)
+            await asyncio.sleep(_TICK_SECONDS)
 
 
 async def _already_backtested(symbol: str, date: str) -> bool:
@@ -1737,7 +2023,7 @@ async def _already_backtested(symbol: str, date: str) -> bool:
 async def start_session(req: StartSessionRequest):
     symbol = req.symbol.upper()
     mode   = req.mode if req.mode in ("replay", "paper", "backtest") else "replay"
-    speed  = req.speed if req.speed in SPEEDS else 1
+    speed  = _normalise_speed(req.speed)
     model  = req.model or getattr(settings, "LLM_MODEL", "llama3.2")
     sid    = uuid.uuid4().hex[:12]
     now    = datetime.now(IST)
@@ -1772,6 +2058,10 @@ async def start_session(req: StartSessionRequest):
                                      "available after the 15:30 IST close).")
         if req_date.weekday() >= 5:
             raise HTTPException(400, "Selected date is a weekend. Pick a weekday.")
+        from app.utils.market_calendar import holiday_name
+        if holiday_name(req_date):
+            raise HTTPException(400, f"NSE was closed on {req_date:%d %b %Y} "
+                                     f"({holiday_name(req_date)}). Pick a trading day.")
 
         all_candles, candle_src = await _fetch_full_day_candles(symbol, req.date)
         if not all_candles:
@@ -1792,6 +2082,11 @@ async def start_session(req: StartSessionRequest):
             "date": req.date, "all_candles": all_candles, "current_idx": start_idx,
             "prev_day_candles": prev_day, "prev_day_date": prev_date,
             "current_time": all_candles[start_idx]["time"], "data_source": candle_src,
+            # Levels as of the replayed date — days strictly before it, so a
+            # replay never sees a level derived from the day it is replaying.
+            "prior_levels": await _prior_levels_for(
+                symbol, as_of=req.date,
+                spot=all_candles[start_idx].get("close")),
         })
         # Initial step is handled by the background session_runner_loop within 2 s.
         # Running it here would block the HTTP response for 10–30 s (LLM ensemble).
@@ -1802,15 +2097,35 @@ async def start_session(req: StartSessionRequest):
         mstatus = _market_status_label()
         if mstatus == "weekend":
             raise HTTPException(400, "Market is closed on weekends.")
+        if mstatus == "holiday":
+            # A definitive refusal. Before the calendar existed this fell through to
+            # the candle fetch and came back as a 503 "Retry shortly", which the
+            # autopilot retried every minute for the whole holiday.
+            from app.utils.market_calendar import holiday_name, next_trading_day
+            _d = _today_str()
+            raise HTTPException(400, f"NSE is closed today for {holiday_name(_d)}. "
+                                     f"Trading resumes {next_trading_day(_d):%a %d %b}.")
         if mstatus == "pre_market":
             raise HTTPException(400, "Market hasn't opened yet (NSE opens 09:15 IST).")
         cur = _current_candle_time()
         candles, src = await _fetch_candles_for_start(symbol, cur)
         if not candles:
             raise HTTPException(503, f"No live candle data for {symbol} yet. Retry shortly.")
+        # Prior-day / multi-day levels for the chart. One fetch_daily call covers
+        # the whole window, so this costs one request rather than one per day.
+        #
+        # prev_day_candles stays empty on purpose: TradingChart merges them into
+        # the main series and recomputes VWAP/SMA/BB over the merge, so loading
+        # them would silently turn the displayed VWAP into a two-day VWAP and it
+        # would stop matching the decision text that says "price above VWAP".
+        # Levels are drawn as horizontal lines instead, which cannot distort any
+        # indicator.
+        prior_levels = await _prior_levels_for(
+            symbol, as_of=_today_str(), spot=candles[-1].get("close"))
+
         base.update({
             "date": _today_str(), "candles": candles, "prev_day_candles": [],
-            "current_time": cur, "data_source": src,
+            "current_time": cur, "data_source": src, "prior_levels": prior_levels,
         })
         # NOTE: paper sessions no longer arm dataset capture. Recording which stocks
         # to capture into the 1-second dataset is now a dedicated, explicit feature
@@ -1930,7 +2245,7 @@ async def set_speed(session_id: str, req: SpeedRequest):
     s = await get_session(session_id)
     if not s:
         raise HTTPException(404, "Session not found.")
-    s["speed"] = req.speed if req.speed in SPEEDS else 1
+    s["speed"] = _normalise_speed(req.speed)
     await save_session(s)
     return {"status": "success", "data": _summary(s)}
 

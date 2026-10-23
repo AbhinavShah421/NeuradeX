@@ -423,13 +423,10 @@ const PortfolioPage: React.FC = () => {
           </div>
 
           {/* Tab strip */}
-          <div className="nd-pill-tabs">
+          <div className="nd-tabs is-wide" role="tablist" aria-label="Portfolio section">
             {TABS.map(t => (
-              <button key={t.id} onClick={() => setActiveTab(t.id)} className="nd-pill-tab"
-                style={{
-                  background: activeTab === t.id ? 'var(--nd-green)' : 'transparent',
-                  color: activeTab === t.id ? '#fff' : 'var(--nd-text-2)',
-                }}>
+              <button key={t.id} role="tab" aria-selected={activeTab === t.id}
+                onClick={() => setActiveTab(t.id)}>
                 <span className="material-icons" style={{ fontSize: 15 }}>{t.icon}</span>
                 {t.label}
               </button>

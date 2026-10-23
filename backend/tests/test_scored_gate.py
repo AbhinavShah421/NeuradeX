@@ -75,7 +75,8 @@ THIN_NET = [  # 2 BUY - 1 non-structural SELL = net 1 → consensus 15
 ]
 
 
-def _run(monkeypatch, agents, ind, ens_action="HOLD", conf=0.60, veto="", bars=30):
+def _run(monkeypatch, agents, ind, ens_action="HOLD", conf=0.60, veto="", bars=30,
+         legacy_filter=False):
     decision = SimpleNamespace(action=ens_action, confidence=conf, reasoning="test",
                                veto=veto, vote_mode="directional",
                                prediction_id="pid-test")
@@ -92,6 +93,13 @@ def _run(monkeypatch, agents, ind, ens_action="HOLD", conf=0.60, veto="", bars=3
     monkeypatch.setattr(svc, "get_trade_gate", fake_gate)
     monkeypatch.setattr(svc, "_ensemble_decision", fake_ensemble)
     monkeypatch.setattr(svc, "_symbol_throttle_reason", fake_throttle)
+    # Pin the direction-gate mode explicitly. _TREND_FILTER_LEGACY is read
+    # from the environment at import, so without this the suite's result
+    # depends on how the host happens to be deployed: it went red on
+    # 2026-08-20 when the live filter was rolled back to legacy, which was a
+    # test-isolation bug rather than a behaviour regression. Most scenarios
+    # here exercise the inverted branch's scoring, hence the default.
+    monkeypatch.setattr(svc, "_TREND_FILTER_LEGACY", legacy_filter)
     monkeypatch.setattr(svc, "_intraday_indicators", lambda w, i: dict(ind))
     monkeypatch.setattr(svc, "_tech_signal", lambda *a, **k: 0)
     # Pattern-quality gate: raise inside its try → skipped (not under test here).
@@ -182,10 +190,9 @@ def test_one_trend_leg_each_way_still_enters(monkeypatch):
 def test_legacy_trend_filter_restores_old_behaviour(monkeypatch):
     # One env var must put the pre-inversion gate back, because this changes
     # live entry direction and has to be reversible in a single step.
-    monkeypatch.setattr(svc, "_TREND_FILTER_LEGACY", True)
-    s = _run(monkeypatch, BUY3, STRENGTH_IND)
+    s = _run(monkeypatch, BUY3, STRENGTH_IND, legacy_filter=True)
     assert s["position"]["status"] == "LONG", "legacy mode should buy strength again"
-    s2 = _run(monkeypatch, BUY3, WEAK_IND)
+    s2 = _run(monkeypatch, BUY3, WEAK_IND, legacy_filter=True)
     assert s2["position"]["status"] == "NONE"
     assert "falling knife" in s2["last_decision"]["reason"]
 

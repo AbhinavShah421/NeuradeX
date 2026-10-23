@@ -1,15 +1,18 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../stores/appStore';
 import apiService from '../services/api';
-import TradingChart, { TradeMarker, ChartCandle } from './TradingChart';
+import TradingChart, { TradeMarker, ChartCandle, PriorLevels } from './TradingChart';
 import StockPicker from './StockPicker';
+import SessionPostmortem from './SessionPostmortem';
 import { getErrorMessage } from '../utils/errors';
 
 // ── Session data shapes (server-side trading session state) ───────────────────
+const REPLAY_SPEEDS = [1, 2, 5, 10, 30, 60] as const;
+
 interface SessionSummary {
   id: string;
   status: string;
-  mode?: 'replay' | 'paper';
+  mode?: 'replay' | 'backtest' | 'paper';
   symbol: string;
   date?: string;
   currentTime?: string;
@@ -48,6 +51,7 @@ interface SessionTrade {
 interface SessionDetail {
   id: string;
   status: string;
+  mode?: 'replay' | 'backtest' | 'paper';
   symbol: string;
   date?: string;
   currentTime?: string;
@@ -64,6 +68,7 @@ interface SessionDetail {
   tradesList?: SessionTrade[];
   candles?: ChartCandle[];
   prevDayCandles?: ChartCandle[];
+  priorLevels?: PriorLevels;
 }
 
 /**
@@ -184,9 +189,10 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
     const cached = detailCache.current.get(selectedId);
     if (cached) setDetail(cached);
     loadDetail(selectedId);
-    const t = setInterval(() => { if (selectedRef.current) loadDetail(selectedRef.current); }, 2500);
+    const t = setInterval(() => { if (selectedRef.current) loadDetail(selectedRef.current); },
+      detail?.mode === 'paper' ? 2500 : 1000);
     return () => clearInterval(t);
-  }, [selectedId, loadDetail]);
+  }, [selectedId, loadDetail, detail?.mode, detail?.speed]);
 
   const startSession = async () => {
     setStarting(true); setError(null);
@@ -263,7 +269,7 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
           <Field label="Capital (₹)"><input className="nd-input" type="number" inputMode="numeric" value={capital} onChange={e => setCapital(e.target.value)} style={fieldStyle} /></Field>
           <Field label="Speed">
             <select className="nd-select" value={speed} onChange={e => setSpeed(parseInt(e.target.value))} style={fieldStyle}>
-              {[1, 2, 5, 10].map(s => <option key={s} value={s}>{s}×</option>)}
+              {REPLAY_SPEEDS.map(s => <option key={s} value={s}>{s}×</option>)}
             </select>
           </Field>
           <Field label="Entry timing">
@@ -331,7 +337,7 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
               {detail.dataSource && <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 6, background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', color: 'var(--nd-text-3)' }}>{detail.dataSource}</span>}
             </div>
             <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-              {detail.status === 'running' && [1, 2, 5, 10].map(sp => (
+              {detail.status === 'running' && REPLAY_SPEEDS.map(sp => (
                 <button key={sp} onClick={() => changeSpeed(detail.id, sp)}
                   style={{ ...btnGhost, background: detail.speed === sp ? 'var(--nd-green)' : 'transparent', color: detail.speed === sp ? '#fff' : 'var(--nd-text-2)', borderColor: detail.speed === sp ? 'var(--nd-green)' : 'var(--nd-border)' }}>{sp}×</button>
               ))}
@@ -347,7 +353,7 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
           </div>
 
           <div style={{ border: '1px solid var(--nd-border)', borderRadius: 10, overflow: 'hidden', marginBottom: 12 }}>
-            <TradingChart candles={detail.candles ?? []} prevDayCandles={detail.prevDayCandles ?? []} markers={markers} height={400} isDark={isDark} />
+            <TradingChart candles={detail.candles ?? []} symbol={detail.symbol} date={detail.date} prevDayCandles={detail.prevDayCandles ?? []} priorLevels={detail.priorLevels} markers={markers} height={400} isDark={isDark} />
           </div>
 
           {/* ── Live AI decision — why it is / isn't trading right now ── */}
@@ -361,7 +367,7 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
                   <span className="material-icons" style={{ fontSize: 16, color: 'var(--nd-accent)' }}>psychology</span>
                   <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--nd-text-1)' }}>Live AI Decision</span>
                   {(detail.timingMode === 'aggressive' || d.timingMode === 'aggressive') && (
-                    <span style={{ fontSize: 9.5, fontWeight: 700, padding: '1px 6px', borderRadius: 4, background: '#f59e0b22', color: '#f59e0b', border: '1px solid #f59e0b55' }}>AGGRESSIVE</span>
+                    <span style={{ fontSize: 9.5, fontWeight: 700, padding: '1px 6px', borderRadius: 4, background: '#fbbf2422', color: '#fbbf24', border: '1px solid #fbbf2455' }}>AGGRESSIVE</span>
                   )}
                   <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 9px', borderRadius: 5, background: `${actColor(d.action)}1a`, color: actColor(d.action) }}>{d.action}</span>
                   {d.confidence != null && <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>{(d.confidence * 100).toFixed(0)}%</span>}
@@ -409,6 +415,10 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
               </div>
             </details>
           )}
+
+          {/* Post-mortem sits above the raw trade list: the trade list says
+              what was done, this says why it lost and who argued for it. */}
+          <SessionPostmortem sessionId={detail.id} />
 
           {(detail.tradesList ?? []).length > 0 && (
             <div style={{ overflowX: 'auto' }}>

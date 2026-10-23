@@ -79,6 +79,38 @@ async def set_paper_trading_config(req: PaperConfigRequest, user: dict = Depends
     return await service.set_paper_trading_config(req)
 
 
+@router.get("/agent-culpability")
+async def agent_culpability(force: bool = False):
+    """Which agents systematically push BUY into losers, across the whole
+    counterfactual corpus. Measured on session_decisions (executed AND
+    rejected) so the entry gate cannot bias the ranking, base-rate corrected,
+    and day-clustered. See app.services.session_postmortem."""
+    from app.services.session_postmortem import agent_culpability_baseline
+    return await agent_culpability_baseline(force=force)
+
+
+@router.get("/trade-postmortem/{trade_id}")
+async def trade_postmortem(trade_id: str):
+    """Why one trade ended the way it did: the setup and indicators at entry,
+    every agent's vote with its own stated reasoning, the price path between
+    entry and exit (how far it went each way), and the exit that booked it."""
+    from app.services.session_postmortem import trade_postmortem as _tpm
+    return await _tpm(trade_id)
+
+
+@router.get("/{session_id}/postmortem")
+async def session_postmortem(session_id: str, narrative: bool = False,
+                             force_narrative: bool = False):
+    """Why this session's trades lost, and what the agents voted at each entry.
+
+    `narrative=true` adds an LLM write-up of the computed facts (cached 7 days;
+    `force_narrative=true` regenerates). It is off by default because it costs
+    an 8B call and the report is complete without it — the model narrates, it
+    does not judge."""
+    from app.services.session_postmortem import session_postmortem as _pm
+    return await _pm(session_id, narrative=narrative, force_narrative=force_narrative)
+
+
 @router.get("/{session_id}")
 async def get_one_session(session_id: str):
     return await service.get_one_session(session_id)

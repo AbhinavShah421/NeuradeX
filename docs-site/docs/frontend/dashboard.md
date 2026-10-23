@@ -8,7 +8,30 @@ sidebar_label: Dashboard
 
 **File:** `frontend/src/pages/Dashboard.tsx`
 
-The main landing page after login. Shows an AI-curated watchlist and a paginated directory of all stocks.
+The main landing page after login.
+
+## Layout
+
+The Dashboard is for **what the system did** — readings, not switches. Four stat
+tiles (net expectancy, win rate, payoff ratio, daily Sharpe) sit above a tab
+strip, because "is this making money" stays relevant whichever tab you are on
+and costs one compact row. Everything else is behind three tabs, each answering
+one question:
+
+| tab | shows |
+|---|---|
+| **Live** | performance/regime strip, running sessions with open positions |
+| **Learning** | equity curve, pattern model, AI scan accuracy |
+| **Stocks** | AI watchlist and the full NSE directory |
+
+The chosen tab survives a reload via `sessionStorage`.
+
+:::note Controls moved out
+Autopilot, the trade gate and the delivery autopilot used to live here. They
+moved to [Trading Controls](../ai-engine/trading-controls.md) on 2026-09-09:
+they are settings, and a page you skim is a bad place to keep switches that
+change live trading when mis-clicked.
+:::
 
 ## API Calls
 

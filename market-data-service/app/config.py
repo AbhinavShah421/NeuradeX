@@ -13,12 +13,6 @@ class Settings(BaseSettings):
     POSTGRES_DB: str = "stock_prediction_db"
     POSTGRES_URL: str = ""
 
-    MONGODB_HOST: str = "mongodb"
-    MONGODB_PORT: int = 27017
-    MONGODB_USER: str = "stock_admin"
-    MONGODB_PASSWORD: str = "stock_password"
-    MONGODB_DB: str = "stock_prediction"
-    MONGODB_URL: str = ""
 
     REDIS_HOST: str = "redis"
     REDIS_PORT: int = 6379
@@ -50,11 +44,6 @@ class Settings(BaseSettings):
             self.POSTGRES_URL = (
                 f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
                 f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
-            )
-        if not self.MONGODB_URL:
-            self.MONGODB_URL = (
-                f"mongodb://{self.MONGODB_USER}:{self.MONGODB_PASSWORD}"
-                f"@{self.MONGODB_HOST}:{self.MONGODB_PORT}/{self.MONGODB_DB}?authSource=admin"
             )
         if not self.REDIS_URL:
             auth = f":{self.REDIS_PASSWORD}@" if self.REDIS_PASSWORD else ""

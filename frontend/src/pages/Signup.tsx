@@ -17,9 +17,9 @@ function extractApiError(err: unknown, fallback: string): string {
 }
 
 const BROKERS: BrokerInfo[] = [
-  { id: 'groww',    name: 'Groww',     logo: 'G', color: '#00b386', available: true,  tagline: 'NSE · BSE · F&O' },
+  { id: 'groww',    name: 'Groww',     logo: 'G', color: '#2dd4bf', available: true,  tagline: 'NSE · BSE · F&O' },
   { id: 'zerodha',  name: 'Zerodha',   logo: 'Z', color: '#387ed1', available: false, tagline: 'Coming Soon' },
-  { id: 'angelone', name: 'Angel One', logo: 'A', color: '#e74c3c', available: false, tagline: 'Coming Soon' },
+  { id: 'angelone', name: 'Angel One', logo: 'A', color: '#fb5c7d', available: false, tagline: 'Coming Soon' },
   { id: 'upstox',   name: 'Upstox',    logo: 'U', color: '#7c3aed', available: false, tagline: 'Coming Soon' },
 ];
 
@@ -292,7 +292,7 @@ const Signup: React.FC = () => {
 
                 {error && <ErrorBox message={error} />}
 
-                <button type="submit" disabled={loading} style={submitBtnStyle(loading, '#00b386')}>
+                <button type="submit" disabled={loading} style={submitBtnStyle(loading, '#2dd4bf')}>
                   {loading ? <Spinner /> : <><span className="material-icons" style={{ fontSize: 18 }}>send</span>Send Verification Code</>}
                 </button>
               </form>
@@ -327,7 +327,7 @@ const Signup: React.FC = () => {
 
                 {error && <ErrorBox message={error} />}
 
-                <button type="submit" disabled={loading} style={submitBtnStyle(loading, '#00b386')}>
+                <button type="submit" disabled={loading} style={submitBtnStyle(loading, '#2dd4bf')}>
                   {loading ? <Spinner /> : <><span className="material-icons" style={{ fontSize: 18 }}>check_circle</span>Verify Code</>}
                 </button>
 

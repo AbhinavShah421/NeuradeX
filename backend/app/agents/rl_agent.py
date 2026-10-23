@@ -115,11 +115,10 @@ class RLAgent(BaseAgent):
         state = self.extract_state(candles)
         qv    = q[state]
 
-        # Only explore (random action) during historical replay training runs.
-        # In paper/live modes the RL agent always exploits its learned Q-table —
-        # random trades in a real account are noise, not learning.
-        eff_epsilon = EPSILON if context.get("mode") == "replay" else 0.0
-        if random.random() < eff_epsilon:
+        # Exploration is opt-in even in replay; ordinary replay and live decisions
+        # should be reproducible and use the learned policy only.
+        explore = context.get("mode") == "replay" and context.get("explore") is True
+        if explore and random.random() < EPSILON:
             ai = random.randint(0, N_ACTIONS - 1)
             src = "explore"
         else:

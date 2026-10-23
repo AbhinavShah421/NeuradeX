@@ -555,3 +555,34 @@ async def llm_rejection_review_run(day: str | None = None, limit: int = 40):
     """Run the rejection review now (normally nightly at 04:00 IST)."""
     from app.services.llm_rejection_review import review_rejections
     return {"status": "success", "data": await review_rejections(day, limit)}
+
+
+# ── Runtime control plane ─────────────────────────────────────────────────────
+# Every gate and ensemble knob, with its shipped default, its bounds, where it
+# is read, and the evidence for anything already measured. See
+# app/services/controls.py for why bounds and evidence are server-side.
+
+@router.get("/controls")
+async def list_controls():
+    from app.services.controls import snapshot
+    return await snapshot()
+
+
+@router.post("/controls/{control_id}")
+async def set_control(control_id: str, payload: dict):
+    from app.services.controls import set_value, snapshot
+    ok, err = await set_value(control_id, payload.get("value"))
+    if not ok:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=err)
+    return await snapshot()
+
+
+@router.post("/controls/{control_id}/reset")
+async def reset_control(control_id: str):
+    from app.services.controls import reset, snapshot
+    ok, err = await reset(None if control_id == "all" else control_id)
+    if not ok:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=err)
+    return await snapshot()

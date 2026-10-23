@@ -473,6 +473,26 @@ class ApiService {
     const response = await this.api.get('/api/mutual-funds/all', { params: { q, page, limit }, timeout: 60000 });
     return response.data;
   }
+  async mfParseCas(file: File, password: string): Promise<ApiResponse<any>> {
+    const form = new FormData();
+    form.append('file', file);
+    form.append('password', password);
+    // This instance defaults every request to Content-Type: application/json,
+    // which for a FormData body makes axios JSON-encode it instead of sending
+    // multipart (see transformRequest's hasJSONContentType branch). Overriding
+    // it here to multipart/form-data avoids that; axios still lets the
+    // browser fill in the real boundary since it detects the FormData body.
+    const response = await this.api.post('/api/mutual-funds/cas/parse', form, {
+      headers: { 'Content-Type': 'multipart/form-data' }, timeout: 60000,
+    });
+    return response.data;
+  }
+  async mfImportCas(rows: { schemeCode: number; units?: number | null; invested?: number | null }[]): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/mutual-funds/cas/import',
+      rows.map(r => ({ scheme_code: r.schemeCode, units: r.units, invested: r.invested })),
+      { timeout: 40000 });
+    return response.data;
+  }
 
   async getAlerts(): Promise<ApiResponse<any>> {
     try {
@@ -666,9 +686,23 @@ class ApiService {
     }
   }
 
-  async getIntradayCandles(symbol: string, date: string): Promise<ApiResponse<any>> {
+  async getPriorLevels(symbol: string, date: string): Promise<ApiResponse<any>> {
     try {
-      const response = await this.api.get(`/api/backtest/intraday-candles/${symbol}`, { params: { date } });
+      const response = await this.api.get(`/api/backtest/levels/${symbol}`, { params: { date } });
+      return response.data;
+    } catch {
+      return { status: 'error', data: {} } as any;   // no lines is a fine outcome
+    }
+  }
+
+  async getIntradayCandles(symbol: string, date: string, realOnly = false,
+                           interval = 5): Promise<ApiResponse<any>> {
+    try {
+      // real_only=true makes the endpoint 422 instead of returning simulated
+      // candles — used when loading scroll-back history, so synthetic bars can
+      // never be prepended onto a chart of real trading.
+      const response = await this.api.get(`/api/backtest/intraday-candles/${symbol}`,
+        { params: { date, real_only: realOnly, interval } });
       return response.data;
     } catch (error) {
       console.error('Error fetching intraday candles:', error);
@@ -1078,6 +1112,47 @@ class ApiService {
     return response.data;
   }
 
+  /** Why this session's trades lost, and what the agents voted at each entry.
+   *  `narrative` adds an LLM write-up of the computed facts and costs an 8B
+   *  call, so the UI loads the facts first and asks for prose on demand. */
+  async sessionPostmortem(id: string, narrative = false): Promise<any> {
+    const response = await this.api.get(`/api/sessions/${id}/postmortem`,
+      { params: narrative ? { narrative: true } : {} });
+    return response.data;
+  }
+
+  /** Why ONE trade ended the way it did: setup and indicators at entry, every
+   *  agent's vote with its stated reasoning, the price path between entry and
+   *  exit, and the exit that booked it. */
+  async tradePostmortem(tradeId: string): Promise<any> {
+    const response = await this.api.get(`/api/sessions/trade-postmortem/${tradeId}`);
+    return response.data;
+  }
+
+  /** Every gate and ensemble knob, with defaults, bounds and evidence. */
+  async getControls(): Promise<any> {
+    const response = await this.api.get('/api/ai-engine/controls');
+    return response.data;
+  }
+
+  /** Bounds are enforced server-side; a rejection comes back as a 400. */
+  async setControl(id: string, value: any): Promise<any> {
+    const response = await this.api.post(`/api/ai-engine/controls/${id}`, { value });
+    return response.data;
+  }
+
+  /** Pass "all" to clear every override. */
+  async resetControl(id: string): Promise<any> {
+    const response = await this.api.post(`/api/ai-engine/controls/${id}/reset`);
+    return response.data;
+  }
+
+  /** Corpus-wide per-agent BUY-lift. Not session-scoped. */
+  async agentCulpability(): Promise<any> {
+    const response = await this.api.get('/api/sessions/agent-culpability');
+    return response.data;
+  }
+
   async sessionStop(id: string): Promise<ApiResponse<any>> {
     const response = await this.api.post(`/api/sessions/${id}/stop`);
     return response.data;
@@ -1247,6 +1322,21 @@ class ApiService {
     return r.data;
   }
 
+  /** Is the backend publishing decisions into the execution chain? */
+  async getPublishFlag(): Promise<any> {
+    const r = await this.api.get('/api/monitor/publish-flag', { timeout: 15000 });
+    return r.data;
+  }
+
+  /** Arm/disarm the execution chain at runtime. Live-behaviour switch: with
+   *  this on, decisions reach risk-engine and, if they clear its gate,
+   *  trade-executor (paper mode). */
+  async setPublishFlag(enabled: boolean): Promise<any> {
+    const r = await this.api.post('/api/monitor/publish-flag', null,
+      { params: { enabled }, timeout: 15000 });
+    return r.data;
+  }
+
   /** Absolute URL for the stop endpoint — `navigator.sendBeacon` takes a raw URL
    *  and cannot go through the axios instance, so it needs the same base the
    *  client is configured with (the app is served under /neuradex, so a bare
@@ -1404,13 +1494,21 @@ class ApiService {
     return response.data;
   }
 
+  async liveReconcile(): Promise<ApiResponse<any>> {
+    const response = await this.api.post('/api/live-trading/reconcile', {}, { timeout: 20000 });
+    return response.data;
+  }
+
   async liveSquareoff(payload: { symbol?: string } = {}): Promise<ApiResponse<any>> {
     const response = await this.api.post('/api/live-trading/squareoff', payload);
     return response.data;
   }
 
+  /** Open live positions. The endpoint reconciles against Groww first, so a
+   *  trade placed by hand in the Groww app appears here tagged
+   *  source="groww_manual". Timeout is generous because it makes a broker call. */
   async livePositions(): Promise<ApiResponse<any>> {
-    const response = await this.api.get('/api/live-trading/positions');
+    const response = await this.api.get('/api/live-trading/positions', { timeout: 20000 });
     return response.data;
   }
 

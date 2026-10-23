@@ -80,7 +80,7 @@ const GrowwStatusBadge: React.FC = () => {
 
   const isOk = gwStatus.status === 'ok';
   const isFailed = gwStatus.status === 'failed';
-  const dotColor = isOk ? '#22c55e' : isFailed ? '#ef4444' : '#eab308';
+  const dotColor = isOk ? '#34d399' : isFailed ? '#fb5c7d' : '#eab308';
   const label = isOk ? 'Groww Live' : isFailed ? 'Groww Disconnected' : 'Groww Unknown';
 
   const handleRefresh = async () => {
@@ -178,7 +178,7 @@ const GrowwStatusBadge: React.FC = () => {
               {gwStatus.hasToken ? (isOk ? `${formatTime(gwStatus.timeRemainingSeconds)} remaining` : 'Expired') : 'None'}
             </Row>
             <Row label="Key type" dark={dark}>
-              <span style={{ color: gwStatus.unattended ? '#22c55e' : '#eab308', fontWeight: 600 }}>
+              <span style={{ color: gwStatus.unattended ? '#34d399' : '#eab308', fontWeight: 600 }}>
                 {gwStatus.keyType === 'totp' ? 'TOTP · auto' : 'Approval · manual'}
               </span>
             </Row>
@@ -189,11 +189,11 @@ const GrowwStatusBadge: React.FC = () => {
             )}
             {gwStatus.failureCount > 0 && (
               <Row label="Failures" dark={dark}>
-                <span style={{ color: '#ef4444' }}>{gwStatus.failureCount}</span>
+                <span style={{ color: '#fb5c7d' }}>{gwStatus.failureCount}</span>
               </Row>
             )}
             {gwStatus.failureReason && (
-              <div style={{ fontSize: 11, color: '#ef4444', wordBreak: 'break-word', marginTop: 2 }}>
+              <div style={{ fontSize: 11, color: '#fb5c7d', wordBreak: 'break-word', marginTop: 2 }}>
                 {gwStatus.failureReason.slice(0, 160)}
               </div>
             )}
@@ -215,7 +215,7 @@ const GrowwStatusBadge: React.FC = () => {
               background: message.includes('success') || message.includes('refreshed')
                 ? (dark ? 'rgba(34,197,94,0.15)' : '#dcfce7')
                 : (dark ? 'rgba(239,68,68,0.15)' : '#fee2e2'),
-              color: message.includes('success') || message.includes('refreshed') ? '#22c55e' : '#ef4444',
+              color: message.includes('success') || message.includes('refreshed') ? '#34d399' : '#fb5c7d',
             }}>
               {message}
             </div>

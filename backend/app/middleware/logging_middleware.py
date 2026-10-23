@@ -61,10 +61,17 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         # return 400 "There was an error parsing the body".
         raw_req = b""
         req_body: Optional[dict | list | str] = None
+        # multipart/form-data carries file uploads (and here, a CAS PDF password
+        # field) — capturing it would put that password and raw PDF bytes into
+        # Elasticsearch in plaintext. Still read the body (needed below to
+        # restore the stream for the handler), just don't log its content.
+        is_multipart = request.headers.get("content-type", "").startswith("multipart/form-data")
         try:
             raw_req = await request.body()
-            if raw_req:
+            if raw_req and not is_multipart:
                 req_body = _try_parse(raw_req[:_BODY_LIMIT])
+            elif is_multipart:
+                req_body = f"<{len(raw_req)} bytes multipart/form-data, not logged>"
         except Exception:
             pass
 

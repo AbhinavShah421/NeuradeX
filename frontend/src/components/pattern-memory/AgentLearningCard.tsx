@@ -46,7 +46,7 @@ const AgentLearningCard: React.FC<AgentLearningCardProps> = ({
           { label: 'Outcomes learned', value: (learning.totals?.outcomes ?? 0).toLocaleString(), color: 'var(--nd-text-1)' },
           { label: 'Overall accuracy',
             value: `${((learning.overallAccuracy ?? 0) * 100).toFixed(1)}%`,
-            color: (learning.overallAccuracy ?? 0) >= 0.5 ? 'var(--nd-green)' : '#e74c3c' },
+            color: (learning.overallAccuracy ?? 0) >= 0.5 ? 'var(--nd-green)' : '#fb5c7d' },
           { label: 'Memory cases', value: (learning.memoryCases ?? 0).toLocaleString(), color: 'var(--nd-text-1)' },
         ].map(s => (
           <div key={s.label} style={{
@@ -75,12 +75,12 @@ const AgentLearningCard: React.FC<AgentLearningCardProps> = ({
             <div style={{
               marginBottom: 8, padding: '8px 12px',
               background: 'rgba(231,76,60,0.1)', border: '1px solid rgba(231,76,60,0.3)',
-              borderRadius: 8, fontSize: 12, color: '#e74c3c',
+              borderRadius: 8, fontSize: 12, color: '#fb5c7d',
               display: 'flex', alignItems: 'center', gap: 8,
             }}>
               <span className="material-icons" style={{ fontSize: 14, flexShrink: 0 }}>error_outline</span>
               {modelError}
-              <button onClick={() => setModelError(null)} style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: '#e74c3c', padding: 0 }}>
+              <button onClick={() => setModelError(null)} style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: '#fb5c7d', padding: 0 }}>
                 <span className="material-icons" style={{ fontSize: 14 }}>close</span>
               </button>
             </div>
@@ -124,9 +124,9 @@ const AgentLearningCard: React.FC<AgentLearningCardProps> = ({
                       }}>{pct}%</span>
                       <span style={{
                         fontSize: 10, fontWeight: 600,
-                        color: hasPinnedWeight ? 'var(--nd-orange, #f59e0b)' : 'var(--nd-text-2)',
+                        color: hasPinnedWeight ? 'var(--nd-orange, #fbbf24)' : 'var(--nd-text-2)',
                         background: 'var(--nd-surface)',
-                        border: `1px solid ${hasPinnedWeight ? 'var(--nd-orange, #f59e0b)' : 'var(--nd-border)'}`,
+                        border: `1px solid ${hasPinnedWeight ? 'var(--nd-orange, #fbbf24)' : 'var(--nd-border)'}`,
                         borderRadius: 6, padding: '2px 8px',
                         flexShrink: 0, minWidth: 48, textAlign: 'center',
                       }} title={hasPinnedWeight ? `Manual override — auto would be w${a.weightLearned ?? '—'}` : 'Learned weight'}>

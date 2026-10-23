@@ -178,3 +178,13 @@ stock-scanner ─▶ AI watchlist ─▶ autopilot paper-trades it ─▶ outcom
 See [Watchlist & Autopilot](../ai-engine/watchlist-autopilot.md) for how the
 watchlist is traded, and [Learning & Pattern Memory](../ai-engine/learning-loop.md)
 for how trade outcomes train the agents.
+
+## Analysis workers
+
+The sweep's output feeds a set of focused workers that each ask a different
+question of the same per-symbol records — sector heat, attributed gainers and
+losers, reviewed promotions, and the grading that scores whether any of it beat
+a same-day control. They are pure functions over one sweep, not additional
+sweeps.
+
+See [Scanner Workers](./scanner-workers.md).

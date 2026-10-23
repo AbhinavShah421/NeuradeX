@@ -13,7 +13,7 @@ interface ModelRow {
 }
 
 const KIND_COLOR: Record<string, string> = {
-  rule: '#64748b', data: '#0ea5e9', learned: '#a855f7', model: '#22c55e',
+  rule: '#64748b', data: '#0ea5e9', learned: '#a78bfa', model: '#34d399',
 };
 
 const AIModels: React.FC = () => {
@@ -149,7 +149,7 @@ const AIModels: React.FC = () => {
       {msg && (
         <div onClick={() => setMsg(null)} style={{ marginTop: 14, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10,
           background: msg.ok ? 'var(--nd-green-50)' : 'var(--nd-red-50)',
-          border: `1px solid ${msg.ok ? '#22c55e55' : '#ef444455'}`, borderRadius: 10, padding: '12px 16px' }}>
+          border: `1px solid ${msg.ok ? '#34d39955' : '#fb5c7d55'}`, borderRadius: 10, padding: '12px 16px' }}>
           <span className="material-icons" style={{ color: msg.ok ? 'var(--nd-green)' : 'var(--nd-red)', fontSize: 20 }}>
             {msg.ok ? 'check_circle' : 'error_outline'}
           </span>

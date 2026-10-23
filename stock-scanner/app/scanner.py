@@ -44,6 +44,20 @@ _RANKED_KEY      = "ai_engine:ranked"                    # full ranked board for
 # board: that only holds intraday-fit setups, and the gates that build it dock a
 # name for being overbought or extended — which is what a real gainer looks like.
 _MOVERS_KEY      = "ai_engine:movers"
+# Worker outputs. Separate keys rather than one blob so a consumer can read the
+# sector board without pulling every analysed symbol with it.
+_SECTORS_KEY     = "ai_engine:sectors"                   # sector heat + market breadth
+_ATTRIB_KEY      = "ai_engine:movers:attributed"         # gainers/losers WITH a reason
+_PROMOTIONS_KEY  = "ai_engine:promotions"                # reviewed nominations
+# Dated snapshot, kept 30 days: a promotion can only be graded once the forward
+# window has elapsed, so the live key (overwritten every sweep) is no use for it.
+# The FIELD is stored alongside — grading a promoted set without the same day's
+# control answers nothing, and reconstructing the field later is impossible.
+_PROMO_DAY_KEY   = "ai_engine:promotions:{}"
+_PROMO_GRADE_KEY = "ai_engine:promotion_grades"          # rolling graded history
+# The backend owns the NSE symbol→industry map and refreshes it daily; the
+# scanner reads its cache rather than fetching the same CSVs a second time.
+_SECTOR_MAP_KEY  = "ai_engine:sector_map:{}"
 _RANKED_PREV_KEY = "ai_engine:ranked:prev"               # last completed board — for scan-to-scan diff
 _CANDIDATES_KEY  = "ai_engine:scan_candidates"           # candidate pool for the sentiment-service
 _SENTIMENT_KEY   = "ai_engine:sentiment:{}"              # per-symbol news signal (sentiment-service)
@@ -820,6 +834,15 @@ def _analyze(candles: list[dict], regime: int = 0, calib: dict | None = None,
             "sma20": round(sma20, 2),
             "sma50": round(sma50, 2),
             "sma_trend": "up" if sma_trend > 0 else "down",
+            # The trend legs, so the promotion reviewer can test the MEASURED
+            # constraint rather than a proxy. RSI is not one: on 2026-09-09
+            # every accepted promotion sat at RSI 54-68 while up 6-13% on the
+            # day, because this RSI is computed on DAILY candles — a name can
+            # rip 13% intraday and still read 67 if it was beaten down first.
+            # "Buying strength" here means price over its own moving averages.
+            "above_sma20": bool(price > sma20),
+            "sma20_above_50": bool(sma20 >= sma50),
+            "uptrend": bool(price > sma20 and sma20 >= sma50),
             "macd_hist": round(macd_hist, 3),
             "gap_pct": round(gap_pct, 2),
             "change_pct": round(change_pct, 2),
@@ -916,22 +939,54 @@ _universe_cache: dict = {"date": None, "universe": None, "expires": 0.0}
 DEGRADED_UNIVERSE_TTL = int(os.getenv("SCAN_DEGRADED_UNIVERSE_TTL", "600"))
 
 
+# The boot-time DNS race. On a cold start the scanner can ask for the equity list
+# before the container's resolver is ready: both hosts fail with "Name or service
+# not known" in the same second, the directory fallback (~304 names) is used, and
+# DEGRADED_UNIVERSE_TTL only retries it ~10 minutes later. Measured in the logs:
+# degraded resolutions on 2026-09-03, 2026-09-08 (three in a row, ~30 minutes
+# narrow) and 2026-09-14 — roughly one boot in three, each costing the first
+# sweeps of the session a sixth of the market. Waiting a few seconds for DNS turns
+# that into a short delay; the degraded fallback stays as the backstop.
+#
+# Only TRANSPORT failures are retried — DNS, connect, timeout, i.e. nothing ever
+# reached a server. If any host answered at all (an HTTP error, or even an empty
+# 200), the network is up and waiting changes nothing, so that path behaves
+# exactly as before and falls through immediately.
+UNIVERSE_NET_RETRIES = int(os.getenv("SCAN_UNIVERSE_NET_RETRIES", "3"))
+UNIVERSE_NET_BACKOFF = float(os.getenv("SCAN_UNIVERSE_NET_BACKOFF", "5"))   # 5s, 10s, 20s
+_universe_sleep = asyncio.sleep          # indirection so tests don't actually wait
+
+
 async def _fetch_nse_equity_universe() -> dict[str, str]:
     """Every NSE-listed equity (EQ series) from the official equity master CSV."""
     import csv, io
     headers = {"User-Agent": _UA["User-Agent"], "Accept": "text/csv,application/csv,*/*"}
     rows: list[list[str]] = []
     last_exc: Exception | None = None
-    async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
-        for url in NSE_EQUITY_LIST_URLS:
-            try:
-                r = await client.get(url, headers=headers)
-                r.raise_for_status()
-                rows = list(csv.reader(io.StringIO(r.text)))
-                break
-            except Exception as exc:
-                last_exc = exc
-                logger.warning("NSE equity list fetch failed from %s (%s)", url, exc)
+
+    for attempt in range(UNIVERSE_NET_RETRIES + 1):
+        reached_a_server = False
+        async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
+            for url in NSE_EQUITY_LIST_URLS:
+                try:
+                    r = await client.get(url, headers=headers)
+                    reached_a_server = True
+                    r.raise_for_status()
+                    rows = list(csv.reader(io.StringIO(r.text)))
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    logger.warning("NSE equity list fetch failed from %s (%s)", url, exc)
+        if rows or reached_a_server or attempt == UNIVERSE_NET_RETRIES:
+            break
+        delay = UNIVERSE_NET_BACKOFF * (2 ** attempt)
+        logger.warning(
+            "NSE equity list unreachable on every host (network, attempt %d/%d) — "
+            "retrying in %.0fs before falling back to the directory",
+            attempt + 1, UNIVERSE_NET_RETRIES + 1, delay,
+        )
+        await _universe_sleep(delay)
+
     if not rows and last_exc is not None:
         raise last_exc
     if not rows:
@@ -1078,6 +1133,158 @@ async def _market_regime(client: httpx.AsyncClient) -> tuple[int, dict]:
 
 # ── Calibration (learning loop) ───────────────────────────────────────────────
 
+# Runtime knobs the Trading Controls page writes. The scanner is a separate
+# service, so it reads the same Redis key the backend's control layer owns
+# rather than importing it — one writer, many readers.
+_CONTROLS_KEY = "ai_engine:runtime_controls"
+_controls_cache: dict = {"data": {}, "ts": 0.0}
+_CONTROLS_TTL = 30.0
+
+
+async def _controls() -> dict:
+    """Current overrides, cached briefly.
+
+    Cached because the sweep asks per symbol and an uncached Redis read per name
+    would be thousands per scan; 30s is well inside the cadence at which anyone
+    turns one of these knobs.
+    """
+    now = time.time()
+    if _controls_cache["data"] and (now - _controls_cache["ts"]) < _CONTROLS_TTL:
+        return _controls_cache["data"]
+    try:
+        rc = await _get_redis()
+        raw = await rc.get(_CONTROLS_KEY)
+        data = json.loads(raw) if raw else {}
+        _controls_cache.update({"data": data, "ts": now})
+        return data
+    except Exception as exc:
+        logger.debug("controls unavailable, using shipped defaults: %s", exc)
+        return _controls_cache["data"] or {}
+
+
+async def worker_tunables() -> dict:
+    """The scanner-worker thresholds, override applied over shipped default.
+
+    Defaults live in the worker modules; this only overrides what the operator
+    has actually changed, so an untouched knob keeps the value in the code.
+    """
+    ov = await _controls()
+    from .workers import movers as M
+    from .workers import sectors as S
+    return {
+        "sector_min_names": ov.get("scanner.sector_min_names", S._MIN_NAMES),
+        "sector_broad": ov.get("scanner.sector_broad", S._BROAD),
+        "gap_material": ov.get("scanner.gap_material", M._GAP_MATERIAL),
+        "vol_conviction": ov.get("scanner.vol_conviction", M._VOL_CONVICTION),
+        "vol_thin": ov.get("scanner.vol_thin", M._VOL_THIN),
+        "rsi_extended": ov.get("scanner.rsi_extended", M._RSI_EXTENDED),
+    }
+
+
+async def _load_sector_map() -> dict[str, str]:
+    """The backend's NSE industry map, from its Redis cache.
+
+    Returns an empty map when the key is cold. Every symbol then reads "Other"
+    and the sector worker degrades to a single bucket — a scanner that refuses
+    to sweep because a label lookup is not warm would be a far worse outcome
+    than an unlabelled sweep.
+    """
+    try:
+        rc = await _get_redis()
+        raw = await rc.get(_SECTOR_MAP_KEY.format(_ist_now().date().isoformat()))
+        if raw:
+            return json.loads(raw)
+    except Exception as exc:
+        logger.debug("sector map unavailable: %s", exc)
+    return {}
+
+
+async def _run_workers(movers: list[dict]) -> dict:
+    """Run every analysis worker over the one sweep and store the results.
+
+    Deliberately after the sweep and over its output: each worker asks a
+    different question of the SAME per-symbol records, so adding one costs
+    arithmetic rather than another 2,298-symbol fetch against a source that
+    already 403s under load.
+    """
+    from .workers import build_promotion, rank_movers, rank_sectors
+    from .workers.promotion import review_all
+    from .workers.sectors import sector_tailwind
+
+    # Apply the operator's overrides to the worker modules for this run. Module
+    # attributes rather than parameters because the thresholds are read at
+    # several points inside each worker, and threading six values through every
+    # signature would make the workers harder to read than the knobs are worth.
+    from .workers import movers as M
+    from .workers import sectors as S
+    tun = await worker_tunables()
+    S._MIN_NAMES = int(tun["sector_min_names"])
+    S._BROAD = float(tun["sector_broad"])
+    M._GAP_MATERIAL = float(tun["gap_material"])
+    M._VOL_CONVICTION = float(tun["vol_conviction"])
+    M._VOL_THIN = float(tun["vol_thin"])
+    M._RSI_EXTENDED = float(tun["rsi_extended"])
+
+    smap = await _load_sector_map()
+    sector_of = lambda sym: smap.get((sym or "").upper(), "Other")
+
+    sectors = rank_sectors(movers, sector_of)
+    attributed = rank_movers(movers, sector_of, sectors)
+
+    # Micro-scanner: nominate from the gainers that are still in progress —
+    # never from the ones whose move finished before the open. Each nomination
+    # carries every figure it rests on, and the reviewer checks that.
+    nominations = []
+    for g in attributed["actionable_gainers"]:
+        nominations.append(build_promotion(
+            g, worker="movers",
+            reason=g.get("why", ""),
+            sector=sector_tailwind(g.get("symbol", ""), sector_of, sectors),
+        ))
+    accepted, rejected = review_all(nominations)
+
+    payload = {
+        "updated_at": _ist_now().isoformat(),
+        "sectors": sectors,
+        "movers": attributed,
+        "promotions": {
+            "accepted": [p.to_dict() for p in accepted],
+            "rejected": rejected,
+            "nominated": len(nominations),
+        },
+    }
+    try:
+        rc = await _get_redis()
+        await rc.set(_SECTORS_KEY, json.dumps(
+            {"updated_at": payload["updated_at"], **sectors}), ex=86400)
+        await rc.set(_ATTRIB_KEY, json.dumps(
+            {"updated_at": payload["updated_at"], **attributed}), ex=86400)
+        await rc.set(_PROMOTIONS_KEY, json.dumps(
+            {"updated_at": payload["updated_at"], **payload["promotions"]}), ex=86400)
+        # Dated snapshot for grading. Only the LAST sweep of a day survives, by
+        # design: grading the same names once per intraday sweep would count one
+        # day's evidence a dozen times, which is precisely the pooling error the
+        # clustered statistics exist to avoid.
+        await rc.set(_PROMO_DAY_KEY.format(_ist_now().date().isoformat()), json.dumps({
+            "date": _ist_now().date().isoformat(),
+            "updated_at": payload["updated_at"],
+            "accepted": payload["promotions"]["accepted"],
+            "rejected": payload["promotions"]["rejected"],
+            # The control: every analysed name with its entry price, so the
+            # promoted set can be scored against the field it was drawn from.
+            "field": [{"symbol": m["symbol"], "price": m.get("price")}
+                      for m in movers if m.get("price")],
+        }), ex=86400 * 30)
+    except Exception as exc:
+        logger.warning("worker outputs not stored: %s", exc)
+
+    hot = ", ".join(f"{x['sector']} {x['median_pct']:+.1f}%" for x in sectors["hot"][:3])
+    logger.info("workers: hot sectors [%s] · %d/%d advancing · %d nominated, %d accepted",
+                hot or "none", sectors["market"]["advancing"],
+                sectors["market"]["analysed"], len(nominations), len(accepted))
+    return payload
+
+
 async def _load_calibration() -> dict:
     try:
         r = await _get_redis()
@@ -1201,6 +1408,8 @@ async def scan_once(phase: str = "intraday") -> dict:
                                 "rsi": m.get("rsi"), "atr_pct": m.get("atr_pct"),
                                 # Carried so a mover can be read against what the
                                 # setup scoring thought — they routinely disagree.
+                                "uptrend": m.get("uptrend"),
+                                "above_sma20": m.get("above_sma20"),
                                 "grade": res.get("grade"), "action": res.get("action"),
                                 "signal_score": res.get("signal_score"),
                                 "intraday_fit": res.get("intraday_fit"),
@@ -1233,6 +1442,13 @@ async def scan_once(phase: str = "intraday") -> dict:
             "updated_at": _ist_now().isoformat(), "scanned": scanned, "universe": total,
             "items": movers[:RANKED_MAX],
         }), ex=86400)
+        # Sector heat, attributed movers and reviewed promotions, all derived
+        # from this one sweep. Failures here must not cost the watchlist the
+        # sweep just produced, so they are logged and swallowed.
+        try:
+            await _run_workers(movers)
+        except Exception as exc:
+            logger.warning("scanner workers failed (watchlist unaffected): %s", exc, exc_info=True)
         if movers:
             top = movers[0]
             logger.info("scan(%s) top mover: %s %+.2f%% (grade %s, intraday_fit=%s)",
@@ -1397,6 +1613,77 @@ async def scan_once(phase: str = "intraday") -> dict:
 
 
 # ── Post-market evaluation (signal score + learning) ──────────────────────────
+
+async def grade_promotions(days_back: int = 30, horizon_days: int = 1) -> dict:
+    """Score past days' promotions against what those names actually did.
+
+    Runs over the dated snapshots, fetches each symbol's forward return over
+    `horizon_days` trading days from the promotion, and reports two clustered
+    readings: whether the PROMOTER beat the day's field, and whether the
+    REVIEWER's accepted set beat what it rejected.
+
+    Only days whose forward window has fully elapsed are graded — a promotion
+    from this morning has no outcome yet, and scoring it half-way through would
+    read the market's intraday drift as the promoter's skill.
+    """
+    from .workers.grading import aggregate, grade_one_day
+
+    rc = await _get_redis()
+    today = _ist_now().date()
+    per_day: list[dict] = []
+
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        for back in range(horizon_days, days_back + 1):
+            d = (today - timedelta(days=back)).isoformat()
+            raw = await rc.get(_PROMO_DAY_KEY.format(d))
+            if not raw:
+                continue
+            snap = json.loads(raw)
+            accepted = snap.get("accepted") or []
+            rejected = snap.get("rejected") or []
+            field = snap.get("field") or []
+            if not accepted:
+                continue                 # nothing promoted; the day says nothing
+
+            # Price every name once — the union, so the control costs no extra
+            # symbol beyond what the field already requires.
+            wanted = {(r.get("symbol") or "").upper()
+                      for r in list(accepted) + list(rejected) + list(field)}
+            returns: dict[str, float] = {}
+            for sym in sorted(wanted):
+                candles = await _fetch_daily(client, sym)
+                await asyncio.sleep(FETCH_DELAY)
+                if not candles or len(candles) <= horizon_days:
+                    continue
+                # Forward return measured from the CLOSE of the promotion day to
+                # the close `horizon_days` later — an entry at the promotion's
+                # own price is not available to anyone reading it after the bell.
+                try:
+                    base = candles[-(horizon_days + 1)]["c"]
+                    fwd = candles[-1]["c"]
+                except (IndexError, KeyError, TypeError):
+                    continue
+                if base:
+                    returns[sym] = (fwd - base) / base * 100.0
+
+            graded = grade_one_day(accepted, rejected, field, returns)
+            graded["date"] = d
+            per_day.append(graded)
+
+    out = {"generated_at": _ist_now().isoformat(), "horizon_days": horizon_days,
+           "days": per_day, **aggregate(per_day)}
+    try:
+        await rc.set(_PROMO_GRADE_KEY, json.dumps(out), ex=86400 * 30)
+    except Exception as exc:
+        logger.warning("promotion grades not stored: %s", exc)
+
+    pr, rv = out["promoter"], out["reviewer"]
+    logger.info("promotion grading: %d days · promoter lift %s (t %s, %s) · "
+                "reviewer lift %s (t %s, %s)",
+                out["days_graded"], pr["mean_lift"], pr["t"], pr["verdict"],
+                rv["mean_lift"], rv["t"], rv["verdict"])
+    return out
+
 
 async def evaluate_day(date_str: str | None = None) -> dict:
     """Grade the morning watchlist against the actual day move → signal scores.

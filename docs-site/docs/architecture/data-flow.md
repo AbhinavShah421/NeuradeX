@@ -105,7 +105,6 @@ See [Stock Scanner](../microservices/stock-scanner.md),
 - Polls Groww API / Yahoo Finance every 60 seconds
 - Writes `tick:{SYMBOL}` to Redis (TTL 120s)
 - Publishes raw OHLCV tick to `market.data` exchange (fanout → all 5 agents)
-- Simultaneously polls NewsAPI every 300s; stores articles in MongoDB `news`
 
 ### Stage 2 — Parallel Agent Analysis
 Five agents consume from their dedicated queues simultaneously:

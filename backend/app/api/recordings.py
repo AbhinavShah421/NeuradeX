@@ -64,10 +64,10 @@ def _now_ist() -> datetime:
 
 
 def _next_weekday(d):
-    d = d + timedelta(days=1)
-    while d.weekday() >= 5:            # skip Sat/Sun
-        d += timedelta(days=1)
-    return d
+    # The next NSE trading day — weekends and exchange holidays skipped. Name kept
+    # for its callers; a recording targeted at a holiday used to capture nothing.
+    from app.utils.market_calendar import next_trading_day
+    return next_trading_day(d)
 
 
 def _target_date(now: datetime | None = None) -> str:
@@ -75,11 +75,11 @@ def _target_date(now: datetime | None = None) -> str:
     close hasn't passed — even mid-session: the earlier part of the day (09:15 → now)
     is seeded from 1-minute historical (see candle_capture.backfill_intraday), so the
     recorded day is complete no matter when the recording was started. After the close
-    (or on a weekend), it rolls to the next weekday. Holidays just yield an empty
-    recording — harmless."""
+    (or on a weekend or NSE holiday), it rolls to the next trading day."""
     now = now or _now_ist()
     now_min = now.hour * 60 + now.minute
-    if now.weekday() < 5 and now_min <= _CLOSE_MIN:
+    from app.utils.market_calendar import is_trading_day
+    if is_trading_day(now) and now_min <= _CLOSE_MIN:
         return now.date().isoformat()
     return _next_weekday(now.date()).isoformat()
 
@@ -93,7 +93,8 @@ def _status(date_str: str, now: datetime | None = None) -> str:
     if date_str < today:
         return "completed"
     # target is today
-    if now.weekday() >= 5:
+    from app.utils.market_calendar import is_trading_day
+    if not is_trading_day(now):
         return "completed"
     now_min = now.hour * 60 + now.minute
     if now_min < _OPEN_MIN:

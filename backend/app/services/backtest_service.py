@@ -29,6 +29,7 @@ import json
 import math
 import os
 import random
+import zlib
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -721,10 +722,28 @@ _INTRADAY_BASE = {
 }
 
 
+def simulation_seed(symbol: str, date_str: str) -> int:
+    """Stable seed for the synthetic-candle fallback.
+
+    This used `hash()`, which Python randomises per process unless
+    PYTHONHASHSEED is set — and it is not set here. So the same symbol and date
+    produced different prices in different processes: two runs on 2026-08-19
+    gave 962242101 and 1512940436. Any backtest that fell back to simulation was
+    therefore unreproducible while the docstring called it deterministic.
+
+    crc32 over the same key is stable across processes and machines.
+    """
+    return zlib.crc32(f"{symbol}{date_str}".encode("utf-8")) % (2 ** 31)
+
+
 def _simulate_intraday_5min(symbol: str, date_str: str) -> list[dict]:
-    """Generate 75 realistic 5-min candles (09:15–15:25 IST) for a trading day."""
-    seed = hash(f"{symbol}{date_str}") % (2 ** 31)
-    rng = random.Random(seed)
+    """Generate 75 realistic 5-min candles (09:15–15:25 IST) for a trading day.
+
+    Fallback only — used when no provider returns real candles for the date.
+    Callers record `data_source="simulated"`, which is now persisted with the
+    session (see sessions_service._session_provenance).
+    """
+    rng = random.Random(simulation_seed(symbol, date_str))
 
     base = _INTRADAY_BASE.get(symbol, 500.0) * rng.uniform(0.88, 1.12)
     gap_pct = rng.uniform(-0.010, 0.015)
@@ -1285,10 +1304,18 @@ def _no_real_intraday_msg(symbol: str, date: str) -> str:
     )
 
 
-async def get_intraday_candles(symbol: str, date: str, real_only: bool) -> dict:
-    """Return all 5-min candles for one trading day (Groww or simulated).
-    No LLM involved — the frontend drives the progressive replay.
-    With real_only=true the endpoint refuses to simulate."""
+async def get_intraday_candles(symbol: str, date: str, real_only: bool,
+                               interval: int = 5) -> dict:
+    """Return one trading day's candles (Groww or simulated).
+
+    `interval` defaults to 5 minutes because the progressive replay is built
+    around 75 five-minute steps — do not change that default. The chart asks for
+    1-minute when loading scroll-back history so older days match today's
+    granularity; providers only keep 1-minute data for roughly the last month,
+    so an empty result falls back to 5-minute rather than showing nothing.
+
+    With real_only=true the endpoint refuses to simulate.
+    """
     symbol = symbol.upper()
     try:
         datetime.strptime(date, "%Y-%m-%d")
@@ -1297,7 +1324,11 @@ async def get_intraday_candles(symbol: str, date: str, real_only: bool) -> dict:
 
     # Try every configured provider (Groww → Yahoo → Alpha Vantage)
     from app.data.providers import fetch_intraday
-    candles, data_source = await fetch_intraday(symbol, date, 5)
+    candles, data_source = await fetch_intraday(symbol, date, interval)
+    if not candles and interval != 5:
+        # Beyond the provider's fine-granularity window — coarser is better than
+        # a blank day.
+        candles, data_source = await fetch_intraday(symbol, date, 5)
 
     if not candles:
         if real_only:
@@ -1430,11 +1461,11 @@ async def _fetch_candles_up_to(symbol: str, date_str: str, up_to_time: str) -> t
 
 
 def _prev_trading_day(d: datetime) -> datetime:
-    """Return the most recent weekday (Mon–Fri) strictly before d."""
-    prev = d - timedelta(days=1)
-    while prev.weekday() >= 5:   # Saturday=5, Sunday=6
-        prev -= timedelta(days=1)
-    return prev
+    """Return the most recent NSE trading day strictly before d — weekends and
+    exchange holidays skipped — keeping d's time-of-day."""
+    from app.utils.market_calendar import prev_trading_day
+    p = prev_trading_day(d)
+    return d.replace(year=p.year, month=p.month, day=p.day)
 
 
 async def _fetch_full_day_candles(symbol: str, date_str: str, bar_seconds: int = 60) -> tuple[list[dict], str]:
@@ -1453,10 +1484,10 @@ async def _fetch_full_day_candles(symbol: str, date_str: str, bar_seconds: int =
             return bars, "tickstore"
     except Exception:
         logger.debug("Tick-store read failed for %s %s, falling back to provider", symbol, date_str, exc_info=True)
-    # 2) Fall back to the historical provider (1-min floor; we request 5-min bars).
+    # 2) Fall back to the historical provider at the same 1-minute resolution.
     try:
         from app.data.providers import fetch_intraday
-        candles, source = await fetch_intraday(symbol, date_str, 5)
+        candles, source = await fetch_intraday(symbol, date_str, 1)
         if source == "simulated" or not candles:
             return [], "none"
         return candles, source

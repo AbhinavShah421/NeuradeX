@@ -15,9 +15,9 @@ const ScanAccuracyCard: React.FC = () => {
   const ov = data?.overall, ovd = data?.overallDelivery, ovc = data?.overallCommitted;
 
   const series = [
-    { key: 'committed', label: 'High-conviction', color: '#a855f7', pts: committed, on: show.committed, overall: ovc },
-    { key: 'intraday', label: 'Intraday', color: '#22c55e', pts: intraday, on: show.intraday, overall: ov },
-    { key: 'delivery', label: 'Delivery', color: '#3b82f6', pts: delivery, on: show.delivery, overall: ovd },
+    { key: 'committed', label: 'High-conviction', color: '#a78bfa', pts: committed, on: show.committed, overall: ovc },
+    { key: 'intraday', label: 'Intraday', color: '#34d399', pts: intraday, on: show.intraday, overall: ov },
+    { key: 'delivery', label: 'Delivery', color: '#38bdf8', pts: delivery, on: show.delivery, overall: ovd },
   ];
   const allPts = series.filter(s => s.on).flatMap(s => s.pts);
   const hasData = allPts.length >= 1;
@@ -42,7 +42,7 @@ const ScanAccuracyCard: React.FC = () => {
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
         <div>
           <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--nd-text-1)' }}>AI Scan Accuracy</div>
-          <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>Graded vs the actual move · <span style={{ color: '#a855f7' }}>High-conviction</span> is the selective tier tuned to the {target.toFixed(0)}% target</div>
+          <div style={{ fontSize: 12, color: 'var(--nd-text-3)' }}>Graded vs the actual move · <span style={{ color: '#a78bfa' }}>High-conviction</span> is the selective tier tuned to the {target.toFixed(0)}% target</div>
         </div>
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
           {series.map(s => {
@@ -77,8 +77,8 @@ const ScanAccuracyCard: React.FC = () => {
             </g>
           ))}
           {/* target line */}
-          <line x1={PL} y1={sy(target)} x2={W - PR} y2={sy(target)} stroke="#f59e0b" strokeWidth="1" strokeDasharray="4 3" opacity={0.8} />
-          <text x={W - PR} y={sy(target) - 3} fontSize="9" fill="#f59e0b" textAnchor="end">target {target.toFixed(0)}%</text>
+          <line x1={PL} y1={sy(target)} x2={W - PR} y2={sy(target)} stroke="#fbbf24" strokeWidth="1" strokeDasharray="4 3" opacity={0.8} />
+          <text x={W - PR} y={sy(target) - 3} fontSize="9" fill="#fbbf24" textAnchor="end">target {target.toFixed(0)}%</text>
           {series.filter(s => s.on && s.pts.length).map(s => {
             const line = s.pts.map(p => `${xi(p.date).toFixed(1)},${sy(p.accuracy * 100).toFixed(1)}`).join(' ');
             return (
@@ -92,7 +92,7 @@ const ScanAccuracyCard: React.FC = () => {
                   return (
                     <g key={i}>
                       <circle cx={cx} cy={cy} r={active ? 5 : 3}
-                        fill={p.meetsTarget ? s.color : '#ef4444'} stroke={active ? '#fff' : s.color} strokeWidth={active ? 1.5 : 1}
+                        fill={p.meetsTarget ? s.color : '#fb5c7d'} stroke={active ? '#fff' : s.color} strokeWidth={active ? 1.5 : 1}
                         style={{ transition: 'r 0.1s' }} />
                       {/* larger invisible hit target for easy hover/focus */}
                       <circle cx={cx} cy={cy} r="9" fill="transparent" style={{ cursor: 'pointer' }}
@@ -130,8 +130,8 @@ const ScanAccuracyCard: React.FC = () => {
                 <span style={{ width: 8, height: 8, borderRadius: '50%', background: hover.sColor, flexShrink: 0 }} />
                 <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--nd-text-1)' }}>{hover.sLabel}</span>
                 <span style={{ marginLeft: 'auto', fontSize: 9.5, fontWeight: 700, padding: '1px 5px', borderRadius: 4,
-                  background: hover.p.meetsTarget ? '#22c55e22' : '#ef444422',
-                  color: hover.p.meetsTarget ? '#22c55e' : '#ef4444' }}>
+                  background: hover.p.meetsTarget ? '#34d39922' : '#fb5c7d22',
+                  color: hover.p.meetsTarget ? '#34d399' : '#fb5c7d' }}>
                   {hover.p.meetsTarget ? 'HIT' : 'MISS'}
                 </span>
               </div>
@@ -163,11 +163,11 @@ const ScanAccuracyCard: React.FC = () => {
       <div style={{ flex: 1, minHeight: 10 }} />
 
       {commBelow ? (
-        <div style={{ marginTop: 8, fontSize: 11, color: '#d8b4fe', background: '#a855f715', border: '1px solid #a855f733', borderRadius: 8, padding: '6px 9px' }}>
+        <div style={{ marginTop: 8, fontSize: 11, color: '#d8b4fe', background: '#a78bfa15', border: '1px solid #a78bfa33', borderRadius: 8, padding: '6px 9px' }}>
           The high-conviction tier is at {commAcc!.toFixed(0)}% vs the {target.toFixed(0)}% target — the selectivity bar auto-tightens each session (fewer, higher-confluence picks) to close the gap. Broad intraday/delivery accuracy stays ~50% by nature and isn't traded.
         </div>
       ) : commAcc != null ? (
-        <div style={{ marginTop: 8, fontSize: 11, color: '#86efac', background: '#22c55e15', border: '1px solid #22c55e33', borderRadius: 8, padding: '6px 9px' }}>
+        <div style={{ marginTop: 8, fontSize: 11, color: '#86efac', background: '#34d39915', border: '1px solid #34d39933', borderRadius: 8, padding: '6px 9px' }}>
           ✓ High-conviction tier at {commAcc.toFixed(0)}% — meeting the {target.toFixed(0)}% target. Only these committed picks are acted on.
         </div>
       ) : null}

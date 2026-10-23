@@ -18,7 +18,10 @@
     <script>
       // Apply persisted theme before render so dark mode survives refresh with no flash.
       try {
-        if (localStorage.getItem('neuradex-theme') === 'dark') {
+        // Dark unless the user explicitly chose light. Must mirror
+        // getInitialTheme() in stores/appStore.ts — if these disagree the page
+        // paints one theme and then snaps to the other on hydration.
+        if (localStorage.getItem('neuradex-theme') !== 'light') {
           document.documentElement.classList.add('dark-mode');
         }
       } catch (e) {}

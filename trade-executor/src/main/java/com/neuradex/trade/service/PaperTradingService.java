@@ -23,8 +23,11 @@ public class PaperTradingService {
         double fillPrice = "BUY".equals(action) ? price + slippage : price - slippage;
         double fillQty = validated.getPositionSize();
 
-        log.info("[PAPER] {} {} shares of {} @ {:.2f} (slippage={:.4f})",
-                action, fillQty, validated.getSymbol(), fillPrice, slippage);
+        // SLF4J takes "{}" only — "{:.2f}" is Python's placeholder and is printed
+        // literally, so every paper fill logged its price as the text "{:.2f}".
+        log.info("[PAPER] {} {} shares of {} @ {} (slippage={})",
+                action, String.format("%.4f", fillQty), validated.getSymbol(),
+                String.format("%.2f", fillPrice), String.format("%.4f", slippage));
 
         return TradeOutcome.builder()
                 .tradeId(UUID.randomUUID().toString())
@@ -35,6 +38,7 @@ public class PaperTradingService {
                 .stopLoss(validated.getStopLoss())
                 .takeProfit(validated.getTakeProfit())
                 .paperTrade(true)
+                .confidence(validated.getConfidence())
                 .status("FILLED")
                 .agentVotes(validated.getAgentVotes())
                 .executedAt(Instant.now().toString())

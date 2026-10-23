@@ -21,6 +21,8 @@ interface MarketContext {
 
 // NOTE: the axios response interceptor converts all snake_case API fields to
 // camelCase, so these interfaces (and every access below) use camelCase.
+import TradePostmortem from '../components/TradePostmortem';
+
 interface TradeRecord {
   tradeId: string;
   symbol: string;
@@ -79,16 +81,19 @@ interface ExecStep {
   icon: string;
   color: string;
   data: Record<string, any>;
+  /** Set when the step has nothing real to show, so the UI can say so
+   *  instead of rendering placeholder values that look like data. */
+  note?: 'unrecorded';
 }
 
-function buildExecutionSteps(trade: TradeRecord): ExecStep[] {
+function buildExecutionSteps(trade: TradeRecord, rich?: AgentDecision[]): ExecStep[] {
   const steps: ExecStep[] = [];
 
   steps.push({
     step: 1,
     name: 'Market Signal',
     icon: 'wifi',
-    color: '#3b82f6',
+    color: '#38bdf8',
     data: {
       symbol: trade.symbol,
       price: `₹${trade.entryPrice?.toFixed(2)}`,
@@ -99,10 +104,18 @@ function buildExecutionSteps(trade: TradeRecord): ExecStep[] {
   });
 
   const agentSignals = trade.agentSignals ?? {};
-  // Show every agent the ensemble actually recorded for this trade. Older trades
-  // only stored a synthetic 5-agent set, so fall back to that when nothing richer
-  // was persisted.
   const agentEntries = Object.entries(agentSignals).filter(([, v]) => v != null && v !== '');
+  // Fall back to the per-bar votes from session_decisions, which carry weight,
+  // confidence and each agent's reasoning. Only when BOTH are empty do we say
+  // so — the previous fallback invented a five-agent set
+  // (technical/sentiment/macro/pattern/rl) and showed a dash against each, which
+  // read as "the agents had no opinion". They are not even the right agents:
+  // "macro" is not an agent in this system. Every LIVE trade hits this path
+  // (77 of 77 carry no agent_signals and no session_id), so the placeholder was
+  // showing fabricated names on exactly the trades that matter most.
+  const fromDecisions = Object.fromEntries(
+    (rich ?? []).filter(a => a?.agent && a?.action).map(a => [a.agent, a.action]));
+  const haveAny = agentEntries.length > 0 || Object.keys(fromDecisions).length > 0;
   steps.push({
     step: 2,
     name: 'Agent Decisions',
@@ -110,7 +123,10 @@ function buildExecutionSteps(trade: TradeRecord): ExecStep[] {
     color: '#8b5cf6',
     data: agentEntries.length > 0
       ? Object.fromEntries(agentEntries)
-      : Object.fromEntries(['technical', 'sentiment', 'macro', 'pattern', 'rl'].map(a => [a, '—'])),
+      : Object.keys(fromDecisions).length > 0
+        ? fromDecisions
+        : { 'not recorded': 'no per-agent votes were saved for this trade' },
+    ...(haveAny ? {} : { note: 'unrecorded' }),
   });
 
   const mc = trade.marketContext ?? {};
@@ -127,7 +143,7 @@ function buildExecutionSteps(trade: TradeRecord): ExecStep[] {
     step: 3,
     name: 'Ensemble Vote',
     icon: 'how_to_vote',
-    color: '#f59e0b',
+    color: '#fbbf24',
     data: ensembleData,
   });
 
@@ -165,7 +181,7 @@ function buildExecutionSteps(trade: TradeRecord): ExecStep[] {
     step: 6,
     name: 'Trade Outcome',
     icon: trade.pnlPct != null && trade.pnlPct >= 0 ? 'trending_up' : 'trending_down',
-    color: trade.pnlPct != null && trade.pnlPct >= 0 ? '#22c55e' : '#ef4444',
+    color: trade.pnlPct != null && trade.pnlPct >= 0 ? '#34d399' : '#fb5c7d',
     data: {
       'Exit Price': trade.exitPrice ? `₹${trade.exitPrice.toFixed(2)}` : '—',
       'P&L': trade.pnlAbs != null ? `₹${trade.pnlAbs.toFixed(2)}` : '—',
@@ -181,14 +197,14 @@ function buildExecutionSteps(trade: TradeRecord): ExecStep[] {
 // ── Execution Modal ───────────────────────────────────────────────────────────
 
 const AGENT_COLORS: Record<string, string> = {
-  technical: '#3b82f6', sentiment: '#06b6d4', macro: '#f59e0b',
+  technical: '#38bdf8', sentiment: '#06b6d4', macro: '#fbbf24',
   pattern: '#8b5cf6', rl: '#10b981',
   // Full ensemble roster
-  gbm: '#14b8a6', regime: '#a855f7', anomaly: '#ec4899', momentum: '#eab308',
-  memory: '#64748b', meanrev: '#f97316', volatility: '#ef4444',
+  gbm: '#14b8a6', regime: '#a78bfa', anomaly: '#ec4899', momentum: '#eab308',
+  memory: '#64748b', meanrev: '#f97316', volatility: '#fb5c7d',
 };
 const ACTION_COLOR: Record<string, string> = {
-  BUY: '#22c55e', SELL: '#ef4444', HOLD: '#f59e0b',
+  BUY: '#34d399', SELL: '#fb5c7d', HOLD: '#fbbf24',
 };
 
 // Small labelled stat used inside the agent-detail expansion.
@@ -228,7 +244,6 @@ interface AgentDecision { agent: string; action: string; weight: number; confide
 interface AgentAcc { weight?: number; by_action?: Array<{ action: string; rate: number; total: number; avg_pnl: number }>; }
 
 function ExecutionModal({ trade, allTrades = [], onClose }: { trade: TradeRecord; allTrades?: TradeRecord[]; onClose: () => void }) {
-  const steps = buildExecutionSteps(trade);
   const sessionId = trade.marketContext?.sessionId;
   const sessionCount = sessionId
     ? allTrades.filter(t => t.marketContext?.sessionId === sessionId).length
@@ -239,6 +254,11 @@ function ExecutionModal({ trade, allTrades = [], onClose }: { trade: TradeRecord
   const [richAgents, setRichAgents] = useState<AgentDecision[]>([]);
   const [agentAcc, setAgentAcc]     = useState<Record<string, AgentAcc>>({});
   const [openAgent, setOpenAgent]   = useState<string | null>(null);
+  // "trace" is what the system did; "postmortem" is why it ended that way.
+  const [tab, setTab] = useState<'trace' | 'postmortem'>('trace');
+  // Built after richAgents so the Agent Decisions step can fall back to the
+  // per-bar votes when the trade record carries none.
+  const steps = buildExecutionSteps(trade, richAgents);
   useEffect(() => {
     if (!sessionId) return;
     apiService.getTradeAgentDetail(sessionId)
@@ -252,7 +272,7 @@ function ExecutionModal({ trade, allTrades = [], onClose }: { trade: TradeRecord
       style={{ position: 'fixed', inset: 0, background: '#00000080', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 12 }}
       onClick={e => { if (e.target === e.currentTarget) onClose(); }}
     >
-      <div style={{ background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 16, width: '100%', maxWidth: 680, maxHeight: '90vh', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 64px #00000060' }}>
+      <div style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 16, width: '100%', maxWidth: 680, maxHeight: '90vh', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 64px #00000060' }}>
 
         {/* Header */}
         <div style={{ padding: '18px 24px', borderBottom: '1px solid var(--nd-border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -273,7 +293,27 @@ function ExecutionModal({ trade, allTrades = [], onClose }: { trade: TradeRecord
           </button>
         </div>
 
+        {/* Tabs */}
+        <div style={{ display: 'flex', gap: 4, padding: '0 24px', borderBottom: '1px solid var(--nd-border)' }}>
+          {([['trace', 'Execution trace'], ['postmortem', trade.pnlPct != null && trade.pnlPct < 0 ? 'Why it lost' : 'Post-mortem']] as const).map(([k, lbl]) => (
+            <button key={k} onClick={() => setTab(k)}
+              style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '10px 12px', fontSize: 12.5,
+                fontWeight: tab === k ? 700 : 500,
+                color: tab === k ? 'var(--nd-accent)' : 'var(--nd-text-3)',
+                borderBottom: `2px solid ${tab === k ? 'var(--nd-accent)' : 'transparent'}`, marginBottom: -1 }}>
+              {lbl}
+            </button>
+          ))}
+        </div>
+
+        {tab === 'postmortem' && (
+          <div style={{ overflowY: 'auto', padding: '16px 24px 20px' }}>
+            <TradePostmortem tradeId={trade.tradeId} />
+          </div>
+        )}
+
         {/* Steps timeline */}
+        {tab === 'trace' && (
         <div style={{ overflowY: 'auto', padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: 0 }}>
 
           {/* Price chart with entry/exit markers */}
@@ -303,7 +343,15 @@ function ExecutionModal({ trade, allTrades = [], onClose }: { trade: TradeRecord
                   Step {step.step} — {step.name}
                 </div>
 
-                {step.step === 2 ? (
+                {step.note === 'unrecorded' ? (
+                  // Say nothing was saved, rather than rendering placeholders
+                  // that read as "the agents had no opinion".
+                  <div style={{ fontSize: 12, color: 'var(--nd-text-3)', lineHeight: 1.55, fontStyle: 'italic' }}>
+                    No per-agent votes were saved for this trade. Live trades are written without
+                    a session link, so the panel's reasoning is not recoverable for them — paper,
+                    replay and backtest trades do carry it.
+                  </div>
+                ) : step.step === 2 ? (
                   // Agent decisions grid — each card shows the agent's vote + its
                   // weight at decision time; click to expand full detail.
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
@@ -347,7 +395,7 @@ function ExecutionModal({ trade, allTrades = [], onClose }: { trade: TradeRecord
                                       const s = acc.by_action!.find(x => x.action === act);
                                       if (!s) return null;
                                       return (
-                                        <div key={act} style={{ flex: '1 1 90px', background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 6, padding: '6px 10px' }}>
+                                        <div key={act} style={{ flex: '1 1 90px', background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 6, padding: '6px 10px' }}>
                                           <div style={{ fontSize: 10, fontWeight: 700, color: ACTION_COLOR[act] ?? 'var(--nd-text-3)' }}>{act}</div>
                                           <div style={{ fontSize: 15, fontWeight: 700, color: s.rate >= 0.5 ? 'var(--nd-green)' : 'var(--nd-text-2)' }}>{(s.rate * 100).toFixed(0)}%</div>
                                           <div style={{ fontSize: 9.5, color: 'var(--nd-text-3)' }}>{s.total} decisions</div>
@@ -380,6 +428,7 @@ function ExecutionModal({ trade, allTrades = [], onClose }: { trade: TradeRecord
             </div>
           ))}
         </div>
+        )}
       </div>
     </div>
   );
@@ -533,8 +582,14 @@ const Orders: React.FC = () => {
     const totalPnl = trades.reduce((s, t) => s + (t.pnlAbs ?? 0), 0);
     const closed = trades.filter(t => t.outcome === 'WIN' || t.outcome === 'LOSS').length;
     const wins = trades.filter(t => (t.pnlAbs ?? 0) > 0).length;
+    // A row where nothing has closed is an OPEN POSITION, not a session that
+    // did nothing. Rendering it as "₹0.00 · —" made five live executor entries
+    // read as five empty sessions on a day that had two real trades, and it
+    // inflated the session count. The trade-executor publishes an entry and
+    // never a close, so these never resolve on their own.
+    const allOpen = closed === 0 && trades.length > 0;
     return {
-      key, isSession: key.startsWith('s:'),
+      key, isSession: key.startsWith('s:'), allOpen,
       symbol: trades[0].symbol,
       source: trades[0].tradeSource ?? (trades[0].paperTrade ? 'PAPER' : 'LIVE'),
       mode: (trades[0].marketContext?.sessionMode as string) || '',
@@ -600,7 +655,7 @@ const Orders: React.FC = () => {
   const pnlColor = (v: number) => v >= 0 ? 'var(--nd-green)' : 'var(--nd-red)';
 
   const modeColor: Record<string, string> = {
-    LIVE: '#22c55e', PAPER: '#f59e0b', BACKTEST: '#3b82f6', REPLAY: '#a855f7',
+    LIVE: '#34d399', PAPER: '#fbbf24', BACKTEST: '#38bdf8', REPLAY: '#a78bfa',
   };
 
   if (loading) return <div style={{ padding: 40, textAlign: 'center', color: 'var(--nd-text-3)' }}>Loading trade history...</div>;
@@ -659,8 +714,8 @@ const Orders: React.FC = () => {
             <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--nd-text-3)', letterSpacing: 0.5, marginBottom: 8 }}>LESSONS APPLIED TO FUTURE DECISIONS</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {lessons.map((l: any, i: number) => (
-                <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 10px', background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 8 }}>
-                  <span className="material-icons" style={{ fontSize: 15, color: '#f59e0b' }}>error_outline</span>
+                <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 10px', background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 8 }}>
+                  <span className="material-icons" style={{ fontSize: 15, color: '#fbbf24' }}>error_outline</span>
                   <div style={{ flex: 1 }}>
                     <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--nd-text-1)' }}>{l.failureMode}</div>
                     <div style={{ fontSize: 11.5, color: 'var(--nd-text-2)', marginTop: 1 }}>{l.avoidWhen || l.lesson}</div>
@@ -678,12 +733,12 @@ const Orders: React.FC = () => {
             <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--nd-text-3)', letterSpacing: 0.5, marginBottom: 8 }}>RECENT LOSS POST-MORTEMS</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 280, overflow: 'auto' }}>
               {postmortems.slice(0, 25).map((p: any, i: number) => (
-                <div key={i} style={{ padding: '8px 10px', background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 8 }}>
+                <div key={i} style={{ padding: '8px 10px', background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 8 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
                     <span style={{ fontWeight: 700, fontFamily: 'monospace', color: 'var(--nd-text-1)' }}>{p.symbol}</span>
                     <span style={{ fontSize: 10.5, color: ACTION_COLOR[p.action] ?? 'var(--nd-text-3)' }}>{p.action}</span>
                     <span style={{ fontSize: 11, color: 'var(--nd-red)' }}>{p.pnlPct != null ? `${p.pnlPct}%` : ''}</span>
-                    <span style={{ marginLeft: 'auto', fontSize: 10.5, fontWeight: 700, color: '#f59e0b' }}>{p.failureMode}</span>
+                    <span style={{ marginLeft: 'auto', fontSize: 10.5, fontWeight: 700, color: '#fbbf24' }}>{p.failureMode}</span>
                   </div>
                   <div style={{ fontSize: 11.5, color: 'var(--nd-text-2)', lineHeight: 1.5 }}>{p.rootCause}</div>
                   {p.lesson && <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginTop: 2 }}><strong>Lesson:</strong> {p.lesson}</div>}
@@ -747,7 +802,7 @@ const Orders: React.FC = () => {
                       </td>
                     ) : (
                       <>
-                        <td style={{ padding: '7px 10px', fontWeight: 600, color: (m.accuracy ?? 0) >= 0.55 ? 'var(--nd-green)' : (m.accuracy ?? 0) >= 0.45 ? '#f59e0b' : 'var(--nd-red)' }}>{((m.accuracy ?? 0) * 100).toFixed(0)}%</td>
+                        <td style={{ padding: '7px 10px', fontWeight: 600, color: (m.accuracy ?? 0) >= 0.55 ? 'var(--nd-green)' : (m.accuracy ?? 0) >= 0.45 ? '#fbbf24' : 'var(--nd-red)' }}>{((m.accuracy ?? 0) * 100).toFixed(0)}%</td>
                         <td style={{ padding: '7px 10px', color: 'var(--nd-text-2)' }}>{((m.precision ?? 0) * 100).toFixed(0)}%</td>
                         <td style={{ padding: '7px 10px', color: 'var(--nd-text-2)' }}>{((m.recall ?? 0) * 100).toFixed(0)}%</td>
                         <td style={{ padding: '7px 10px', fontWeight: 600, color: 'var(--nd-text-1)' }}>{(m.f1 ?? 0).toFixed(2)}</td>
@@ -819,7 +874,16 @@ const Orders: React.FC = () => {
           <button onClick={clearFilters} style={{ padding: '5px 10px', borderRadius: 20, border: '1px solid var(--nd-border)', cursor: 'pointer', fontSize: 12, background: 'var(--nd-surface)', color: 'var(--nd-text-3)' }}>Clear</button>
         )}
         <span style={{ marginLeft: 4, fontSize: 12, color: 'var(--nd-text-3)', alignSelf: 'center' }}>
-          {visibleSessions.length} session{visibleSessions.length !== 1 ? 's' : ''}
+          {/* Counted separately: an open position is not a session that
+              happened, and folding the two together is what made today's two
+              real trades look like seven. */}
+          {visibleSessions.filter(s => !s.allOpen).length} session
+          {visibleSessions.filter(s => !s.allOpen).length !== 1 ? 's' : ''}
+          {visibleSessions.filter(s => s.allOpen).length > 0 && (
+            <span style={{ color: 'var(--nd-orange)' }}>
+              {' · '}{visibleSessions.filter(s => s.allOpen).length} open
+            </span>
+          )}
         </span>
         {!listLoading && (
           <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
@@ -887,7 +951,7 @@ const Orders: React.FC = () => {
           <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' as any }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, minWidth: 820 }}>
             <thead>
-              <tr style={{ borderBottom: '1px solid var(--nd-border)', background: 'var(--nd-bg)' }}>
+              <tr style={{ borderBottom: '1px solid var(--nd-border)', background: 'var(--nd-surface)' }}>
                 <th style={{ width: 34 }} />
                 {SCOLS.map(c => (
                   <th key={c.key} onClick={() => onSort(c.key)}
@@ -921,15 +985,24 @@ const Orders: React.FC = () => {
                         <span style={{ fontSize: 10, padding: '2px 7px', borderRadius: 4, fontWeight: 600, background: `${modeColor[s.source] ?? '#888'}18`, color: modeColor[s.source] ?? 'var(--nd-text-3)' }}>{s.source}</span>
                       </td>
                       <td style={{ padding: '10px 14px', color: 'var(--nd-text-2)' }}>{s.count}{s.isSession ? ' · session' : ''}</td>
-                      <td style={{ padding: '10px 14px', fontWeight: 600, color: pnlColor(s.totalPnl) }}>₹{s.totalPnl.toFixed(2)}</td>
-                      <td style={{ padding: '10px 14px', color: 'var(--nd-text-2)' }}>{s.closed ? `${Math.round(s.wins / s.closed * 100)}% (${s.wins}/${s.closed})` : '—'}</td>
+                      <td style={{ padding: '10px 14px', fontWeight: 600, color: s.allOpen ? 'var(--nd-text-3)' : pnlColor(s.totalPnl) }}>
+                        {/* ₹0.00 is a claim about a result. An open position has
+                            no result yet, and saying it does is worse than
+                            saying nothing. */}
+                        {s.allOpen ? '—' : `₹${s.totalPnl.toFixed(2)}`}
+                      </td>
+                      <td style={{ padding: '10px 14px', color: 'var(--nd-text-2)' }}>
+                        {s.allOpen
+                          ? <span className="nd-chip-tag" style={{ color: 'var(--nd-orange)' }}>open</span>
+                          : s.closed ? `${Math.round(s.wins / s.closed * 100)}% (${s.wins}/${s.closed})` : '—'}
+                      </td>
                       <td style={{ padding: '10px 14px', color: 'var(--nd-text-3)', fontSize: 11 }}>{fmt(s.tradeDate)}</td>
                       <td style={{ padding: '10px 14px', color: 'var(--nd-text-3)', fontSize: 11 }}>{fmt(s.createdAt)}</td>
                     </tr>
 
                     {/* Expanded: the session's trade rows only (chart lives in the modal) */}
                     {open && (
-                      <tr style={{ background: 'var(--nd-bg)' }}>
+                      <tr style={{ background: 'var(--nd-surface)' }}>
                         <td colSpan={SCOLS.length + 1} style={{ padding: '8px 16px 16px' }}>
                           <div style={{ overflowX: 'auto' }}>
                             <table style={{ width: '100%', minWidth: 560, borderCollapse: 'collapse', fontSize: 12 }}>

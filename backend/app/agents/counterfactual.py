@@ -135,6 +135,19 @@ async def init_schema() -> None:
 BASELINE_POLICY: dict = {
     "stop_atr_mult": 0.9,  "stop_floor": 1.0,     # stop  = -max(floor, mult×ATR%)
     "take_atr_mult": 1.8,  "take_floor": 2.5,     # take  = +max(floor, mult×ATR%)
+    # ATR horizon scaling. `atr` from _intraday_indicators is a 14-bar ONE-MINUTE
+    # true range — median 0.082% of price, p90 0.215% (294,088 labelled bars).
+    # The [atr_floor, atr_cap] clamp below therefore pins atr_pct at its 0.5
+    # floor on 98.59% of bars, which makes both *_atr_mult legs inert: the
+    # "volatility-scaled" stop and target are the constants -1.5% and +2.5% on
+    # essentially every trade. Proof: take_reach12_run and take_reach12_atr10_run
+    # differ only in take_atr_mult (1.8 vs 1.0) and produced 141,214 vs 141,219
+    # wins over 412,923 identical entries — a 5-trade difference.
+    # atr_scale converts the 1-min ATR to the trade's actual horizon; under a
+    # random walk that is sqrt(hold_minutes). Default 1.0 + floor 0.5 reproduces
+    # the historical behaviour bit-for-bit, so every pre-existing variant is
+    # unchanged and the A/B series stays continuous.
+    "atr_scale": 1.0, "atr_floor": 0.5, "atr_cap": 2.5,
     "lock_gain": 1.2,      "trail": "sma5",        # profit-lock trail type
     "fast_cut": True,       "rsi_exit": True,      # momentum cut / overbought exit
     "grace_min": 0,                                # stop active immediately
@@ -266,6 +279,37 @@ EXIT_VARIANTS: dict[str, dict] = {
     "lock05_run": {**LIVE_POLICY, "lock_gain": 0.5},
     # Both levers, to separate "either helps" from "they only work together".
     "reach12_lock05_run": {**LIVE_POLICY, "take_floor": 1.2, "lock_gain": 0.5},
+    # ── Live ATR scaling (added 2026-08-25) ─────────────────────────────────
+    # The first variants in which volatility scaling actually does anything.
+    # Every earlier variant — including the whole stop-width and take_floor
+    # family — ran with atr_pct pinned at 0.5 on 98.6% of bars, so their
+    # *_atr_mult knobs were multiplying a constant and only the *_floor legs
+    # ever bound. This is untested ground, not a re-run of the exit A/B.
+    #
+    # atr_scale sqrt(60) ≈ 7.75 converts the 1-minute ATR to the 60-minute
+    # hold_cap horizon; atr_floor drops to 0.3 so the scaled value can bind
+    # instead of being clamped straight back to a constant. Median bar becomes
+    # 0.082% × 7.75 ≈ 0.64% and p90 ≈ 1.67%, so stop and target finally track
+    # the instrument.
+    #
+    # Motivation is a measured, day-clustered result: over 24 paired days the
+    # top-30% ATR bucket returned -0.157% per entry MORE than the bottom-30%
+    # (t = -2.55). Under a constant -1.5% stop that is mechanical — 1.5% is
+    # ~18 one-minute ATRs for a quiet name but ~7 for a volatile one, so the
+    # volatile names stop out on noise. If that reading is right, scaling the
+    # stop should shrink the gap; if the gap survives, high volatility is bad
+    # on this universe for a reason the exit cannot fix. Either way it is the
+    # first clean read on the question.
+    "atr_live_run": {**LIVE_POLICY, "atr_scale": 7.75, "atr_floor": 0.3},
+    # Scaled ATR plus a target the universe can reach — take_floor 1.2 only
+    # binds on the quiet names once the ATR leg is live.
+    "atr_live_reach12_run": {**LIVE_POLICY, "atr_scale": 7.75, "atr_floor": 0.3,
+                             "take_floor": 1.2},
+    # Scaled ATR with the profit-lock armed earlier. trail_lock is the only
+    # branch that books a gain (14/14 wins, +14.56 pts in August) and its
+    # ARMING RATE is the signal — it fired on 14 of 77 trades.
+    "atr_live_lock05_run": {**LIVE_POLICY, "atr_scale": 7.75, "atr_floor": 0.3,
+                            "lock_gain": 0.5},
 }
 
 
@@ -312,7 +356,10 @@ def _simulate_policy(bars: list[dict], inds: list[dict], entry_idx: int,
 
         ind      = inds[i]
         gain     = (price - entry) / entry * 100
-        atr_pct  = max(0.5, min(2.5, (ind.get("atr", 0.0) / price * 100) if price else 0.8))
+        raw_atr  = (ind.get("atr", 0.0) / price * 100) if price else 0.8
+        atr_pct  = max(policy.get("atr_floor", 0.5),
+                       min(policy.get("atr_cap", 2.5),
+                           raw_atr * policy.get("atr_scale", 1.0)))
         stop     = -max(policy["stop_floor"], policy["stop_atr_mult"] * atr_pct)
         take     = max(policy["take_floor"], policy["take_atr_mult"] * atr_pct)
         sma5, sma20, mom5 = ind.get("sma5", 0.0), ind.get("sma20", 0.0), ind.get("mom5", 0.0)
@@ -565,6 +612,102 @@ async def train_rl_from_labels(day: str) -> int:
                 extra={"log_type": "ai_engine", "event": "cf_rl_trained",
                        "day": day, "states": len(state_rewards)})
     return updates
+
+
+_AGENT_WEIGHT_FLAG = "cf:agent_weights:"
+# One bounded nudge per agent per day. Deliberately small: there are ~10k labels
+# a day against a handful of real trades, so anything per-label would let
+# counterfactuals overwhelm executed outcomes entirely.
+_CF_WEIGHT_STEP = 0.02
+
+
+async def nudge_agent_weights_from_labels(day: str, force: bool = False) -> dict:
+    """Move each agent's weight toward the accuracy its OWN votes showed in the
+    day's counterfactual labels.
+
+    Why this exists: `record_outcome` — the only thing that moved
+    `ai_engine_agent_weights.weight` — fires solely on a CLOSED TRADE. On any day
+    the gates decline everything (or the execution chain is disarmed), the agent
+    weights froze completely, even though the labels contain full evidence about
+    which agents were right. RL, pattern memory and the per-action rates all
+    already learn from labels; the weight scalar was the one path that did not,
+    and it multiplies every vote.
+
+    Bounded by design: ONE update per agent per day, capped at _CF_WEIGHT_STEP,
+    idempotent via a Redis flag. Counterfactuals inform the weights; they cannot
+    stampede them.
+    """
+    from sqlalchemy import text
+    from app.database.postgres import engine
+    from app.utils.redis_client import get_redis
+
+    r = get_redis()
+    flag = _AGENT_WEIGHT_FLAG + day
+    if not force and await r.get(flag):
+        return {"skipped": "already applied", "day": day}
+
+    async with engine.begin() as conn:
+        rows = (await conn.execute(text("""
+            SELECT sig->>'agent'  AS agent,
+                   COUNT(*)::int  AS n,
+                   AVG(CASE
+                         WHEN sig->>'action' = 'BUY'
+                              THEN CASE WHEN d.cf_pnl_pct > 0 THEN 1.0 ELSE 0.0 END
+                         WHEN sig->>'action' = 'SELL'
+                              THEN CASE WHEN d.cf_pnl_pct > 0 THEN 0.0 ELSE 1.0 END
+                         ELSE NULL          -- HOLD carries no directional claim
+                       END)::float AS acc
+            FROM session_decisions d
+            CROSS JOIN LATERAL jsonb_array_elements(d.agents) sig
+            WHERE d.cf_pnl_pct IS NOT NULL
+              AND (d.created_at AT TIME ZONE 'Asia/Kolkata')::date::text = :day
+              AND sig->>'agent' IS NOT NULL
+              """ + _TRADEABLE_ENTRY_SQL + """
+            GROUP BY sig->>'agent'
+            HAVING COUNT(*) FILTER (WHERE sig->>'action' IN ('BUY','SELL')) >= 30
+        """), {"day": day})).fetchall()
+
+        base_row = (await conn.execute(text("""
+            SELECT AVG(CASE WHEN cf_pnl_pct > 0 THEN 1.0 ELSE 0.0 END)::float
+            FROM session_decisions d
+            WHERE cf_pnl_pct IS NOT NULL
+              AND (created_at AT TIME ZONE 'Asia/Kolkata')::date::text = :day
+              """ + _TRADEABLE_ENTRY_SQL + """
+        """), {"day": day})).fetchone()
+        base = float(base_row[0]) if base_row and base_row[0] is not None else 0.5
+
+        # ZERO-SUM against the cohort, not against the day's base rate.
+        #
+        # An agent's accuracy is measured only on the bars IT chose to vote
+        # directionally; the base rate spans every bar, most of which are HOLD.
+        # Those are different populations, so comparing them made nearly every
+        # agent clear the bar and collect the maximum +0.02 — uniform inflation
+        # that discriminates between nobody and walks every weight toward the
+        # 3.0 clamp. Centring the deltas on the cohort mean makes this a pure
+        # reallocation: being better than the OTHER AGENTS today is what earns
+        # weight, which is the only comparison where the populations match.
+        scored = [(a, float(acc)) for a, n, acc in rows
+                  if acc is not None and a not in ("anomaly",)]
+        applied = {}
+        if scored:
+            mean_acc = sum(v for _, v in scored) / len(scored)
+            for agent, acc in scored:
+                lift = acc - mean_acc
+                delta = max(-_CF_WEIGHT_STEP, min(_CF_WEIGHT_STEP, lift))
+                await conn.execute(text("""
+                    UPDATE ai_engine_agent_weights
+                    SET weight = GREATEST(0.3, LEAST(3.0, weight + :d)),
+                        updated_at = NOW()
+                    WHERE agent_name = :a
+                """), {"d": delta, "a": agent})
+                applied[agent] = round(delta, 4)
+
+    await r.set(flag, "1", ex=86400 * 30)
+    if applied:
+        logger.info("CF weight nudge for %s: base=%.3f, %d agents adjusted",
+                    day, base, len(applied),
+                    extra={"log_type": "ai_engine", "event": "cf_weight_nudge"})
+    return {"day": day, "base": round(base, 4), "applied": applied}
 
 
 async def promote_memory_phantoms(day: str) -> int:
@@ -964,22 +1107,23 @@ async def exit_ab_report(days: int = 14) -> dict:
 # ── Background loop (runner/full role) ────────────────────────────────────────
 
 def _market_hours() -> bool:
+    from app.utils.market_calendar import is_trading_day
     now = datetime.now(IST)
-    if now.weekday() >= 5:
+    if not is_trading_day(now):
         return False
     mins = now.hour * 60 + now.minute
     return (9 * 60 + 14) <= mins <= (15 * 60 + 31)
 
 
 def _last_completed_trading_day(now: datetime) -> str:
+    # Holidays skipped too: the morning after one, a weekday-only walk picks the
+    # closed day, finds no ticks, and the nightly slot is spent on nothing.
+    from app.utils.market_calendar import is_trading_day, prev_trading_day
     d = now.date()
     mins = now.hour * 60 + now.minute
-    if d.weekday() < 5 and mins >= (15 * 60 + 35):
+    if is_trading_day(d) and mins >= (15 * 60 + 35):
         return d.isoformat()
-    d -= timedelta(days=1)
-    while d.weekday() >= 5:
-        d -= timedelta(days=1)
-    return d.isoformat()
+    return prev_trading_day(d).isoformat()
 
 
 async def _sync_learning_rates(trigger: str) -> None:
@@ -1016,6 +1160,7 @@ async def counterfactual_loop() -> None:
                 day = _last_completed_trading_day(datetime.now(IST))
                 await train_rl_from_labels(day)
                 await promote_memory_phantoms(day)
+                await nudge_agent_weights_from_labels(day)
                 await run_exit_ab(day)
                 await run_exit_ab_store(day)   # whole-tick-store population too
                 # Re-run days missing a variant added after they were evaluated,

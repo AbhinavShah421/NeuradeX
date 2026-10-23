@@ -31,10 +31,17 @@ public class TradeOutcome {
     @JsonProperty("paper_trade")
     private boolean paperTrade;
 
+    // The ensemble confidence this trade cleared the risk gate on. RiskValidated
+    // has carried it all along and it was logged on the way past, but it was
+    // never put on the outcome — so every stored trade read 0.00 confidence and
+    // nothing downstream could tell a 0.61 entry from a 0.95 one.
+    private double confidence;
+
     private String status;
 
+    // Passed straight through from RiskValidated — vote objects, not strings.
     @JsonProperty("agent_votes")
-    private Map<String, String> agentVotes;
+    private Map<String, Object> agentVotes;
 
     @JsonProperty("executed_at")
     private String executedAt;
@@ -42,9 +49,31 @@ public class TradeOutcome {
     @JsonProperty("portfolio_value")
     private double portfolioValue;
 
-    // Populated after close
-    private double pnl;
+    // ── Populated only on the CLOSING leg ──────────────────────────────────
+    // These are boxed, not primitives, on purpose. feedback-service decides
+    // "is this a close?" by whether any of exit_price / timestamp_close /
+    // outcome is present; a primitive double serialises an entry's exitPrice as
+    // 0.0 rather than omitting it, which would make every entry look like a
+    // close at zero and hand the weight learner a -100% trade. Nulls are
+    // omitted by Jackson, so an entry stays recognisably an entry.
+    private Double pnl;
 
     @JsonProperty("pnl_pct")
-    private double pnlPct;
+    private Double pnlPct;
+
+    @JsonProperty("exit_price")
+    private Double exitPrice;
+
+    /** WIN / LOSS / BREAK_EVEN — the result, distinct from `status` ("FILLED"). */
+    private String outcome;
+
+    @JsonProperty("timestamp_close")
+    private String timestampClose;
+
+    @JsonProperty("duration_minutes")
+    private Integer durationMinutes;
+
+    /** stop_loss | take_profit | end_of_day | signal — why the position was closed. */
+    @JsonProperty("exit_reason")
+    private String exitReason;
 }

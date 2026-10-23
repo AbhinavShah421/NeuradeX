@@ -60,7 +60,7 @@ All agents publish the same schema to `agent.signals`:
 | **Consumes** | Queue: `market.data.sentiment` |
 | **Publishes** | Exchange: `agent.signals` · routing_key: `sentiment` |
 | **Model** | FinBERT (`ProsusAI/finbert`) |
-| **Data** | MongoDB `news` — last `SENTIMENT_WINDOW_MINUTES` (60 min) articles |
+| **Data** | Headlines supplied via `POST /score` (no queue-side news store) |
 
 ---
 

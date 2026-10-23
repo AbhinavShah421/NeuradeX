@@ -19,9 +19,9 @@ const HeadlineStats: React.FC<HeadlineStatsProps> = ({ loading, total, overallWi
         {
           label: 'Historical Win-Rate',
           value: loading || !total ? '—' : `${(overallWin * 100).toFixed(1)}%`,
-          color: overallWin >= 0.5 ? 'var(--nd-green)' : '#e74c3c',
+          color: overallWin >= 0.5 ? 'var(--nd-green)' : '#fb5c7d',
           icon: 'emoji_events',
-          iconColor: overallWin >= 0.5 ? 'var(--nd-green)' : '#e74c3c',
+          iconColor: overallWin >= 0.5 ? 'var(--nd-green)' : '#fb5c7d',
           iconBg: overallWin >= 0.5 ? 'rgba(0,179,134,0.12)' : 'rgba(231,76,60,0.12)',
         },
         {

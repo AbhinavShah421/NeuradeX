@@ -288,7 +288,7 @@ Every step publishes a **RabbitMQ event** so downstream services react asynchron
 **Verification:**
 - [ ] Live tick for RELIANCE appears in Redis within 1s of market tick
 - [ ] 1-year historical candles stored in TimescaleDB
-- [ ] News articles fetched and stored raw in MongoDB
+- [ ] News articles fetched and scored (no raw store — headlines go straight to FinBERT)
 - [ ] RabbitMQ `market.data` exchange receives message per tick
 
 ---
@@ -345,7 +345,7 @@ Every step publishes a **RabbitMQ event** so downstream services react asynchron
 **Service:** `sentiment-agent` (Python)
 
 **Responsibilities:**
-- Subscribe to raw news/social data from MongoDB
+- Receive raw news/social text via `POST /score`
 - Score each article/post using FinBERT
 - Produce aggregate bullish/bearish score per symbol
 - Detect events: earnings surprises, regulatory actions, analyst upgrades
@@ -768,9 +768,7 @@ STAGING (just trained) → validated by backtesting → PRODUCTION → deprecate
 | **Frontend** | React + TypeScript + Vite | 18 / 5 |
 | **Message Broker** | RabbitMQ | 3.12 |
 | **Time-Series DB** | PostgreSQL + TimescaleDB | 15 |
-| **Document Store** | MongoDB | 6 |
 | **Cache / Pub-Sub** | Redis | 7 |
-| **Metrics DB** | InfluxDB | 2 |
 | **Search / Logs** | Elasticsearch + Kibana | 8.11 |
 | **ML Framework** | PyTorch + scikit-learn | 2.x |
 | **RL Framework** | Stable-Baselines3 + Ray RLlib | 2.x |
@@ -789,10 +787,10 @@ STAGING (just trained) → validated by backtesting → PRODUCTION → deprecate
 | User accounts, auth | PostgreSQL | Relational, ACID |
 | OHLCV candles (time-series) | PostgreSQL (TimescaleDB hypertable) | Time-series compression, fast range queries |
 | Trade records, feedback | PostgreSQL | Relational queries for weight updates |
-| Raw news / social text | MongoDB | Unstructured, variable schema |
-| Model predictions (history) | MongoDB | Document store suits nested agent signals |
+| Raw news / social text | — | Scored in-flight; not persisted |
+| Model predictions (history) | PostgreSQL | `session_decisions` / `ai_engine_predictions` |
 | Live tick cache | Redis | Sub-ms read, TTL-based expiry |
-| System metrics, latency | InfluxDB | Time-series metrics for dashboards |
+| System metrics, latency | Elasticsearch | Structured logs + Kibana dashboards |
 | Application logs | Elasticsearch | Full-text search, Kibana visualization |
 | ML models | MLflow artifact store (S3 or local) | Versioned, tagged |
 
@@ -882,10 +880,8 @@ GET    /api/v1/models                     ← MLflow registry summary
 | Service | Port | Notes |
 |---|---|---|
 | postgres | 5432 | TimescaleDB extension required |
-| mongodb | 27017 | |
 | redis | 6379 | |
 | rabbitmq | 5672, 15672 | Management UI on 15672 |
-| influxdb | 8086 | |
 | elasticsearch | 9200 | |
 | kibana | 5601 | |
 | mlflow | 5000 | New — model registry UI |
@@ -954,7 +950,7 @@ GET /health
 **Goal:** Real ML inference from trained models, not simulated outputs.
 
 - [x] `technical-agent` (port 8002): 15 indicators + XGBoost from MLflow + rule-based fallback
-- [x] `sentiment-agent` (port 8003): FinBERT (`ProsusAI/finbert`) + MongoDB news consumer + weighted source scoring
+- [x] `sentiment-agent` (port 8003): FinBERT (`ProsusAI/finbert`) + weighted source scoring
 - [x] `macro-agent` (port 8004): VIX India, USD/INR, crude oil, G-sec, regime classifier (4 regimes)
 - [x] `pattern-agent` (port 8005): 8 candlestick patterns + HMM regime via `hmmlearn`
 - [x] `rl-agent` (port 8006): `TradingEnv` gym environment + PPO from MLflow + momentum fallback

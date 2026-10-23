@@ -6,7 +6,7 @@ sidebar_position: 2
 
 # Service Dependency Matrix
 
-| Service | Publishes (RabbitMQ) | Consumes (RabbitMQ) | PostgreSQL | Redis | MongoDB | HTTP Out |
+| Service | Publishes (RabbitMQ) | Consumes (RabbitMQ) | PostgreSQL | Redis | HTTP Out |
 |---|---|---|---|---|---|---|
 | **market-data-service** | `market.data`, `notifications` | — | Write `ohlcv` | Write `tick:*`, `candle:*` | Write `news` | Groww, Yahoo, NewsAPI |
 | **technical-agent** | `agent.signals` (technical) | `market.data.technical` | Read `ohlcv` | — | — | — |

@@ -6,12 +6,6 @@ class Settings(BaseSettings):
     SERVICE_PORT: int = 8003
     SERVICE_NAME: str = "sentiment-agent"
 
-    MONGODB_HOST: str = "mongodb"
-    MONGODB_PORT: int = 27017
-    MONGODB_USER: str = "stock_admin"
-    MONGODB_PASSWORD: str = "stock_password"
-    MONGODB_DB: str = "stock_prediction"
-    MONGODB_URL: str = ""
 
     RABBITMQ_HOST: str = "rabbitmq"
     RABBITMQ_PORT: int = 5672
@@ -25,11 +19,6 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def build_urls(self) -> "Settings":
-        if not self.MONGODB_URL:
-            self.MONGODB_URL = (
-                f"mongodb://{self.MONGODB_USER}:{self.MONGODB_PASSWORD}"
-                f"@{self.MONGODB_HOST}:{self.MONGODB_PORT}/{self.MONGODB_DB}?authSource=admin"
-            )
         if not self.RABBITMQ_URL:
             self.RABBITMQ_URL = (
                 f"amqp://{self.RABBITMQ_USER}:{self.RABBITMQ_PASSWORD}"

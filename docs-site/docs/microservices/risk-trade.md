@@ -60,3 +60,18 @@ sidebar_position: 4
 **Subscribers of `trade.outcomes`:**
 - `trade.outcomes.feedback` → feedback-service
 - `trade.outcomes.rl` → rl-agent
+
+The executor publishes **two** messages per trade: the entry, and — since
+2026-09-09 — the close, under the same `trade_id`. Before that only the entry
+existed, so every trade it took stayed open forever. See
+[Position Lifecycle](./position-lifecycle.md) for how positions are tracked,
+priced and closed, and why the executor enforcing a stop is not a second exit
+engine.
+
+## HTTP
+
+| Route | Purpose |
+|---|---|
+| `GET /positions` | what the executor currently holds (in-memory state, unreadable anywhere else) |
+| `POST /positions/{symbol}/close?price=` | manual flatten, for a position the monitor cannot price |
+| `GET /actuator/health` | liveness |

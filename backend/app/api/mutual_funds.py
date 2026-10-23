@@ -5,11 +5,15 @@ Groww's trading API does not expose MF holdings, so personal holdings are entere
 by the user and stored in Redis; all NAV/return data is real (mfapi.in / AMFI).
 """
 from __future__ import annotations
+import difflib
 import json
+import re
+import tempfile
 from datetime import datetime
+from pathlib import Path
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from app.utils.elk_logger import get_logger
@@ -218,15 +222,20 @@ async def get_mf_holdings():
     }}
 
 
+async def _upsert_holding(scheme_code: int, units: float | None, invested: float | None) -> list[dict]:
+    held = await _load_holdings()
+    held = [h for h in held if h["scheme_code"] != scheme_code]
+    held.append({"scheme_code": scheme_code, "units": units, "invested": invested})
+    await _cache_set(_HOLDINGS_KEY, held, 86400 * 365)
+    return held
+
+
 @router.post("/holdings")
 async def add_mf_holding(req: AddFund):
     f = await _fund_summary(req.scheme_code)
     if not f:
         raise HTTPException(404, "scheme not found or no NAV history")
-    held = await _load_holdings()
-    held = [h for h in held if h["scheme_code"] != req.scheme_code]
-    held.append({"scheme_code": req.scheme_code, "units": req.units, "invested": req.invested})
-    await _cache_set(_HOLDINGS_KEY, held, 86400 * 365)
+    held = await _upsert_holding(req.scheme_code, req.units, req.invested)
     return {"status": "success", "data": {"added": f["name"], "count": len(held)}}
 
 
@@ -235,6 +244,153 @@ async def remove_mf_holding(code: int):
     held = [h for h in await _load_holdings() if h["scheme_code"] != code]
     await _cache_set(_HOLDINGS_KEY, held, 86400 * 365)
     return {"status": "success", "data": {"count": len(held)}}
+
+
+# ── CAS import (CAMS/KFinTech Consolidated Account Statement PDF) ─────────────
+# Groww's trading API has no mutual-fund endpoint at all (see module docstring),
+# so this is the only way to bulk-populate holdings instead of adding funds one
+# at a time: the CAS is the RTA-issued statement covering every AMC, emailed by
+# CAMS/KFinTech or downloadable from Groww's own app under Reports > CAS.
+
+_WORD_RE = re.compile(r"[a-z0-9]+")
+# Words that appear in almost every scheme name and add noise to the match
+# score without discriminating between funds.
+_STOPWORDS = {"fund", "plan", "direct", "regular", "growth", "the", "scheme"}
+
+
+def _match_tokens(name: str) -> set[str]:
+    return {w for w in _WORD_RE.findall(name.lower()) if w not in _STOPWORDS}
+
+
+def _match_scheme(cas_name: str, schemes: list[dict]) -> tuple[dict | None, float]:
+    """Best-effort match of a CAS scheme name against the AMFI scheme list.
+
+    CAS names ("Parag Parikh Flexi Cap Fund - Direct Plan - Growth") and mfapi
+    names ("Parag Parikh Flexi Cap Fund - Direct Growth") differ in wording, not
+    substance, so this scores candidates by token overlap first (cheap, and
+    immune to word-order/punctuation noise) and breaks ties with a character
+    similarity ratio. Always returns the best candidate — the caller decides
+    whether the score is high enough to trust."""
+    target = _match_tokens(cas_name)
+    if not target:
+        return None, 0.0
+    best, best_score = None, -1.0
+    for s in schemes:
+        cand = _match_tokens(s["schemeName"])
+        if not cand:
+            continue
+        overlap = len(target & cand) / len(target | cand)
+        if overlap < 0.3:          # cheap floor before the expensive ratio() call
+            continue
+        char_sim = difflib.SequenceMatcher(None, cas_name.lower(), s["schemeName"].lower()).ratio()
+        score = overlap * 0.7 + char_sim * 0.3
+        if score > best_score:
+            best, best_score = s, score
+    return best, round(max(best_score, 0.0), 3)
+
+
+def _first_present(d: dict, *keys: str):
+    for k in keys:
+        if d.get(k) is not None:
+            return d[k]
+    return None
+
+
+@router.post("/cas/parse")
+async def parse_cas(file: UploadFile = File(...), password: str = Form("")):
+    """Upload a CAS PDF and get back proposed holdings (scheme match + units)
+    for the user to review before anything is saved. Nothing is written here —
+    see /cas/import for the confirm step."""
+    try:
+        import casparser
+    except ImportError:
+        raise HTTPException(501, "CAS parsing not available on this deployment (casparser not installed)")
+
+    body = await file.read()
+    if not body:
+        raise HTTPException(400, "empty file")
+
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        tmp.write(body)
+        tmp_path = Path(tmp.name)
+    try:
+        try:
+            # Despite the name, output="dict" returns the CASData *pydantic
+            # model*, not a dict (confirmed against casparser 0.7.2 source) —
+            # dump it ourselves so the rest of this function can use .get().
+            # pdfminer's PDFDocument defaults password to "", not None — passing
+            # None throws a TypeError deep in decryption unrelated to a wrong
+            # password, so an empty box must still send "".
+            parsed = casparser.read_cas_pdf(str(tmp_path), password or "", output="dict")
+            data = parsed.model_dump() if hasattr(parsed, "model_dump") else parsed
+        except HTTPException:
+            raise
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "password" in msg or "decrypt" in msg:
+                raise HTTPException(400, "Wrong PDF password (usually your PAN, or PAN+DOB — check the email from CAMS/KFinTech)")
+            raise HTTPException(400, f"Could not parse this PDF: {exc}")
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    folios = data.get("folios") or []
+    if not folios:
+        raise HTTPException(422, "No folios found in this statement — is it a mutual-fund CAS?")
+
+    schemes = await _all_schemes()
+    proposed, unmatched = [], []
+    for folio in folios:
+        for sch in folio.get("schemes") or []:
+            cas_name = _first_present(sch, "scheme", "scheme_name", "name")
+            if not cas_name:
+                continue
+            units = _first_present(sch, "close", "close_calculated", "closing_balance", "balance")
+            valuation = sch.get("valuation") or {}
+            invested = valuation.get("cost")
+            match, score = _match_scheme(cas_name, schemes)
+            row = {
+                "cas_name": cas_name, "folio": folio.get("folio"),
+                "units": round(float(units), 4) if units not in (None, "") else None,
+                "invested": round(float(invested), 2) if invested not in (None, "") else None,
+                "current_nav_value": valuation.get("value"),
+                "match_score": score,
+            }
+            if match and score >= 0.55:
+                row["scheme_code"] = match["schemeCode"]
+                row["matched_name"] = match["schemeName"]
+                proposed.append(row)
+            else:
+                row["scheme_code"] = match["schemeCode"] if match else None
+                row["matched_name"] = match["schemeName"] if match else None
+                unmatched.append(row)
+
+    return {"status": "success", "data": {
+        "proposed": proposed, "unmatched": unmatched,
+        "count": len(proposed), "unmatched_count": len(unmatched),
+        "note": "Units come straight from the CAS. Invested amount is only filled in when the "
+                "statement carries a cost figure — check it before saving, especially for unmatched funds.",
+    }}
+
+
+class CasImportRow(BaseModel):
+    scheme_code: int
+    units:    float | None = None
+    invested: float | None = None
+
+
+@router.post("/cas/import")
+async def import_cas(rows: list[CasImportRow]):
+    """Commit a reviewed set of rows from /cas/parse (or hand-edited ones) into
+    My Funds in one shot."""
+    added, skipped = [], []
+    for r in rows:
+        f = await _fund_summary(r.scheme_code)
+        if not f:
+            skipped.append(r.scheme_code)
+            continue
+        await _upsert_holding(r.scheme_code, r.units, r.invested)
+        added.append(f["name"])
+    return {"status": "success", "data": {"added": added, "count": len(added), "skipped": skipped}}
 
 
 # ── Category screener ──────────────────────────────────────────────────────────

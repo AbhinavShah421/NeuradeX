@@ -10,7 +10,7 @@ business logic (DB/data-provider access, calculations, simulation) to
 app.services.backtest_service. See that module's docstring for the list of
 names re-exported below for other modules that import internals from here.
 """
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel  # noqa: F401  (kept for readability / potential future use)
 
 from app.utils.elk_logger import get_logger
@@ -102,11 +102,37 @@ async def get_intraday_candles(
     symbol: str,
     date: str = Query(...),
     real_only: bool = Query(False, description="If true, 422 instead of simulating when Groww has no data"),
+    interval: int = Query(5, ge=1, le=60, description="Candle interval in minutes"),
 ):
-    """Return all 5-min candles for one trading day (Groww or simulated).
+    """Return one trading day's candles (Groww or simulated).
     No LLM involved — the frontend drives the progressive replay.
+    Default 5m: the progressive replay depends on it. The chart requests 1m for
+    scroll-back history, falling back to 5m outside the provider's 1m window.
     With real_only=true the endpoint refuses to simulate."""
-    return await service.get_intraday_candles(symbol, date, real_only)
+    return await service.get_intraday_candles(symbol, date, real_only, interval)
+
+
+@router.get("/levels/{symbol}")
+async def get_prior_levels(symbol: str, date: str = Query(...)):
+    """Prior-day / multi-day S/R for one symbol, as of a session date.
+
+    DISPLAY ONLY — the chart draws these; nothing in the trading path reads
+    them. Levels come from days strictly BEFORE `date`, so asking about a past
+    session returns what was knowable that morning.
+    """
+    from datetime import datetime as _dt, timedelta as _td
+    from app.data.providers import fetch_daily
+    from app.utils.price_levels import build_levels
+    try:
+        end = _dt.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(400, "date must be YYYY-MM-DD")
+    try:
+        daily, _src = await fetch_daily(symbol.upper(), end - _td(days=40), end)
+    except Exception:
+        daily = []
+    return {"status": "success",
+            "data": build_levels(daily[-15:], today=date) if daily else {}}
 
 
 @router.post("/agent-step")

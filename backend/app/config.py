@@ -31,23 +31,6 @@ class Settings(BaseSettings):
     POSTGRES_DB: str = "stock_prediction_db"
     POSTGRES_URL: str = ""
 
-    # Database - MongoDB
-    MONGODB_HOST: str = "mongodb"
-    MONGODB_PORT: int = 27017
-    MONGODB_USER: str = "stock_admin"
-    MONGODB_PASSWORD: str = "stock_password"
-    MONGODB_DB: str = "stock_prediction"
-    MONGODB_URL: str = ""
-
-    # Database - InfluxDB
-    INFLUXDB_HOST: str = "influxdb"
-    INFLUXDB_PORT: int = 8086
-    INFLUXDB_USER: str = "stock_user"
-    INFLUXDB_PASSWORD: str = "stock_password"
-    INFLUXDB_DB: str = "stock_metrics"
-    INFLUXDB_ORG: str = "stock-org"
-    INFLUXDB_TOKEN: str = "stock-token"
-
     # Redis
     REDIS_HOST: str = "redis"
     REDIS_PORT: int = 6379
@@ -86,6 +69,11 @@ class Settings(BaseSettings):
     LLM_API_URL: str = "http://host.docker.internal:11434"
     LLM_MAX_TOKENS: int = 512
     LLM_TEMPERATURE: float = 0.7
+
+    # Optional TradingAgents-style analyst debate. Shadow-only: this review is
+    # recorded for evaluation and never participates in a trading decision.
+    TRADINGAGENTS_SHADOW_REVIEW_ENABLED: bool = False
+    TRADINGAGENTS_SHADOW_REVIEW_TIMEOUT: float = 8.0
 
     # Auth / JWT
     JWT_SECRET: str = "neuradex-jwt-secret-change-in-production"
@@ -132,9 +120,21 @@ class Settings(BaseSettings):
     TRAIN_FROM_STRATEGY_BACKTEST: bool = False
 
     # Intraday trade costs (basis points) so simulated P&L is net-of-cost.
-    TRADE_SLIPPAGE_BPS: float = 2.0   # per side — spread/slippage on the fill
-    TRADE_FEE_BPS: float = 3.0        # per side — brokerage + exchange + GST
-    TRADE_STT_BPS: float = 2.5        # sell side — Securities Transaction Tax
+    TRADE_SLIPPAGE_BPS: float = 2.0     # per side — spread/slippage on the fill
+    # Brokerage is the LOWER of a flat cap and a percentage (Groww: Rs20 / 0.05%),
+    # so it is not a basis-point constant — it depends on order value. The old
+    # flat TRADE_FEE_BPS=3.0 understated it by ~40% at the Rs5k positions this
+    # system trades, and omitted stamp duty entirely.
+    TRADE_BROKERAGE_PCT: float = 0.05   # per side, % of turnover
+    TRADE_BROKERAGE_CAP: float = 20.0   # per side, rupees — binds above ~Rs40,000
+    TRADE_EXCHANGE_BPS: float = 0.297   # per side — NSE transaction charge
+    TRADE_GST_PCT: float = 18.0         # on brokerage + exchange, not on taxes
+    TRADE_STT_BPS: float = 2.5          # sell side — Securities Transaction Tax
+    TRADE_STAMP_BPS: float = 0.3        # buy side — stamp duty (0.003%)
+    # Position size used when a caller asks for a cost rate without naming one.
+    # Median executed position is ~Rs5,003 — reporting against a larger, cheaper
+    # size is how a losing strategy looks viable on paper.
+    TRADE_TYPICAL_TURNOVER: float = 5000.0
 
     # Trade gate — how selective session entries are. Switchable at runtime from
     # the dashboard (stored in Redis); this is the default.
@@ -179,12 +179,6 @@ class Settings(BaseSettings):
             self.POSTGRES_URL = (
                 f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
                 f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
-            )
-        if not self.MONGODB_URL:
-            self.MONGODB_URL = (
-                f"mongodb://{self.MONGODB_USER}:{self.MONGODB_PASSWORD}"
-                f"@{self.MONGODB_HOST}:{self.MONGODB_PORT}/{self.MONGODB_DB}"
-                f"?authSource=admin"
             )
         if not self.REDIS_URL:
             if self.REDIS_PASSWORD:

@@ -46,10 +46,10 @@
 
 | Service | Port | Language | Infrastructure |
 |---|---|---|---|
-| `backend` | **8000** | Python / FastAPI | PostgreSQL · MongoDB · Redis · RabbitMQ · Elasticsearch |
-| `market-data-service` | **8001** | Python / FastAPI | PostgreSQL · MongoDB · Redis · RabbitMQ |
+| `backend` | **8000** | Python / FastAPI | PostgreSQL · Redis · RabbitMQ · Elasticsearch |
+| `market-data-service` | **8001** | Python / FastAPI | PostgreSQL · Redis · RabbitMQ |
 | `technical-agent` | **8002** | Python / FastAPI | PostgreSQL · RabbitMQ |
-| `sentiment-agent` | **8003** | Python / FastAPI | MongoDB · RabbitMQ |
+| `sentiment-agent` | **8003** | Python / FastAPI | RabbitMQ |
 | `macro-agent` | **8004** | Python / FastAPI | Redis · RabbitMQ |
 | `pattern-agent` | **8005** | Python / FastAPI | PostgreSQL · RabbitMQ |
 | `rl-agent` | **8006** | Python / FastAPI | PostgreSQL · Redis · RabbitMQ |
@@ -127,7 +127,7 @@
         │
         ▼
   [backend :8000]  ←→  Frontend :3000  (HTTP REST + WebSocket)
-  Reads Redis/PostgreSQL/MongoDB for API responses
+  Reads Redis/PostgreSQL for API responses
   HTTP POST → feedback-service:8012/trades  (backtest results)
 ```
 
@@ -182,7 +182,7 @@ Client
 | `GET` | `/api/stocks/` | [87](backend/app/api/stocks.py#L87) | List all tracked stocks with current price (from Redis `tick:{symbol}`) |
 | `GET` | `/api/stocks/{symbol}` | [136](backend/app/api/stocks.py#L136) | Single stock detail — price, change, volume |
 | `GET` | `/api/stocks/{symbol}/candlesticks` | [159](backend/app/api/stocks.py#L159) | OHLCV candles from PostgreSQL `ohlcv` table; query params: `interval`, `limit` |
-| `GET` | `/api/stocks/{symbol}/sentiment` | [227](backend/app/api/stocks.py#L227) | Latest sentiment score from MongoDB `sentiment_scores` |
+| `GET` | `/api/stocks/{symbol}/sentiment` | [227](backend/app/api/stocks.py#L227) | Simulated sentiment (Groww exposes none) |
 | `GET` | `/api/stocks/directory/list` | [248](backend/app/api/stocks.py#L248) | Full NSE/BSE stock directory from [`backend/app/data/stocks_master.py`](backend/app/data/stocks_master.py) |
 | `POST` | `/api/stocks/directory/prices` | [295](backend/app/api/stocks.py#L295) | Bulk price lookup for a list of symbols |
 
@@ -192,7 +192,7 @@ Client
 /stocks/           ── Redis: tick:{symbol}  (written by market-data-service)
 /stocks/{symbol}   ── Redis: tick:{symbol}
 /candlesticks      ── PostgreSQL: ohlcv table  (written by market-data-service)
-/sentiment         ── MongoDB: sentiment_scores  (written by sentiment-agent)
+/sentiment         ── simulated (no upstream sentiment feed)
 /directory/list    ── Static master list in backend/app/data/
 /directory/prices  ── Redis: tick:{symbol}  (batch read)
 ```
@@ -229,7 +229,7 @@ GET /predictions/{symbol}
 | `GET` | `/api/portfolio/` | [95](backend/app/api/portfolio.py#L95) | User's holdings — fetched from Groww API via [`backend/app/utils/groww_client.py`](backend/app/utils/groww_client.py) |
 | `POST` | `/api/portfolio/add` | [158](backend/app/api/portfolio.py#L158) | Manually add a holding to tracked portfolio |
 | `GET` | `/api/portfolio/performance` | [174](backend/app/api/portfolio.py#L174) | P&L and performance metrics |
-| `GET` | `/api/portfolio/alerts` | [193](backend/app/api/portfolio.py#L193) | List active price/pattern alerts from MongoDB `alerts` |
+| `GET` | `/api/portfolio/alerts` | [193](backend/app/api/portfolio.py#L193) | List active price/pattern alerts |
 | `POST` | `/api/portfolio/alerts` | [207](backend/app/api/portfolio.py#L207) | Create a new alert |
 
 **External call:** Groww broker API (`groww_client.py`) for live holdings data.
@@ -413,7 +413,6 @@ The backend uses **Socket.IO** (`app_sio` in `main.py`). The frontend connects v
 | Loop | File | What it does |
 |---|---|---|
 | Price tick loop | [`market-data-service/app/services/`](market-data-service/app/services/) | Polls Groww API / Yahoo Finance every `TICK_INTERVAL_SECONDS` (default 60s); writes Redis; publishes to `market.data` exchange |
-| News ingestion loop | same | Polls NewsAPI every `NEWS_INTERVAL_SECONDS` (default 300s); stores in MongoDB `news`; publishes `news_ingested` notification |
 
 ### RabbitMQ — Publishes
 
@@ -489,7 +488,7 @@ market.data exchange (fanout)
 
 | Consumes | Publishes | Model |
 |---|---|---|
-| Queue: `market.data.sentiment` | Exchange: `agent.signals` · routing_key: `sentiment` | FinBERT (`ProsusAI/finbert`) — scores news from MongoDB `news` within last `SENTIMENT_WINDOW_MINUTES` (60 min) |
+| Queue: `market.data.sentiment` | Exchange: `agent.signals` · routing_key: `sentiment` | FinBERT (`ProsusAI/finbert`) — scores headlines supplied via `POST /score` |
 
 ---
 
@@ -758,7 +757,6 @@ All model artifacts and metrics are stored to MLflow at `http://mlflow:5000`.
 | `trade_records` | `trade_id, symbol, entry_price, exit_price, pnl_pct, pnl_abs, outcome, agent_signals, market_context, timestamp_open, timestamp_close, trade_source` | feedback-service | backend/predictions.py, model-trainer |
 | `agent_weights` | `agent, weight, updated_at` | feedback-service | ensemble-engine |
 
-### MongoDB
 
 | Collection | Written by | Read by | Purpose |
 |---|---|---|---|
@@ -784,7 +782,7 @@ All model artifacts and metrics are stored to MLflow at `http://mlflow:5000`.
 
 ## 15. Dependency Matrix
 
-| Service | Publishes to (RabbitMQ) | Consumes from (RabbitMQ) | PostgreSQL | Redis | MongoDB | HTTP Out |
+| Service | Publishes to (RabbitMQ) | Consumes from (RabbitMQ) | PostgreSQL | Redis | HTTP Out |
 |---|---|---|---|---|---|---|
 | **market-data-service** | `market.data`, `notifications` | — | Write `ohlcv` | Write `tick:*`, `candle:*` | Write `news` | Groww, Yahoo, NewsAPI |
 | **technical-agent** | `agent.signals` (technical) | `market.data.technical` | Read `ohlcv` | — | — | — |

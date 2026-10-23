@@ -68,19 +68,19 @@ const AGENT_ICONS: Record<string, string> = {
 };
 
 const AGENT_COLORS: Record<string, string> = {
-  technical:     '#3b82f6',
+  technical:     '#38bdf8',
   pattern:       '#8b5cf6',
-  momentum:      '#f59e0b',
-  volatility:    '#ef4444',
+  momentum:      '#fbbf24',
+  volatility:    '#fb5c7d',
   sentiment:     '#06b6d4',
   rl:            '#10b981',
   day_structure: '#0ea5e9',
 };
 
 const ACTION_COLOR: Record<string, string> = {
-  BUY:  '#22c55e',
-  SELL: '#ef4444',
-  HOLD: '#f59e0b',
+  BUY:  '#34d399',
+  SELL: '#fb5c7d',
+  HOLD: '#fbbf24',
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -305,9 +305,9 @@ const AIEngine: React.FC = () => {
                 {(['NONE', 'LONG'] as const).map(p => (
                   <button key={p} onClick={() => setPosition(p)}
                     style={{ flex: 1, padding: '7px 0', borderRadius: 8, border: '1px solid var(--nd-border)', cursor: 'pointer', fontSize: 12, fontWeight: 600, transition: 'all 0.15s',
-                      background: position === p ? (p === 'LONG' ? '#22c55e22' : 'var(--nd-surface)') : 'transparent',
-                      color: position === p ? (p === 'LONG' ? '#22c55e' : 'var(--nd-text-1)') : 'var(--nd-text-3)',
-                      borderColor: position === p ? (p === 'LONG' ? '#22c55e' : 'var(--nd-border)') : 'var(--nd-border)' }}>
+                      background: position === p ? (p === 'LONG' ? '#34d39922' : 'var(--nd-surface)') : 'transparent',
+                      color: position === p ? (p === 'LONG' ? '#34d399' : 'var(--nd-text-1)') : 'var(--nd-text-3)',
+                      borderColor: position === p ? (p === 'LONG' ? '#34d399' : 'var(--nd-border)') : 'var(--nd-border)' }}>
                     {p}
                   </button>
                 ))}
@@ -348,7 +348,7 @@ const AIEngine: React.FC = () => {
                   style={{ width: '100%', padding: '8px 10px', borderRadius: 8, border: '1px solid var(--nd-border)', background: 'var(--nd-bg)', color: 'var(--nd-text-1)', fontSize: 13, marginBottom: 12, boxSizing: 'border-box' }} />
                 <div style={{ display: 'flex', gap: 8 }}>
                   <button onClick={submitOutcome} disabled={outcomeLoading}
-                    style={{ flex: 1, padding: '9px 0', borderRadius: 8, border: 'none', cursor: 'pointer', background: '#22c55e', color: '#fff', fontSize: 13, fontWeight: 600 }}>
+                    style={{ flex: 1, padding: '9px 0', borderRadius: 8, border: 'none', cursor: 'pointer', background: '#34d399', color: '#fff', fontSize: 13, fontWeight: 600 }}>
                     {outcomeLoading ? 'Saving...' : 'Submit'}
                   </button>
                   <button onClick={() => setOutcomeOpen(false)}
@@ -360,9 +360,9 @@ const AIEngine: React.FC = () => {
             )}
 
             {outcomeResult && (
-              <div style={{ ...card(), border: '1px solid #22c55e33', background: '#22c55e08', textAlign: 'center' }}>
-                <div style={{ fontSize: 12, color: '#22c55e', fontWeight: 600 }}>Outcome recorded</div>
-                <div style={{ fontSize: 20, fontWeight: 700, color: outcomeResult.reward >= 0 ? '#22c55e' : '#ef4444', marginTop: 4 }}>
+              <div style={{ ...card(), border: '1px solid #34d39933', background: '#34d39908', textAlign: 'center' }}>
+                <div style={{ fontSize: 12, color: '#34d399', fontWeight: 600 }}>Outcome recorded</div>
+                <div style={{ fontSize: 20, fontWeight: 700, color: outcomeResult.reward >= 0 ? '#34d399' : '#fb5c7d', marginTop: 4 }}>
                   Reward: {outcomeResult.reward > 0 ? '+' : ''}{outcomeResult.reward.toFixed(2)}
                 </div>
                 <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginTop: 2 }}>Agents updated</div>
@@ -406,7 +406,7 @@ const AIEngine: React.FC = () => {
                     </div>
                     <div style={{ textAlign: 'right' }}>
                       <div style={{ fontSize: 11, color: 'var(--nd-text-3)', marginBottom: 4 }}>Risk Score</div>
-                      <div style={{ fontSize: 22, fontWeight: 700, color: analysis.riskScore > 0.6 ? '#ef4444' : analysis.riskScore > 0.35 ? '#f59e0b' : '#22c55e' }}>
+                      <div style={{ fontSize: 22, fontWeight: 700, color: analysis.riskScore > 0.6 ? '#fb5c7d' : analysis.riskScore > 0.35 ? '#fbbf24' : '#34d399' }}>
                         {fmt2(analysis.riskScore * 100)}
                       </div>
                     </div>
@@ -453,7 +453,7 @@ const AIEngine: React.FC = () => {
 
                         <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8, fontSize: 11 }}>
                           <span style={{ color: 'var(--nd-text-3)' }}>Weight</span>
-                          <span style={{ fontWeight: 600, color: ag.weight >= 1 ? '#22c55e' : '#f59e0b' }}>{ag.weight.toFixed(2)}×</span>
+                          <span style={{ fontWeight: 600, color: ag.weight >= 1 ? '#34d399' : '#fbbf24' }}>{ag.weight.toFixed(2)}×</span>
                         </div>
 
                         {/* Key indicator */}
@@ -466,7 +466,7 @@ const AIEngine: React.FC = () => {
                         {ag.agentName === 'volatility' && ag.indicators.atrPct !== undefined && (
                           <div style={{ marginTop: 6, fontSize: 11, color: 'var(--nd-text-3)' }}>
                             ATR <b style={{ color: 'var(--nd-text-1)' }}>{fmt2(Number(ag.indicators.atrPct))}%</b>
-                            {' '} <span style={{ color: ag.indicators.regime === 'high_volatility' ? '#ef4444' : ag.indicators.regime === 'moderate_volatility' ? '#f59e0b' : '#22c55e' }}>{ag.indicators.regime ?? ''}</span>
+                            {' '} <span style={{ color: ag.indicators.regime === 'high_volatility' ? '#fb5c7d' : ag.indicators.regime === 'moderate_volatility' ? '#fbbf24' : '#34d399' }}>{ag.indicators.regime ?? ''}</span>
                           </div>
                         )}
                         {ag.agentName === 'rl' && ag.indicators.state !== undefined && (
@@ -521,13 +521,13 @@ const AIEngine: React.FC = () => {
                       </div>
                       <div style={{ display: 'flex', gap: 16, marginLeft: 'auto', flexShrink: 0 }}>
                         <div style={{ textAlign: 'center' }}>
-                          <div style={{ fontSize: 18, fontWeight: 800, color: p.accuracy >= 0.55 ? '#22c55e' : p.accuracy >= 0.45 ? '#f59e0b' : '#ef4444' }}>
+                          <div style={{ fontSize: 18, fontWeight: 800, color: p.accuracy >= 0.55 ? '#34d399' : p.accuracy >= 0.45 ? '#fbbf24' : '#fb5c7d' }}>
                             {p.total > 0 ? `${(p.accuracy * 100).toFixed(0)}%` : '–'}
                           </div>
                           <div style={{ fontSize: 10, color: 'var(--nd-text-3)' }}>Accuracy</div>
                         </div>
                         <div style={{ textAlign: 'center' }}>
-                          <div style={{ fontSize: 15, fontWeight: 700, color: p.totalReward >= 0 ? '#22c55e' : '#ef4444' }}>
+                          <div style={{ fontSize: 15, fontWeight: 700, color: p.totalReward >= 0 ? '#34d399' : '#fb5c7d' }}>
                             {p.totalReward > 0 ? '+' : ''}{p.totalReward.toFixed(2)}
                           </div>
                           <div style={{ fontSize: 10, color: 'var(--nd-text-3)' }}>Reward</div>
@@ -538,7 +538,7 @@ const AIEngine: React.FC = () => {
                     <div style={{ marginTop: 10 }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--nd-text-3)', marginBottom: 4 }}>
                         <span>Weight</span>
-                        <span style={{ fontWeight: 700, color: p.weight >= 1.0 ? '#22c55e' : p.weight >= 0.7 ? '#f59e0b' : '#ef4444' }}>{p.weight.toFixed(3)}×</span>
+                        <span style={{ fontWeight: 700, color: p.weight >= 1.0 ? '#34d399' : p.weight >= 0.7 ? '#fbbf24' : '#fb5c7d' }}>{p.weight.toFixed(3)}×</span>
                       </div>
                       <div style={{ height: 5, borderRadius: 3, background: 'var(--nd-border)', overflow: 'hidden' }}>
                         <div style={{ height: '100%', width: `${(p.weight / maxW) * 100}%`, background: color, borderRadius: 3 }} />
@@ -594,18 +594,18 @@ const AIEngine: React.FC = () => {
                       </td>
                       <td style={{ padding: '10px 14px', color: 'var(--nd-text-1)' }}>{pct(row.finalConfidence)}</td>
                       <td style={{ padding: '10px 14px', color: 'var(--nd-text-2)' }}>{pct(row.agentAgreement)}</td>
-                      <td style={{ padding: '10px 14px', color: row.riskScore > 0.6 ? '#ef4444' : row.riskScore > 0.35 ? '#f59e0b' : '#22c55e' }}>{fmt2(row.riskScore * 100)}</td>
+                      <td style={{ padding: '10px 14px', color: row.riskScore > 0.6 ? '#fb5c7d' : row.riskScore > 0.35 ? '#fbbf24' : '#34d399' }}>{fmt2(row.riskScore * 100)}</td>
                       <td style={{ padding: '10px 14px' }}>
                         {row.outcome ? (
-                          <span style={{ color: row.outcome === 'correct' ? '#22c55e' : '#ef4444', fontWeight: 600, fontSize: 11 }}>
+                          <span style={{ color: row.outcome === 'correct' ? '#34d399' : '#fb5c7d', fontWeight: 600, fontSize: 11 }}>
                             {row.outcome === 'correct' ? '✓ Correct' : '✗ Wrong'}
                           </span>
                         ) : <span style={{ color: 'var(--nd-text-3)' }}>–</span>}
                       </td>
-                      <td style={{ padding: '10px 14px', color: row.pnlPct != null ? (row.pnlPct >= 0 ? '#22c55e' : '#ef4444') : 'var(--nd-text-3)' }}>
+                      <td style={{ padding: '10px 14px', color: row.pnlPct != null ? (row.pnlPct >= 0 ? '#34d399' : '#fb5c7d') : 'var(--nd-text-3)' }}>
                         {row.pnlPct != null ? `${row.pnlPct > 0 ? '+' : ''}${row.pnlPct.toFixed(2)}%` : '–'}
                       </td>
-                      <td style={{ padding: '10px 14px', color: row.reward != null ? (row.reward >= 0 ? '#22c55e' : '#ef4444') : 'var(--nd-text-3)' }}>
+                      <td style={{ padding: '10px 14px', color: row.reward != null ? (row.reward >= 0 ? '#34d399' : '#fb5c7d') : 'var(--nd-text-3)' }}>
                         {row.reward != null ? `${row.reward > 0 ? '+' : ''}${row.reward.toFixed(2)}` : '–'}
                       </td>
                     </tr>

@@ -31,7 +31,7 @@ Full developer documentation: the **Docusaurus dev portal** (`docs-site/`, serve
 ├──────────────────────────────────────────────────────────────────┤
 │  • API Routes (Stocks, Predictions, Portfolio)                 │
 │  • Socket.IO Real-time Communication                           │
-│  • Database Connectors (PostgreSQL, MongoDB, InfluxDB)         │
+│  • Database Connectors (PostgreSQL/TimescaleDB, Redis)         │
 │  • ML/AI Core:                                                  │
 │    - LSTM & Transformer Models for Time-Series                 │
 │    - XGBoost for Ensemble Predictions                          │
@@ -44,8 +44,8 @@ Full developer documentation: the **Docusaurus dev portal** (`docs-site/`, serve
         ┌──────────────────┼──────────────────┐
         │                  │                  │
 ┌───────▼──────┐  ┌────────▼────────┐  ┌─────▼────────┐
-│  PostgreSQL  │  │    MongoDB      │  │    Redis     │
-│  (Structured)│  │  (Time-Series)  │  │  (Cache)     │
+│  PostgreSQL  │  │  Elasticsearch  │  │    Redis     │
+│  (Structured)│  │     (Logs)      │  │  (Cache)     │
 └──────────────┘  └─────────────────┘  └──────────────┘
         │                  │                  │
         └──────────────────┼──────────────────┘
@@ -53,8 +53,8 @@ Full developer documentation: the **Docusaurus dev portal** (`docs-site/`, serve
             ┌──────────────┼──────────────┐
             │              │              │
        ┌────▼────┐  ┌─────▼─────┐  ┌────▼─────┐
-       │InfluxDB │  │ RabbitMQ  │  │ Ollama   │
-       │(Metrics)│  │(Messages) │  │(LLM)     │
+       │ MLflow  │  │ RabbitMQ  │  │ Ollama   │
+       │(Models) │  │(Messages) │  │(LLM)     │
        └─────────┘  └───────────┘  └──────────┘
 ```
 
@@ -87,7 +87,6 @@ docker exec stock-prediction-ollama ollama pull llama2
 - 🔌 Backend API: http://localhost:8000
 - 📊 API Docs: http://localhost:8000/docs
 - 🐰 RabbitMQ Console: http://localhost:15672
-- 📈 InfluxDB: http://localhost:8086
 - 🦙 Ollama: http://localhost:11434
 
 ### Option 2: Local Development Setup
@@ -137,7 +136,7 @@ Install and run databases locally or use Docker containers:
 
 ```bash
 # Using Docker for just databases
-docker-compose up postgres mongodb redis rabbitmq influxdb ollama -d
+docker-compose up postgres redis rabbitmq ollama -d
 ```
 
 ## 📁 Project Structure
@@ -213,9 +212,6 @@ POSTGRES_USER=stock_user
 POSTGRES_PASSWORD=stock_password
 POSTGRES_DB=stock_prediction_db
 
-MONGODB_HOST=mongodb
-MONGODB_USER=stock_admin
-MONGODB_PASSWORD=stock_password
 
 REDIS_HOST=redis
 RABBITMQ_HOST=rabbitmq
@@ -396,7 +392,7 @@ Follow respective documentation for containerized deployment
 | Real-time | Socket.IO |
 | ML/DL | TensorFlow, PyTorch, Scikit-learn |
 | LLM | Ollama (Open-source LLaMA) |
-| Databases | PostgreSQL, MongoDB, InfluxDB |
+| Databases | PostgreSQL / TimescaleDB, Redis |
 | Cache | Redis |
 | Message Queue | RabbitMQ |
 | Frontend | React + TypeScript |

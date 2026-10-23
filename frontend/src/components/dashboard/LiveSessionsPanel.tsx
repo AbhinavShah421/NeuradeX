@@ -8,11 +8,12 @@ import { inr } from '../../utils/format';
 
 // ── Live session detail modal (what's happening inside a running session) ──────
 
-const SESS_ACTION_COLOR: Record<string, string> = { BUY: '#22c55e', SELL: '#ef4444', HOLD: '#f59e0b' };
+const SESS_ACTION_COLOR: Record<string, string> = { BUY: '#34d399', SELL: '#fb5c7d', HOLD: '#fbbf24' };
+const REPLAY_SPEEDS = [1, 2, 5, 10, 30, 60] as const;
 const SESS_AGENT_COLOR: Record<string, string> = {
-  technical: '#3b82f6', sentiment: '#06b6d4', macro: '#f59e0b', pattern: '#8b5cf6', rl: '#10b981',
-  gbm: '#14b8a6', regime: '#a855f7', anomaly: '#ec4899', momentum: '#eab308', memory: '#64748b',
-  meanrev: '#f97316', volatility: '#ef4444', day_structure: '#0ea5e9',
+  technical: '#38bdf8', sentiment: '#06b6d4', macro: '#fbbf24', pattern: '#8b5cf6', rl: '#10b981',
+  gbm: '#14b8a6', regime: '#a78bfa', anomaly: '#ec4899', momentum: '#eab308', memory: '#64748b',
+  meanrev: '#f97316', volatility: '#fb5c7d', day_structure: '#0ea5e9',
 };
 
 // ── Agent detail popup ────────────────────────────────────────────────────────
@@ -46,7 +47,7 @@ const AgentDetailModal: React.FC<{ agent: any; onClose: () => void }> = ({ agent
   return (
     <div
       onClick={e => { if (e.target === e.currentTarget) onClose(); }}
-      style={{ position: 'fixed', inset: 0, background: '#00000090', zIndex: 1100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(3,6,12,0.72)', zIndex: 1100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}
     >
       <div style={{ background: 'var(--nd-bg)', border: `1px solid ${accentColor}60`, borderRadius: 14, width: '100%', maxWidth: 420, boxShadow: `0 16px 48px #00000070, 0 0 0 1px ${accentColor}20` }}>
         {/* Header */}
@@ -127,7 +128,7 @@ const SessionModal: React.FC<{ id: string; onClose: () => void }> = ({ id, onClo
   const markers = (d?.tradesList || [])
     .filter((t: any) => t.timestamp)
     .map((t: any) => ({ timestamp: t.timestamp, action: t.action, price: t.price }));
-  const modeColor: Record<string, string> = { paper: '#f59e0b', backtest: '#3b82f6', replay: '#a855f7' };
+  const modeColor: Record<string, string> = { paper: '#fbbf24', backtest: '#38bdf8', replay: '#a78bfa' };
 
   const Section: React.FC<{ icon: string; color: string; title: string; children: React.ReactNode }> = ({ icon, color, title, children }) => (
     <div style={{ marginBottom: 16 }}>
@@ -146,13 +147,13 @@ const SessionModal: React.FC<{ id: string; onClose: () => void }> = ({ id, onClo
     <>
     {selectedAgent && <AgentDetailModal agent={selectedAgent} onClose={() => setSelectedAgent(null)} />}
     <div onClick={e => { if (e.target === e.currentTarget) onClose(); }}
-      style={{ position: 'fixed', inset: 0, background: '#000000aa', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 12 }}>
-      <div style={{ background: 'var(--nd-bg)', border: '1px solid var(--nd-border)', borderRadius: 16, width: '100%', maxWidth: 840, maxHeight: '92vh', overflow: 'auto', boxShadow: '0 24px 64px #00000060' }}>
+      style={{ position: 'fixed', inset: 0, background: 'rgba(3,6,12,0.72)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 12 }}>
+      <div style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 16, width: '100%', maxWidth: 840, maxHeight: '92vh', overflow: 'auto', boxShadow: 'var(--nd-shadow-md)' }}>
         {/* Header — two explicit rows (not one flex row with marginLeft:auto).
             The single-row version squeezed the date span into whatever px was
             left after the P&L block claimed the right edge, word-wrapping
             "@ 15:13 · 2026-07-02" into 4 stacked lines on a phone. */}
-        <div style={{ position: 'sticky', top: 0, background: 'var(--nd-bg)', zIndex: 2, padding: '14px 20px', borderBottom: '1px solid var(--nd-border)', display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ position: 'sticky', top: 0, background: 'var(--nd-surface)', zIndex: 2, padding: '14px 20px', borderBottom: '1px solid var(--nd-border)', display: 'flex', flexDirection: 'column', gap: 8 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <span style={{ fontSize: 18, fontWeight: 700, color: 'var(--nd-text-1)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d?.symbol ?? '…'}</span>
             {d?.mode && <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 4, background: `${modeColor[d.mode] ?? '#888'}22`, color: modeColor[d.mode] ?? 'var(--nd-text-3)', flexShrink: 0 }}>{d.mode.toUpperCase()}</span>}
@@ -183,6 +184,7 @@ const SessionModal: React.FC<{ id: string; onClose: () => void }> = ({ id, onClo
                 <TradingChart
                   candles={d?.candles}
                   prevDayCandles={d?.prevDayCandles}
+                  priorLevels={d?.priorLevels}
                   symbol={d?.symbol}
                   date={d?.date}
                   markers={markers}
@@ -204,7 +206,7 @@ const SessionModal: React.FC<{ id: string; onClose: () => void }> = ({ id, onClo
               </Section>
 
               {/* Latest ensemble decision */}
-              <Section icon="how_to_vote" color="#f59e0b" title="Latest Decision">
+              <Section icon="how_to_vote" color="#fbbf24" title="Latest Decision">
                 <div style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 10, padding: '10px 14px' }}>
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px 28px', marginBottom: ld.reason ? 8 : 0 }}>
                     <Kv k="Action" v={ld.action ?? '—'} c={SESS_ACTION_COLOR[ld.action] ?? 'var(--nd-text-1)'} />
@@ -230,17 +232,80 @@ const SessionModal: React.FC<{ id: string; onClose: () => void }> = ({ id, onClo
                           <div style={{ fontSize: 10, color: 'var(--nd-text-3)', textTransform: 'capitalize' }}>{name}</div>
                           <div style={{ fontSize: 13, fontWeight: 700, color: SESS_ACTION_COLOR[a.action] ?? 'var(--nd-text-3)' }}>{a.action}</div>
                           {a.confidence != null && <div style={{ fontSize: 9.5, color: 'var(--nd-text-3)' }}>{(a.confidence * 100).toFixed(0)}%</div>}
+                          {/* The EFFECTIVE weight the ensemble applied to this
+                              vote — base weight already scaled by the agent's
+                              accuracy for THIS action. `pull` is what actually
+                              lands on the tally: confidence x weight. */}
+                          {a.weight != null && (
+                            <div style={{ fontSize: 9, color: 'var(--nd-text-3)', fontFamily: 'ui-monospace, monospace', marginTop: 1 }}>
+                              w {Number(a.weight).toFixed(2)}
+                              {a.confidence != null && (
+                                <span style={{ color: SESS_ACTION_COLOR[a.action] ?? 'var(--nd-text-3)' }}>
+                                  {' '}· {(a.confidence * Number(a.weight)).toFixed(2)}
+                                </span>
+                              )}
+                            </div>
+                          )}
                           <span className="material-icons" style={{ fontSize: 10, color: 'var(--nd-text-3)', marginTop: 2 }}>info</span>
                         </div>
                       );
                     })}
                   </div>
+                  {(() => {
+                    // Reconstruct the tally the ensemble computed: each vote
+                    // contributes confidence x effective weight to its side.
+                    // Shown because "12 agents said HOLD" does not explain a
+                    // decision — the WEIGHTED mass behind each side does.
+                    const mass: Record<string, number> = { BUY: 0, SELL: 0, HOLD: 0 };
+                    const count: Record<string, number> = { BUY: 0, SELL: 0, HOLD: 0 };
+                    agents.forEach((a: any) => {
+                      const act = a.action || 'HOLD';
+                      if (mass[act] == null) return;
+                      mass[act] += (a.confidence ?? 0) * (a.weight ?? 1);
+                      count[act] += 1;
+                    });
+                    const total = mass.BUY + mass.SELL + mass.HOLD;
+                    if (!total) return null;
+                    const winner = (['BUY', 'SELL', 'HOLD'] as const)
+                      .reduce((x, y) => (mass[y] > mass[x] ? y : x), 'HOLD');
+                    return (
+                      <div style={{ marginTop: 10, background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 10, padding: '10px 14px' }}>
+                        <div style={{ fontFamily: 'ui-monospace, monospace', fontSize: 10, letterSpacing: '.12em', color: 'var(--nd-text-3)', marginBottom: 8 }}>
+                          HOW THE ENSEMBLE WEIGHED IT
+                        </div>
+                        {(['BUY', 'SELL', 'HOLD'] as const).map(act => {
+                          const pct = total ? (mass[act] / total) * 100 : 0;
+                          const col = SESS_ACTION_COLOR[act] ?? 'var(--nd-text-3)';
+                          return (
+                            <div key={act} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
+                              <span style={{ width: 42, fontSize: 11, fontWeight: 700, color: col }}>{act}</span>
+                              <div style={{ flex: 1, height: 6, background: 'var(--nd-bg)', borderRadius: 3, overflow: 'hidden' }}>
+                                <div style={{ width: `${pct}%`, height: '100%', background: col, opacity: act === winner ? 1 : 0.45 }} />
+                              </div>
+                              <span style={{ width: 116, textAlign: 'right', fontFamily: 'ui-monospace, monospace', fontSize: 10, color: 'var(--nd-text-3)' }}>
+                                {mass[act].toFixed(2)} ({pct.toFixed(0)}%) · {count[act]}v
+                              </span>
+                            </div>
+                          );
+                        })}
+                        <div style={{ fontSize: 10.5, color: 'var(--nd-text-3)', marginTop: 6, lineHeight: 1.5 }}>
+                          Weighted mass = confidence × effective weight, where the weight is each
+                          agent's base weight scaled by its measured accuracy for that specific
+                          action. Highest mass is <b style={{ color: SESS_ACTION_COLOR[winner] ?? 'var(--nd-text-1)' }}>{winner}</b>
+                          {ld?.action && ld.action !== winner && (
+                            <> — the final call was <b style={{ color: SESS_ACTION_COLOR[ld.action] ?? 'var(--nd-text-1)' }}>{ld.action}</b>, so a gate overrode the raw vote (see the reason above).</>
+                          )}
+                          {ld?.action && ld.action === winner && <> and the final call matched it.</>}
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </Section>
               )}
 
               {/* Indicators */}
               {(ind.rsi != null || ind.vwap != null) && (
-                <Section icon="insights" color="#3b82f6" title="Indicators (latest candle)">
+                <Section icon="insights" color="#38bdf8" title="Indicators (latest candle)">
                   <div style={{ background: 'var(--nd-surface)', border: '1px solid var(--nd-border)', borderRadius: 10, padding: '10px 14px', display: 'flex', flexWrap: 'wrap', gap: '10px 28px' }}>
                     <Kv k="RSI" v={ind.rsi ?? '—'} />
                     <Kv k="VWAP" v={ind.vwap ? `₹${ind.vwap}` : '—'} />
@@ -253,11 +318,11 @@ const SessionModal: React.FC<{ id: string; onClose: () => void }> = ({ id, onClo
 
               {/* Trade Decisions — ensemble + full agent breakdown at every BUY / SELL */}
               {Array.isArray(d?.tradesList) && d.tradesList.length > 0 && (
-                <Section icon="swap_vert" color="#22c55e" title={`Trade Decisions (${d.tradesList.length})`}>
+                <Section icon="swap_vert" color="#34d399" title={`Trade Decisions (${d.tradesList.length})`}>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxHeight: 480, overflowY: 'auto' }}>
                     {[...d.tradesList].reverse().map((t: any, i: number) => {
                       const isBuy = t.action === 'BUY';
-                      const accentColor = isBuy ? '#22c55e' : '#ef4444';
+                      const accentColor = isBuy ? '#34d399' : '#fb5c7d';
                       // agents stored directly on trade (new sessions) or fallback from decisionLog
                       const logEntry = (d.decisionLog || []).find((x: any) => x.time === t.time && x.executed);
                       const agentVotes: any[] = (t.agents?.length ? t.agents : logEntry?.agents) || [];
@@ -282,7 +347,7 @@ const SessionModal: React.FC<{ id: string; onClose: () => void }> = ({ id, onClo
                               <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>× {t.quantity}</span>
                             )}
                             {t.pnl != null && (
-                              <span style={{ marginLeft: 'auto', fontSize: 13, fontWeight: 700, color: t.pnl >= 0 ? '#22c55e' : '#ef4444' }}>
+                              <span style={{ marginLeft: 'auto', fontSize: 13, fontWeight: 700, color: t.pnl >= 0 ? '#34d399' : '#fb5c7d' }}>
                                 {t.pnl >= 0 ? '+' : ''}₹{t.pnl.toFixed(2)}
                                 {t.pnlPct != null && (
                                   <span style={{ fontSize: 10, fontWeight: 400, marginLeft: 4, color: 'var(--nd-text-3)' }}>
@@ -377,12 +442,22 @@ const LiveSessionsPanel: React.FC = () => {
   const [savingBatch, setSavingBatch] = useState(false);
   const [speed, setSpeed] = useState<number | null>(null);
   const [savingSpeed, setSavingSpeed] = useState(false);
+  const [changingSessionSpeed, setChangingSessionSpeed] = useState<string | null>(null);
+  // Real Groww MIS positions, including ones placed by hand in the Groww app.
+  // Separate from `sessions`, which are paper/backtest runners.
+  const [livePositions, setLivePositions] = useState<any[]>([]);
 
   const load = useCallback(async () => {
     try {
       const r = await apiService.sessionList('running');
       setSessions((r as any).data ?? []);
     } catch { /* keep last */ }
+    try {
+      // Reconciles against the broker server-side, so a trade placed on Groww
+      // shows up here within one refresh.
+      const lp = await apiService.livePositions();
+      setLivePositions((lp as any).data ?? []);
+    } catch { /* live trading may be off — keep last */ }
   }, []);
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [load]);
 
@@ -423,7 +498,18 @@ const LiveSessionsPanel: React.FC = () => {
     try { await apiService.sessionStop(id); await load(); } catch { /* ignore */ } finally { setBusy(null); }
   };
 
-  if (!sessions.length) return null;
+  const changeSessionSpeed = async (id: string, nextSpeed: number) => {
+    setChangingSessionSpeed(id);
+    try {
+      await apiService.sessionSpeed(id, nextSpeed);
+      setSessions(current => current.map(session => session.id === id
+        ? { ...session, speed: nextSpeed }
+        : session));
+    } catch { /* keep the last reported speed */ }
+    finally { setChangingSessionSpeed(null); }
+  };
+
+  if (!sessions.length && !livePositions.length) return null;
   const totalPnl = sessions.reduce((s, x) => s + (x.pnl ?? 0), 0);
 
   return (
@@ -434,7 +520,7 @@ const LiveSessionsPanel: React.FC = () => {
         <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>{sessions.length} running</span>
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
           {/* Replay speed — candles advanced per step in new backtest sessions */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }} title="Backtest replay speed — candles advanced per step (applies to newly started sessions).">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }} title="Playback rate for newly started backtest sessions. Running sessions have their own speed selector.">
             <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>Speed</span>
             <select
               value={speed ?? ''} disabled={savingSpeed || speed == null}
@@ -442,8 +528,8 @@ const LiveSessionsPanel: React.FC = () => {
               style={{ padding: '4px 6px', borderRadius: 6, border: '1px solid var(--nd-border)',
                 background: 'var(--nd-surface)', color: 'var(--nd-text-1)', fontSize: 12, fontWeight: 600,
                 cursor: 'pointer', outline: 'none', opacity: savingSpeed ? 0.6 : 1 }}>
-              {speed != null && ![1, 2, 5, 10, 30, 60].includes(speed) && <option value={speed}>{speed}×</option>}
-              {[1, 2, 5, 10, 30, 60].map(n => <option key={n} value={n}>{n}×</option>)}
+              {speed != null && !REPLAY_SPEEDS.includes(speed as typeof REPLAY_SPEEDS[number]) && <option value={speed}>{speed}×</option>}
+              {REPLAY_SPEEDS.map(n => <option key={n} value={n}>{n}×</option>)}
             </select>
             {savingSpeed && <span className="material-icons nd-spin" style={{ fontSize: 14, color: 'var(--nd-text-3)' }}>autorenew</span>}
           </div>
@@ -467,10 +553,10 @@ const LiveSessionsPanel: React.FC = () => {
         </div>
       </div>
       <div style={{ overflowX: 'auto' }}>
-        <table style={{ width: '100%', minWidth: 540, borderCollapse: 'collapse', fontSize: 12 }}>
+        <table style={{ width: '100%', minWidth: 600, borderCollapse: 'collapse', fontSize: 12 }}>
           <thead>
             <tr style={{ color: 'var(--nd-text-3)', textAlign: 'left' }}>
-              {['Symbol', 'Mode', 'Position', 'Hold cap', 'P&L', 'Trades', ''].map(h => (
+              {['Symbol', 'Mode', 'Position', 'Speed', 'Hold cap', 'P&L', 'Trades', ''].map(h => (
                 <th key={h} style={{ padding: '6px 10px', fontWeight: 500 }}>{h}</th>
               ))}
             </tr>
@@ -483,10 +569,25 @@ const LiveSessionsPanel: React.FC = () => {
                 onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
                 <td style={{ padding: '7px 10px', fontWeight: 700, color: 'var(--nd-text-1)' }}>{s.symbol}</td>
                 <td style={{ padding: '7px 10px' }}>
-                  <span style={{ fontSize: 10, fontWeight: 600, padding: '2px 6px', borderRadius: 4, background: s.mode === 'paper' ? 'rgba(245,158,11,0.15)' : s.mode === 'backtest' ? 'rgba(59,130,246,0.15)' : 'rgba(168,85,247,0.15)', color: s.mode === 'paper' ? '#f59e0b' : s.mode === 'backtest' ? '#3b82f6' : '#a855f7' }}>{(s.mode || '').toUpperCase()}</span>
+                  <span style={{ fontSize: 10, fontWeight: 600, padding: '2px 6px', borderRadius: 4, background: s.mode === 'paper' ? 'rgba(245,158,11,0.15)' : s.mode === 'backtest' ? 'rgba(59,130,246,0.15)' : 'rgba(168,85,247,0.15)', color: s.mode === 'paper' ? '#fbbf24' : s.mode === 'backtest' ? '#38bdf8' : '#a78bfa' }}>{(s.mode || '').toUpperCase()}</span>
                 </td>
                 <td style={{ padding: '7px 10px' }}>
                   <span style={{ fontWeight: 600, color: s.position === 'LONG' ? 'var(--nd-green)' : 'var(--nd-text-3)' }}>{s.position ?? 'NONE'}</span>
+                </td>
+                <td style={{ padding: '7px 10px' }}>
+                  {s.mode === 'paper' ? <span style={{ color: 'var(--nd-text-3)' }}>—</span> : (
+                    <select
+                      aria-label={`Replay speed for ${s.symbol}`}
+                      title="Change speed for this running session"
+                      value={s.speed ?? 1}
+                      disabled={changingSessionSpeed === s.id}
+                      onClick={e => e.stopPropagation()}
+                      onChange={e => changeSessionSpeed(s.id, Number(e.target.value))}
+                      style={{ padding: '3px 5px', borderRadius: 5, border: '1px solid var(--nd-border)',
+                        background: 'var(--nd-surface)', color: 'var(--nd-text-1)', fontSize: 11 }}>
+                      {REPLAY_SPEEDS.map(n => <option key={n} value={n}>{n}×</option>)}
+                    </select>
+                  )}
                 </td>
                 <td style={{ padding: '7px 10px', color: 'var(--nd-text-2)' }}>{s.maxHoldMinutes ? `${s.maxHoldMinutes}m` : '—'}</td>
                 <td style={{ padding: '7px 10px', fontWeight: 600, color: (s.pnl ?? 0) >= 0 ? 'var(--nd-green)' : 'var(--nd-red)' }}>
@@ -506,6 +607,65 @@ const LiveSessionsPanel: React.FC = () => {
           </tbody>
         </table>
       </div>
+
+      {/* ── Real Groww MIS positions ──────────────────────────────────────────
+          Kept visually separate from the paper sessions above, because the only
+          thing worse than not seeing a real position is mistaking one for
+          paper. Trades placed by hand in the Groww app appear here too. */}
+      {livePositions.length > 0 && (
+        <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--nd-border)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
+            <span className="material-icons" style={{ fontSize: 16, color: 'var(--nd-red)' }}>bolt</span>
+            <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--nd-text-1)' }}>Live Groww Positions</span>
+            <span style={{ fontSize: 11, color: 'var(--nd-text-3)' }}>
+              {livePositions.length} open · real money
+            </span>
+          </div>
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', minWidth: 540, borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr style={{ color: 'var(--nd-text-3)', textAlign: 'left' }}>
+                  {['Symbol', 'Source', 'Side', 'Qty', 'Entry', 'Conviction'].map(h => (
+                    <th key={h} style={{ padding: '6px 10px', fontWeight: 500 }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {livePositions.map((p: any, i: number) => {
+                  const manual = p.source === 'groww_manual';
+                  const short  = p.action === 'SHORT';
+                  return (
+                    <tr key={p.symbol ?? i} style={{ borderTop: '1px solid var(--nd-border)' }}>
+                      <td style={{ padding: '8px 10px', fontWeight: 700 }}>{p.symbol}</td>
+                      <td style={{ padding: '8px 10px' }}>
+                        <span className="nd-chip-tag"
+                              style={{ color: manual ? 'var(--nd-orange)' : 'var(--nd-cyan)' }}
+                              title={manual
+                                ? 'Placed directly on Groww — adopted and managed by auto mode'
+                                : 'Placed by NeuradeX'}>
+                          {manual ? 'from Groww' : 'NeuradeX'}
+                        </span>
+                      </td>
+                      <td style={{ padding: '8px 10px', fontWeight: 600,
+                                   color: short ? 'var(--nd-red)' : 'var(--nd-green)' }}>
+                        {short ? 'SHORT' : 'LONG'}
+                      </td>
+                      <td style={{ padding: '8px 10px' }}>{p.quantity ?? '—'}</td>
+                      <td style={{ padding: '8px 10px' }}>{p.entryPrice != null ? inr(p.entryPrice) : '—'}</td>
+                      <td style={{ padding: '8px 10px', color: 'var(--nd-text-3)' }}>
+                        {/* A hand-placed trade was never scored. Showing 0% would
+                            read as "the system had no conviction", which is a
+                            different claim from "the system never saw it". */}
+                        {p.confidence == null ? 'not scored' : `${Math.round(p.confidence * 100)}%`}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
       {openSession && <SessionModal id={openSession} onClose={() => setOpenSession(null)} />}
     </div>
   );

@@ -51,10 +51,8 @@ _META: dict[str, dict] = {
     "stock-prediction-risk-engine":     {"label": "Risk Engine",      "icon": "security"},
     "stock-prediction-trade-executor":  {"label": "Trade Executor",   "icon": "currency_exchange"},
     "stock-prediction-postgres":        {"label": "PostgreSQL",       "icon": "storage"},
-    "stock-prediction-mongodb":         {"label": "MongoDB",          "icon": "storage"},
     "stock-prediction-redis":           {"label": "Redis",            "icon": "memory"},
     "stock-prediction-rabbitmq":        {"label": "RabbitMQ",         "icon": "forum"},
-    "stock-prediction-influxdb":        {"label": "InfluxDB",         "icon": "timeline"},
     "stock-prediction-elasticsearch":   {"label": "Elasticsearch",    "icon": "search"},
     "stock-prediction-kibana":          {"label": "Kibana",           "icon": "insights"},
     "stock-prediction-mlflow":          {"label": "MLflow",           "icon": "science"},
@@ -337,7 +335,17 @@ async def candles_coverage():
     """What our own 1-second tick dataset holds — per symbol/day tick counts +
     size, plus an aggregate summary. Powers the dataset panel."""
     from app.data.candle_store import coverage, coverage_summary
-    return {"status": "success", "data": coverage(), "summary": coverage_summary()}
+
+    # Off the event loop. This is file I/O across ~10k parquet files and the
+    # backend runs a single uvicorn worker, so doing it inline froze every other
+    # request for as long as it took (44 s on 2026-09-14). The rows are computed
+    # once and the summary is built from them, not from a second walk of the store.
+    def _build():
+        rows = coverage()
+        return rows, coverage_summary(rows)
+
+    rows, summary = await asyncio.to_thread(_build)
+    return {"status": "success", "data": rows, "summary": summary}
 
 
 @router.post("/candles/enrich-volume")

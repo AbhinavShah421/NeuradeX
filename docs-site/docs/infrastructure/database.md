@@ -24,12 +24,3 @@ Connection: `postgres:5432` · DB: `stock_prediction_db`
 
 The `ohlcv` table is a **TimescaleDB hypertable** partitioned by `time` for fast time-series queries.
 
-## MongoDB
-
-Connection: `mongodb:27017` · DB: `stock_prediction`
-
-| Collection | Written by | Read by | Purpose |
-|---|---|---|---|
-| `news` | market-data-service | sentiment-agent | Raw news articles keyed by symbol + timestamp |
-| `sentiment_scores` | sentiment-agent | backend/stocks.py | FinBERT sentiment results |
-| `alerts` | backend/portfolio.py | backend/portfolio.py | User-defined price / pattern alerts |

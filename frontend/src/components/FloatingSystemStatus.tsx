@@ -194,7 +194,7 @@ const FloatingSystemStatus: React.FC = () => {
   const ok     = svcs.filter(s => s.running).length;
   const total  = svcs.length;
   const allOk  = total > 0 && ok === total;
-  const dotColor = svcErr ? '#ef4444' : allOk ? '#00b386' : '#f59e0b';
+  const dotColor = svcErr ? '#fb5c7d' : allOk ? '#2dd4bf' : '#fbbf24';
 
   // Sort: not-running first (needs attention), then by label.
   const sortedSvcs = [...svcs].sort((a, b) => {
@@ -299,7 +299,7 @@ const FloatingSystemStatus: React.FC = () => {
                 marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4,
                 background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.4)',
                 borderRadius: 6, padding: '3px 8px', cursor: restartingAll ? 'wait' : 'pointer',
-                color: '#f59e0b', fontSize: 10, fontWeight: 700,
+                color: '#fbbf24', fontSize: 10, fontWeight: 700,
               }}
             >
               <span className="material-icons" style={{ fontSize: 12, animation: restartingAll ? 'nd-spin 0.9s linear infinite' : 'none' }}>
@@ -331,7 +331,7 @@ const FloatingSystemStatus: React.FC = () => {
                 CPU <strong style={{ color: 'var(--nd-text-1)' }}>{totals.cpuPct}%</strong>
               </span>
               <span style={{ display: 'flex', alignItems: 'center', gap: 4, color: 'var(--nd-text-2)' }}>
-                <span className="material-icons" style={{ fontSize: 12, color: '#a855f7' }}>sd_card</span>
+                <span className="material-icons" style={{ fontSize: 12, color: '#a78bfa' }}>sd_card</span>
                 Mem <strong style={{ color: 'var(--nd-text-1)' }}>{fmtMem(totals.memUsedMb)}</strong>
               </span>
               <span style={{ marginLeft: 'auto', color: 'var(--nd-text-3)' }}>{totals.running} running</span>
@@ -341,7 +341,7 @@ const FloatingSystemStatus: React.FC = () => {
           {svcErr && (
             <div style={{
               padding: '8px 12px', fontSize: 10.5, lineHeight: 1.5,
-              color: '#ef4444', background: 'rgba(239,68,68,0.08)',
+              color: '#fb5c7d', background: 'rgba(239,68,68,0.08)',
               borderBottom: '1px solid var(--nd-border)',
             }}>
               {svcErr}
@@ -357,8 +357,8 @@ const FloatingSystemStatus: React.FC = () => {
           )}
           {sortedSvcs.map((svc, i) => {
             const dotCol = svc.running
-              ? (svc.health === 'unhealthy' ? '#f59e0b' : '#00b386')
-              : '#ef4444';
+              ? (svc.health === 'unhealthy' ? '#fbbf24' : '#2dd4bf')
+              : '#fb5c7d';
             const isBusy = busy === svc.name;
             return (
             <div key={svc.name} style={{
@@ -388,7 +388,7 @@ const FloatingSystemStatus: React.FC = () => {
                 }} title={`CPU ${svc.cpuPct ?? '—'}% · Mem ${fmtMem(svc.memUsedMb)}`}>
                   <span style={{
                     fontSize: 9.5, fontWeight: 600,
-                    color: (svc.cpuPct ?? 0) >= 80 ? '#ef4444' : (svc.cpuPct ?? 0) >= 40 ? '#f59e0b' : 'var(--nd-text-2)',
+                    color: (svc.cpuPct ?? 0) >= 80 ? '#fb5c7d' : (svc.cpuPct ?? 0) >= 40 ? '#fbbf24' : 'var(--nd-text-2)',
                   }}>{svc.cpuPct == null ? '—' : `${svc.cpuPct}%`}</span>
                   <span style={{ fontSize: 9.5, color: 'var(--nd-text-3)' }}>{fmtMem(svc.memUsedMb)}</span>
                 </span>
@@ -396,9 +396,9 @@ const FloatingSystemStatus: React.FC = () => {
 
               {/* Logs link → new tab. Color flags recent-log severity. */}
               {(() => {
-                const sevColor = svc.logSeverity === 'error' ? '#ef4444'
-                               : svc.logSeverity === 'warning' ? '#f59e0b'
-                               : '#00b386';
+                const sevColor = svc.logSeverity === 'error' ? '#fb5c7d'
+                               : svc.logSeverity === 'warning' ? '#fbbf24'
+                               : '#2dd4bf';
                 const sevTitle = svc.logSeverity === 'error' ? 'Errors in recent logs — view (new tab)'
                                : svc.logSeverity === 'warning' ? 'Warnings in recent logs — view (new tab)'
                                : 'No errors/warnings — view logs (new tab)';
@@ -431,7 +431,7 @@ const FloatingSystemStatus: React.FC = () => {
                     onClick={e => { e.stopPropagation(); control(svc.name, 'stop'); }}
                     disabled={isBusy}
                     title="Stop"
-                    style={{ background: 'none', border: 'none', cursor: isBusy ? 'wait' : 'pointer', color: '#ef4444', padding: 2, display: 'flex', flexShrink: 0 }}
+                    style={{ background: 'none', border: 'none', cursor: isBusy ? 'wait' : 'pointer', color: '#fb5c7d', padding: 2, display: 'flex', flexShrink: 0 }}
                   >
                     <span className="material-icons" style={{ fontSize: 14 }}>stop_circle</span>
                   </button>
@@ -441,7 +441,7 @@ const FloatingSystemStatus: React.FC = () => {
                   onClick={e => { e.stopPropagation(); control(svc.name, 'start'); }}
                   disabled={isBusy}
                   title="Start"
-                  style={{ background: 'none', border: 'none', cursor: isBusy ? 'wait' : 'pointer', color: '#00b386', padding: 2, display: 'flex', flexShrink: 0 }}
+                  style={{ background: 'none', border: 'none', cursor: isBusy ? 'wait' : 'pointer', color: '#2dd4bf', padding: 2, display: 'flex', flexShrink: 0 }}
                 >
                   <span className="material-icons" style={{ fontSize: 15 }}>{isBusy ? 'hourglass_empty' : 'play_circle'}</span>
                 </button>
@@ -496,7 +496,7 @@ const FloatingSystemStatus: React.FC = () => {
                 style={{
                   marginTop: 2, padding: '5px 0', borderRadius: 6, fontSize: 11, fontWeight: 600,
                   border: 'none', cursor: configSaving ? 'wait' : 'pointer',
-                  background: configMsg === 'Saved' ? '#00b386' : configMsg === 'Error' ? '#f59e0b' : 'var(--nd-green)',
+                  background: configMsg === 'Saved' ? '#2dd4bf' : configMsg === 'Error' ? '#fbbf24' : 'var(--nd-green)',
                   color: '#fff', transition: 'background 0.2s',
                 }}
               >

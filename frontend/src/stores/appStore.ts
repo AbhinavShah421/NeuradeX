@@ -45,7 +45,10 @@ const getInitialTheme = (): 'light' | 'dark' => {
     const t = localStorage.getItem(THEME_KEY);
     if (t === 'dark' || t === 'light') return t;
   } catch { /* localStorage unavailable */ }
-  return 'light';
+  // Dark by default. The instrument-panel treatment (see globals.css) is the
+  // design the app is built around; light stays available but is no longer
+  // what a new session lands on.
+  return 'dark';
 };
 
 export const useAppStore = create<AppState>((set) => ({

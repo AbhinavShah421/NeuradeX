@@ -21,7 +21,6 @@ sidebar_position: 1
 | Loop | Interval | What it does |
 |---|---|---|
 | Price tick | `TICK_INTERVAL_SECONDS` (default 60s) | Polls Groww / Yahoo Finance → writes Redis → publishes to `market.data` |
-| News ingestion | `NEWS_INTERVAL_SECONDS` (default 300s) | Polls NewsAPI → stores in MongoDB `news` → publishes `news_ingested` notification |
 
 ## RabbitMQ — Publishes
 

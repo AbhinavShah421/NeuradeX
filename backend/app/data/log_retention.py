@@ -220,26 +220,14 @@ async def purge_service(service: str) -> dict:
         return {"service": service, "deleted": 0, "error": str(exc)[:160]}
 
 
-def _seconds_until_run() -> float:
-    now = datetime.now(IST)
-    target = now.replace(hour=_RUN_HOUR_IST, minute=_RUN_MINUTE_IST,
-                         second=0, microsecond=0)
-    if target <= now:
-        target += timedelta(days=1)
-    return (target - now).total_seconds()
-
-
 async def log_retention_loop() -> None:
-    """Nightly index pruning. Runs in the runner/full role only."""
-    logger.info("log retention scheduled — %02d:%02d IST, default window %d days",
+    """Daily index pruning, due from _RUN_HOUR_IST. Runs in the runner/full role
+    only. Due-time rather than fire-time — 03:00 IST is inside the window this
+    host is powered down, so the old form never ran. See app/utils/nightly.py."""
+    logger.info("log retention scheduled — due from %02d:%02d IST, default window %d days",
                 _RUN_HOUR_IST, _RUN_MINUTE_IST, _DEFAULT_DAYS,
                 extra={"log_type": "log_retention", "event": "scheduled"})
-    while True:
-        try:
-            await asyncio.sleep(_seconds_until_run())
-            await prune()
-        except asyncio.CancelledError:
-            break
-        except Exception as exc:
-            logger.error("log retention run failed: %s", exc)
-            await asyncio.sleep(3600)
+
+    from app.utils.nightly import nightly_loop
+    await nightly_loop("log_retention", _RUN_HOUR_IST, prune,
+                       label="ES log retention")

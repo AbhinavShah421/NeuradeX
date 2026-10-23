@@ -22,7 +22,7 @@ const BreakdownPanel: React.FC<BreakdownPanelProps> = ({ stats }) => {
             {stats.byAction.map(a => {
               const wr = Math.round(a.winRate * 100);
               const col = a.action === 'BUY' ? 'var(--nd-green)'
-                         : a.action === 'SELL' ? '#e74c3c'
+                         : a.action === 'SELL' ? '#fb5c7d'
                          : 'var(--nd-text-3)';
               const colAlpha = a.action === 'BUY' ? 'rgba(0,179,134,0.12)' : 'rgba(231,76,60,0.12)';
               return (
