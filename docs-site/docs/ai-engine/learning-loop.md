@@ -72,22 +72,39 @@ otherwise the ensemble **abstains (HOLD)**. Strong precedent boosts confidence.
 This selectivity is what lifts win-rate on *taken* trades — the system only acts
 when memory supports it.
 
-## Per-agent decision memory (shadow mode)
+## Per-agent decision memory (automatic promotion)
 
-In addition to the shared Pattern Memory bank, each session decision now stores
-the 19-value fingerprint and a per-agent comparison against that agent's own
-similar, counterfactually-labeled decisions. Retrieval only uses resolved
-sessions from dates earlier than the current session, excludes decisions that
-were executed, requires at least eight similar examples at cosine similarity
-≥0.45, and discounts replay/backtest examples. The shadow overlay marks weak
-BUY evidence as a hypothetical HOLD; it **does not change the ensemble signal,
-session gate, or any live/paper/backtest action**.
+In addition to the shared Pattern Memory bank, each session decision stores its
+19-value fingerprint and a per-agent comparison against that agent's own
+similar, counterfactually-labeled decisions. PostgreSQL is used by the scheduled
+labeling and promotion job; decision-time retrieval reads bounded case lists
+from Redis only. Cases are from completed, earlier dates, exclude executed
+decisions, require at least eight similar neighbors at cosine similarity ≥0.45,
+and discount replay/backtest evidence.
 
-The later counterfactual label lets the system compare each agent's original
-signal with that hypothetical overlay on the same decision. Use
-`GET /api/ai-engine/memory/agent-shadow` to inspect labeled baseline and shadow
-accuracy. This is an evaluation feed, not proof of improved profitability; the
-overlay should remain shadow-only until it has enough out-of-sample evidence.
+Every counterfactual sweep evaluates each agent's BUY overlay against its
+unmodified BUYs. An agent is automatically promoted only after at least 200
+unique labeled examples over 20 or more dates, with higher held-out BUY accuracy
+and mean daily return after costs, no increase in maximum drawdown, and at least
+30 BUYs remaining unsuppressed. Promotion can only turn a weak BUY vote into
+HOLD; it never creates BUY or changes SELL. Agents without qualified Redis
+evidence continue with their normal votes.
+
+The overlay is enabled by default after qualification. Disable or re-enable it
+at runtime without a rebuild:
+
+```http
+POST /api/ai-engine/memory/agent-shadow/enabled
+Content-Type: application/json
+
+{"enabled": false}
+```
+
+`GET /api/ai-engine/memory/agent-shadow` reports the global flag, per-agent
+promotion metrics, and the qualification gate. If Redis retrieval fails, the
+ensemble logs the error and keeps the original votes. The shared in-process
+`EnsembleEngine.decide` path applies this behavior to its callers; independent
+trading implementations that do not use that engine are outside this hook.
 
 ---
 
@@ -125,7 +142,7 @@ cases are preserved. Trigger manually from the **Agents & Memory** page.
 | `ai_engine_outcomes` | Realised P&L + reward per prediction |
 | `ai_engine_agent_weights` | Per-agent weight, total/correct predictions, total reward |
 | `pattern_memory` | Fingerprint cases: action, pnl%, regime, source (`BACKTEST`/`PAPER`/`REPLAY`/`LIVE`) |
-| `session_decisions` | Per-candle agent signals, counterfactual labels, decision fingerprint, and shadow-only memory comparison |
+| `session_decisions` | Per-candle agent signals, counterfactual labels, decision fingerprint, and shadow-memory comparison |
 
 ---
 
@@ -138,7 +155,8 @@ cases are preserved. Trigger manually from the **Agents & Memory** page.
 | `GET /api/ai-engine/performance` | Per-agent weight + accuracy |
 | `GET /api/ai-engine/learning-summary` | Totals, overall accuracy, per-agent stats, 24h activity, memory size |
 | `GET /api/ai-engine/memory/stats` | Memory size + win-rate by source/action |
-| `GET /api/ai-engine/memory/agent-shadow` | Labeled comparison of each agent's original signal and shadow-memory overlay |
+| `GET /api/ai-engine/memory/agent-shadow` | Per-agent promotion metrics and runtime enablement |
+| `POST /api/ai-engine/memory/agent-shadow/enabled` | Runtime kill switch (`{"enabled": false}` disables active memory) |
 | `POST /api/ai-engine/memory/query` | What memory recalls for a given candle window |
 | `POST /api/ai-engine/memory/seed` | Bulk-seed memory from historical replays |
 | `POST /api/ai-engine/memory/sweep` | Manually trigger the nightly rebuild |

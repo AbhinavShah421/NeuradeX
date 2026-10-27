@@ -217,6 +217,18 @@ class EnsembleEngine:
                     result.weight = learned.get(result.agent_name) or self._weights.get(result.agent_name, 1.0)
                 signals.append(result)
 
+        try:
+            from .fingerprint import build_fingerprint
+            from .agent_decision_memory import get_agent_decision_memory
+            await get_agent_decision_memory().apply(
+                signals, build_fingerprint(candles), context.get("date")
+            )
+        except Exception:
+            logger.warning(
+                "Redis agent decision-memory lookup failed; preserving original votes",
+                exc_info=True,
+            )
+
         # ── Replay mode: boost price-pattern agents ─────────────────────────────
         # In historical replay, only OHLCV-derived agents have valid signals.
         # Up-weight the ones that were kept so they dominate the vote.

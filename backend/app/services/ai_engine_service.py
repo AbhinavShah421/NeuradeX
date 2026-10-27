@@ -1481,10 +1481,16 @@ async def memory_stats():
 
 
 async def agent_memory_shadow_status():
-    """Report out-of-sample, counterfactual evaluation of per-agent memory."""
+    """Report promotion qualification and runtime state of per-agent memory."""
     await _db_once()
     from app.agents.agent_decision_memory import get_agent_decision_memory
     return await get_agent_decision_memory().status()
+
+
+async def set_agent_memory_enabled(enabled: bool):
+    """Set the Redis-backed runtime kill switch for active agent memory."""
+    from app.agents.agent_decision_memory import get_agent_decision_memory
+    return await get_agent_decision_memory().set_enabled(enabled)
 
 
 async def memory_purge(sources: str = "REPLAY"):

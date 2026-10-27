@@ -55,7 +55,8 @@ reusable **lessons** that are injected into the AI's decision prompts. See
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/ai-engine/memory/stats` | Memory size + win-rate by source/action |
-| `GET` | `/api/ai-engine/memory/agent-shadow` | Labeled per-agent comparison of original decisions vs. shadow-memory overlay |
+| `GET` | `/api/ai-engine/memory/agent-shadow` | Per-agent promotion metrics and runtime enablement |
+| `POST` | `/api/ai-engine/memory/agent-shadow/enabled` | Enable or disable promoted per-agent BUY suppression (`{"enabled": false}` disables it) |
 | `POST` | `/api/ai-engine/memory/query` | What memory recalls for a candle window |
 | `POST` | `/api/ai-engine/memory/seed` | Bulk-seed memory from historical replays |
 | `POST` | `/api/ai-engine/memory/sweep` | Trigger the nightly memory rebuild |

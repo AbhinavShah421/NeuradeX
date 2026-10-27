@@ -1381,20 +1381,21 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
     try:
         from app.agents.fingerprint import build_fingerprint
         fingerprint = build_fingerprint(window)
-        if fingerprint and agents:
-            from app.agents.agent_decision_memory import get_agent_decision_memory
-            agent_memory_shadow = await get_agent_decision_memory().shadow(
-                [
-                    {"agent": a.get("agent_name") or a.get("agent"),
-                     "action": a.get("action")}
-                    for a in agents
-                ],
-                fingerprint,
-                s.get("date"),
-            )
+        memory_results = [
+            a.get("indicators", {}).get("decision_memory")
+            for a in agents
+            if isinstance(a.get("indicators"), dict)
+            and isinstance(a["indicators"].get("decision_memory"), dict)
+        ]
+        if memory_results:
+            agent_memory_shadow = {
+                "mode": "active" if any(item.get("applied") for item in memory_results)
+                else "shadow_only",
+                "agents": memory_results,
+            }
     except Exception:
         logger.warning(
-            "Agent decision-memory shadow lookup failed; decision behavior unchanged",
+            "Agent decision-memory trace assembly failed",
             exc_info=True,
         )
 
@@ -1419,9 +1420,20 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
             "sma20": round(ind.get("sma20", 0.0), 2),
             "atr": round(ind.get("atr", 0.0), 2),
         },
-        "agents": [{"agent": a.get("agent_name") or a.get("agent"), "action": a.get("action"),
-                    "confidence": a.get("confidence"), "weight": a.get("weight"),
-                    "reasoning": a.get("reasoning")} for a in (agents or [])],
+        "agents": [
+            {
+                "agent": a.get("agent_name") or a.get("agent"),
+                "action": a.get("action"),
+                "memory_original_action": (
+                    a.get("indicators", {}).get("decision_memory", {}).get("original_action")
+                    if isinstance(a.get("indicators"), dict) else None
+                ),
+                "confidence": a.get("confidence"),
+                "weight": a.get("weight"),
+                "reasoning": a.get("reasoning"),
+            }
+            for a in (agents or [])
+        ],
         "fingerprint": fingerprint,
         "agent_memory_shadow": agent_memory_shadow,
     }

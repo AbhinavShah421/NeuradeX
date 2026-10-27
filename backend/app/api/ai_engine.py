@@ -6,7 +6,7 @@ to app.services.ai_engine_service. See that module's docstring for the list
 of names re-exported below for other modules that import internals from here.
 """
 from __future__ import annotations
-from fastapi import APIRouter
+from fastapi import APIRouter, Body
 from typing import Optional
 
 from app.utils.elk_logger import get_logger
@@ -357,8 +357,14 @@ async def memory_stats():
 
 @router.get("/memory/agent-shadow")
 async def agent_memory_shadow_status():
-    """Compare agent signals with a similar-case memory overlay in shadow mode."""
+    """Report per-agent shadow evaluation and Redis promotion state."""
     return await service.agent_memory_shadow_status()
+
+
+@router.post("/memory/agent-shadow/enabled")
+async def set_agent_memory_enabled(enabled: bool = Body(..., embed=True)):
+    """Enable or disable the active Redis agent-memory overlay."""
+    return await service.set_agent_memory_enabled(enabled)
 
 
 @router.delete("/memory/purge")
