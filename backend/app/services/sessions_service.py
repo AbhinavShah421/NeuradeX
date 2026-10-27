@@ -474,9 +474,11 @@ async def _persist_session_decision(session_id: str, symbol: str, decision: dict
             await conn.execute(text("""
                 INSERT INTO session_decisions
                     (session_id, symbol, candle_time, price, action, executed,
-                     confidence, reason, indicators, agents, trade)
+                     confidence, reason, indicators, agents, trade, fingerprint,
+                     agent_memory_shadow)
                 VALUES (:sid, :sym, :ct, :price, :action, :executed,
-                        :conf, :reason, :indicators, :agents, :trade)
+                        :conf, :reason, :indicators, :agents, :trade, :fingerprint,
+                        :agent_memory_shadow)
                 ON CONFLICT (session_id, candle_time) DO UPDATE SET
                     price      = EXCLUDED.price,
                     action     = EXCLUDED.action,
@@ -485,7 +487,10 @@ async def _persist_session_decision(session_id: str, symbol: str, decision: dict
                     reason     = EXCLUDED.reason,
                     indicators = EXCLUDED.indicators,
                     agents     = EXCLUDED.agents,
-                    trade      = COALESCE(EXCLUDED.trade, session_decisions.trade)
+                    trade      = COALESCE(EXCLUDED.trade, session_decisions.trade),
+                    fingerprint = COALESCE(EXCLUDED.fingerprint, session_decisions.fingerprint),
+                    agent_memory_shadow = COALESCE(
+                        EXCLUDED.agent_memory_shadow, session_decisions.agent_memory_shadow)
             """), {
                 "sid":        session_id,
                 "sym":        symbol,
@@ -498,6 +503,10 @@ async def _persist_session_decision(session_id: str, symbol: str, decision: dict
                 "indicators": _json.dumps(decision.get("indicators", {})),
                 "agents":     _json.dumps(decision.get("agents", [])),
                 "trade":      _json.dumps(decision["trade"]) if decision.get("trade") else None,
+                "fingerprint": _json.dumps(decision["fingerprint"])
+                if decision.get("fingerprint") else None,
+                "agent_memory_shadow": _json.dumps(decision["agent_memory_shadow"])
+                if decision.get("agent_memory_shadow") else None,
             })
     except Exception as exc:
         logger.debug("persist_session_decision failed: %s", exc)
@@ -1367,6 +1376,28 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
     # ── Live decision trace — the per-candle "why" the UI shows, and a rolling
     # log kept on the session for review + training. ──────────────────────────
     _timing_label = {1: "BUY trigger", -1: "SELL/exit trigger", 0: "no trigger"}.get(tsig, "—")
+    fingerprint = None
+    agent_memory_shadow = {"mode": "shadow_only", "agents": []}
+    try:
+        from app.agents.fingerprint import build_fingerprint
+        fingerprint = build_fingerprint(window)
+        if fingerprint and agents:
+            from app.agents.agent_decision_memory import get_agent_decision_memory
+            agent_memory_shadow = await get_agent_decision_memory().shadow(
+                [
+                    {"agent": a.get("agent_name") or a.get("agent"),
+                     "action": a.get("action")}
+                    for a in agents
+                ],
+                fingerprint,
+                s.get("date"),
+            )
+    except Exception:
+        logger.warning(
+            "Agent decision-memory shadow lookup failed; decision behavior unchanged",
+            exc_info=True,
+        )
+
     decision = {
         "time": candle.get("time"),
         "price": round(candle["close"], 2),
@@ -1391,6 +1422,8 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         "agents": [{"agent": a.get("agent_name") or a.get("agent"), "action": a.get("action"),
                     "confidence": a.get("confidence"), "weight": a.get("weight"),
                     "reasoning": a.get("reasoning")} for a in (agents or [])],
+        "fingerprint": fingerprint,
+        "agent_memory_shadow": agent_memory_shadow,
     }
     s["last_decision"] = decision
     log = s.get("decision_log") or []

@@ -1480,6 +1480,13 @@ async def memory_stats():
     return await get_memory().stats()
 
 
+async def agent_memory_shadow_status():
+    """Report out-of-sample, counterfactual evaluation of per-agent memory."""
+    await _db_once()
+    from app.agents.agent_decision_memory import get_agent_decision_memory
+    return await get_agent_decision_memory().status()
+
+
 async def memory_purge(sources: str = "REPLAY"):
     """Delete memory cases by source label so the bank can rebuild from clean data.
 

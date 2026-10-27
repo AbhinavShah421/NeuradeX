@@ -95,6 +95,10 @@ _DDL = [
     # Label columns on the existing decisions table.
     "ALTER TABLE session_decisions ADD COLUMN IF NOT EXISTS cf_pnl_pct DOUBLE PRECISION",
     "ALTER TABLE session_decisions ADD COLUMN IF NOT EXISTS cf_labeled_at TIMESTAMPTZ",
+    # Persist decision-time fingerprints and the non-operative per-agent memory
+    # comparison so the shadow result can be evaluated against the later label.
+    "ALTER TABLE session_decisions ADD COLUMN IF NOT EXISTS fingerprint JSONB",
+    "ALTER TABLE session_decisions ADD COLUMN IF NOT EXISTS agent_memory_shadow JSONB",
     # One-time dedupe of the per-advance-tick duplicate rows written before the
     # persist path was upserted — keep the newest row per (session, candle).
     """DELETE FROM session_decisions a USING session_decisions b

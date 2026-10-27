@@ -355,6 +355,12 @@ async def memory_stats():
     return await service.memory_stats()
 
 
+@router.get("/memory/agent-shadow")
+async def agent_memory_shadow_status():
+    """Compare agent signals with a similar-case memory overlay in shadow mode."""
+    return await service.agent_memory_shadow_status()
+
+
 @router.delete("/memory/purge")
 async def memory_purge(sources: str = "REPLAY"):
     """Delete memory cases by source label so the bank can rebuild from clean data.

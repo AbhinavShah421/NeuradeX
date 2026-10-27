@@ -72,6 +72,23 @@ otherwise the ensemble **abstains (HOLD)**. Strong precedent boosts confidence.
 This selectivity is what lifts win-rate on *taken* trades — the system only acts
 when memory supports it.
 
+## Per-agent decision memory (shadow mode)
+
+In addition to the shared Pattern Memory bank, each session decision now stores
+the 19-value fingerprint and a per-agent comparison against that agent's own
+similar, counterfactually-labeled decisions. Retrieval only uses resolved
+sessions from dates earlier than the current session, excludes decisions that
+were executed, requires at least eight similar examples at cosine similarity
+≥0.45, and discounts replay/backtest examples. The shadow overlay marks weak
+BUY evidence as a hypothetical HOLD; it **does not change the ensemble signal,
+session gate, or any live/paper/backtest action**.
+
+The later counterfactual label lets the system compare each agent's original
+signal with that hypothetical overlay on the same decision. Use
+`GET /api/ai-engine/memory/agent-shadow` to inspect labeled baseline and shadow
+accuracy. This is an evaluation feed, not proof of improved profitability; the
+overlay should remain shadow-only until it has enough out-of-sample evidence.
+
 ---
 
 ## How training happens
@@ -108,6 +125,7 @@ cases are preserved. Trigger manually from the **Agents & Memory** page.
 | `ai_engine_outcomes` | Realised P&L + reward per prediction |
 | `ai_engine_agent_weights` | Per-agent weight, total/correct predictions, total reward |
 | `pattern_memory` | Fingerprint cases: action, pnl%, regime, source (`BACKTEST`/`PAPER`/`REPLAY`/`LIVE`) |
+| `session_decisions` | Per-candle agent signals, counterfactual labels, decision fingerprint, and shadow-only memory comparison |
 
 ---
 
@@ -120,6 +138,7 @@ cases are preserved. Trigger manually from the **Agents & Memory** page.
 | `GET /api/ai-engine/performance` | Per-agent weight + accuracy |
 | `GET /api/ai-engine/learning-summary` | Totals, overall accuracy, per-agent stats, 24h activity, memory size |
 | `GET /api/ai-engine/memory/stats` | Memory size + win-rate by source/action |
+| `GET /api/ai-engine/memory/agent-shadow` | Labeled comparison of each agent's original signal and shadow-memory overlay |
 | `POST /api/ai-engine/memory/query` | What memory recalls for a given candle window |
 | `POST /api/ai-engine/memory/seed` | Bulk-seed memory from historical replays |
 | `POST /api/ai-engine/memory/sweep` | Manually trigger the nightly rebuild |
