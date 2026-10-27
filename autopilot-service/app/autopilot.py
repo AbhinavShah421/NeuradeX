@@ -422,7 +422,11 @@ async def _stop_backtest_queue(reason: str = "paper-trading window") -> None:
             logger.warning("Refusing to stop session %s — not owned by autopilot", sid)
             continue
         await _stop_session(sid)
-    st.update({"queue": [], "queue_pending": 0, "queue_date": None})
+    st.update({
+        "queue": [], "queue_pending": 0, "queue_total": 0,
+        "queue_date": None, "symbols_remaining": [], "batch_idx": 0,
+        "started_at": None,
+    })
     await _save_bt_state(st)
     logger.info("backtest queue closed (%s): %d sessions stopped", reason, len(queue))
 
@@ -641,6 +645,19 @@ async def _do_backtest_step() -> None:
     queue            = st.get("queue") or []
     syms_remaining   = st.get("symbols_remaining") or []
     batch_idx        = st.get("batch_idx", 0)
+
+    if not queue and syms_remaining and not st.get("queue_date"):
+        logger.warning(
+            "discarding incomplete backtest batch state for %s (%d symbols had no active queue)",
+            cursor, len(syms_remaining),
+        )
+        st.update({
+            "queue_pending": 0, "queue_total": 0, "queue_date": None,
+            "symbols_remaining": [], "batch_idx": 0, "started_at": None,
+        })
+        await _save_bt_state(st)
+        syms_remaining = []
+        batch_idx = 0
 
     # ── No active batch AND no pending symbols → fresh day ────────────────────
     if not queue and not syms_remaining:
