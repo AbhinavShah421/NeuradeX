@@ -29,6 +29,7 @@ loop**, the **AI watchlist + autopilot**, and **Pattern Memory**.
 | `POST` | `/api/ai-engine/watchlist/scan` | Proxy a manual full-market sweep to the scanner service |
 | `GET` | `/api/ai-engine/scan-status` | **Centralized scan status** — `{scanning, scanned, universe, candidates, last_scan}`. Single source of truth so a rescan started on one page disables rescan on all pages |
 | `GET` | `/api/ai-engine/ranked?limit=N` | Full **ranked board** of AI-scanned stocks (top N, default 100) with per-stock evidence + news sentiment — backs the Predictions rankings page |
+| `GET` | `/api/ai-engine/gainers?limit=N` | Actual positive day movers from the latest completed full-market scan, with scan time and scanned/universe counts; distinct from setup-ranked picks |
 | `GET` | `/api/ai-engine/autopilot` | Combined autopilot status — `paper` + `backtest` (proxied from autopilot-service) |
 | `POST` | `/api/ai-engine/autopilot` | Enable / disable a mode (`{ "mode": "paper"\|"backtest", "enabled": true }`) |
 | `POST` | `/api/ai-engine/autopilot/reset-cursor` | Reset the backtest next trade date to the last trading day before today (stops the in-flight queue, keeps training history) |

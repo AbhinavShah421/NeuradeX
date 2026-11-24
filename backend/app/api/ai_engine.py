@@ -113,6 +113,12 @@ async def get_ranked(limit: int = 100):
     return await service.get_ranked(limit)
 
 
+@router.get("/gainers")
+async def get_market_gainers(limit: int = 25):
+    """Observed positive day movers, separate from AI setup rankings."""
+    return await service.get_market_gainers(limit)
+
+
 @router.get("/agrade-watch")
 async def get_agrade_watch():
     """The A-grade live-watcher snapshot (per-symbol live state + triggers) and

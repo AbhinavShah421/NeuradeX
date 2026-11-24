@@ -46,11 +46,21 @@ const AutopilotBanner: React.FC = () => {
   const bt = ap.backtest ?? {};
   const anyOn = paper.enabled || bt.enabled;
 
-  const paperDesc = paper.enabled
+  const hasDailyProfit = paper.dailyProfit !== undefined && paper.dailyProfit !== null && Number.isFinite(Number(paper.dailyProfit));
+  const dailyProfit = Number(paper.dailyProfit ?? 0);
+  const dailyProfitLimit = Number(paper.dailyProfitLimit ?? 2000);
+  const formatRupees = (value: number) => `₹${new Intl.NumberFormat('en-IN', { maximumFractionDigits: 2 }).format(value)}`;
+  const paperStatus = paper.profitHalted
+    ? 'Paper trading paused until tomorrow'
+    : paper.enabled
     ? (paper.marketOpen
         ? `Paper-trading ${paper.running ?? 0} of ${paper.watchlistSize ?? 0} watchlist stocks live`
         : `Market closed — will paper-trade all ${paper.watchlistSize ?? 0} watchlist stocks at open`)
     : 'Live paper-trade the whole watchlist during market hours';
+  const profitStatus = hasDailyProfit
+    ? `Daily P&L ${formatRupees(dailyProfit)} / ${formatRupees(dailyProfitLimit)}`
+    : `Daily P&L unavailable / ${formatRupees(dailyProfitLimit)} limit`;
+  const paperDesc = `${paperStatus} · ${profitStatus}`;
 
   const btDesc = bt.enabled
     ? (bt.activeWindow === false

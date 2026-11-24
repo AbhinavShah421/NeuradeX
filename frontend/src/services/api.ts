@@ -1,5 +1,5 @@
 import axios, { AxiosInstance } from 'axios';
-import { Stock, Prediction, Portfolio, ApiResponse, RiskMetrics, StressTestResult, FactorAnalysis, OptimizationResult, OrderRequest, OrderResponse, AIAnalysis, AgentStock, BacktestResult, LiveSignal, LoginRequest, AuthResponse, SignupSendOtpRequest, SignupVerifyOtpRequest, SignupCompleteRequest } from '../types';
+import { Stock, Prediction, Portfolio, ApiResponse, RiskMetrics, StressTestResult, FactorAnalysis, OptimizationResult, OrderRequest, OrderResponse, AIAnalysis, AgentStock, BacktestResult, LiveSignal, LoginRequest, AuthResponse, SignupSendOtpRequest, SignupVerifyOtpRequest, SignupCompleteRequest, MarketGainersData } from '../types';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || '';
 
@@ -921,6 +921,10 @@ class ApiService {
   }
   async getRanked(limit = 100): Promise<ApiResponse<any>> {
     const response = await this.api.get('/api/ai-engine/ranked', { params: { limit }, timeout: 20000 });
+    return response.data;
+  }
+  async getMarketGainers(limit = 25): Promise<ApiResponse<MarketGainersData>> {
+    const response = await this.api.get('/api/ai-engine/gainers', { params: { limit }, timeout: 10000 });
     return response.data;
   }
   async getWatchlistConfig(): Promise<ApiResponse<any>> {
