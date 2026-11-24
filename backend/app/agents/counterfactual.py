@@ -95,6 +95,10 @@ _DDL = [
     # Label columns on the existing decisions table.
     "ALTER TABLE session_decisions ADD COLUMN IF NOT EXISTS cf_pnl_pct DOUBLE PRECISION",
     "ALTER TABLE session_decisions ADD COLUMN IF NOT EXISTS cf_labeled_at TIMESTAMPTZ",
+    # Persist decision-time fingerprints and the non-operative per-agent memory
+    # comparison so the shadow result can be evaluated against the later label.
+    "ALTER TABLE session_decisions ADD COLUMN IF NOT EXISTS fingerprint JSONB",
+    "ALTER TABLE session_decisions ADD COLUMN IF NOT EXISTS agent_memory_shadow JSONB",
     # One-time dedupe of the per-advance-tick duplicate rows written before the
     # persist path was upserted — keep the newest row per (session, candle).
     """DELETE FROM session_decisions a USING session_decisions b
@@ -1141,6 +1145,24 @@ async def _sync_learning_rates(trigger: str) -> None:
         logger.warning("action-rate sync failed (%s): %s", trigger, exc)
 
 
+async def _refresh_agent_decision_memory(trigger: str) -> None:
+    try:
+        from app.agents.agent_decision_memory import get_agent_decision_memory
+        result = await get_agent_decision_memory().refresh_and_promote()
+        logger.info(
+            "agent decision-memory Redis refresh complete",
+            extra={"log_type": "ai_engine", "event": "agent_memory_promoted",
+                   "trigger": trigger, "agents": result["agents"],
+                   "promoted": result["promoted"], "rows": result["rows"]},
+        )
+    except Exception:
+        logger.warning(
+            "agent decision-memory Redis refresh failed (%s)",
+            trigger,
+            exc_info=True,
+        )
+
+
 async def counterfactual_loop() -> None:
     """Off-hours: label pending decisions against the tick store, then run the
     RL and memory consumers for the last completed trading day (each is
@@ -1152,11 +1174,13 @@ async def counterfactual_loop() -> None:
                 extra={"log_type": "app_lifecycle", "event": "cf_loop_started"})
     # Startup sync so a restart never leaves the ensemble without action rates.
     await _sync_learning_rates("startup")
+    await _refresh_agent_decision_memory("startup")
     while True:
         try:
             if not _market_hours() and (time.time() - _last_sweep) >= _SWEEP_EVERY:
                 _last_sweep = time.time()
                 await label_pending()
+                await _refresh_agent_decision_memory("counterfactual_sweep")
                 day = _last_completed_trading_day(datetime.now(IST))
                 await train_rl_from_labels(day)
                 await promote_memory_phantoms(day)

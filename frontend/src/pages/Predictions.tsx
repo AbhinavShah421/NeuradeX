@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import apiService from '../services/api';
 import ScanControl from '../components/ScanControl';
 import { useScanStore } from '../stores/scanStore';
+import type { MarketGainersData } from '../types';
 
 const inr = (v: number) =>
   `₹${(v ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -21,6 +22,91 @@ const fmtDate = (d?: string) => {
     return new Date(d + 'T00:00:00').toLocaleDateString(undefined, { weekday: 'short', day: '2-digit', month: 'short' });
   } catch { return d; }
 };
+
+const isScanStale = (updatedAt?: string) => {
+  if (!updatedAt) return false;
+  const timestamp = Date.parse(updatedAt);
+  return Number.isFinite(timestamp) && Date.now() - timestamp > 15 * 60 * 1000;
+};
+
+const MarketGainers: React.FC<{
+  data: MarketGainersData | null;
+  loading: boolean;
+  error: string | null;
+}> = ({ data, loading, error }) => (
+  <section className="nd-card" style={{ padding: 16, marginBottom: 16 }}>
+    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap', marginBottom: 8 }}>
+      <div style={{ flex: 1, minWidth: 200 }}>
+        <h2 style={{ margin: 0, fontSize: 16, color: 'var(--nd-text-1)' }}>Top Market Gainers</h2>
+        <div style={{ marginTop: 4, fontSize: 11.5, color: 'var(--nd-text-3)', lineHeight: 1.5 }}>
+          Actual observed day move, ranked by percentage change. This is separate from AI setup rankings and is not a trade recommendation.
+        </div>
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--nd-text-3)', textAlign: 'right' }}>
+        {data?.updatedAt ? `Scan: ${fmtTime(data.updatedAt)}${isScanStale(data.updatedAt) ? ' · stale' : ''}` : 'Waiting for first completed scan'}
+        {data?.scanned != null && data.universe != null ? <div>{data.scanned.toLocaleString()} / {data.universe.toLocaleString()} stocks scanned</div> : null}
+      </div>
+    </div>
+
+    {error ? (
+      <div role="alert" style={{ padding: '10px 12px', color: 'var(--nd-red)', fontSize: 12.5 }}>
+        {error}
+      </div>
+    ) : null}
+    {loading && !data ? (
+      <div style={{ padding: '16px 4px', color: 'var(--nd-text-3)', fontSize: 12.5 }}>Loading current market gainers…</div>
+    ) : !data ? null : !data.items.length ? (
+      <div style={{ padding: '16px 4px', color: 'var(--nd-text-3)', fontSize: 12.5 }}>
+        No positive movers in the latest completed scan.
+      </div>
+    ) : (
+      <div style={{ overflowX: 'auto' }}>
+        <table className="nd-table">
+          <thead><tr>
+            <th style={{ width: 44, textAlign: 'center' }}>#</th>
+            <th>Stock</th>
+            <th style={{ textAlign: 'right' }}>Day change</th>
+            <th style={{ textAlign: 'right' }}>Since open</th>
+            <th style={{ textAlign: 'right' }}>Price</th>
+            <th style={{ textAlign: 'center' }}>AI setup</th>
+            <th style={{ textAlign: 'right' }}>Rel. volume</th>
+          </tr></thead>
+          <tbody>
+            {data.items.slice(0, 10).map((stock, index) => {
+              const actionColor = ACTION_BG[stock.action ?? ''] ?? 'var(--nd-text-3)';
+              const dayChange = Number(stock.changePct);
+              return (
+                <tr key={stock.symbol}>
+                  <td style={{ textAlign: 'center', color: 'var(--nd-text-3)', fontWeight: 700 }}>{index + 1}</td>
+                  <td>
+                    <div style={{ fontWeight: 700, fontFamily: 'monospace', color: 'var(--nd-text-1)' }}>{stock.symbol}</div>
+                    <div style={{ fontSize: 10.5, color: 'var(--nd-text-3)' }}>{stock.name}</div>
+                  </td>
+                  <td style={{ textAlign: 'right', color: 'var(--nd-green)', fontWeight: 800 }}>
+                    +{dayChange.toFixed(2)}%
+                  </td>
+                  <td style={{ textAlign: 'right', color: (stock.intradayPct ?? 0) >= 0 ? 'var(--nd-green)' : 'var(--nd-red)' }}>
+                    {stock.intradayPct != null ? `${stock.intradayPct >= 0 ? '+' : ''}${stock.intradayPct.toFixed(2)}%` : '—'}
+                  </td>
+                  <td style={{ textAlign: 'right', fontWeight: 600 }}>{inr(stock.price)}</td>
+                  <td style={{ textAlign: 'center' }}>
+                    {stock.action ? (
+                      <span title="Technical setup signal; not the ranking criterion for this movers list"
+                        style={{ fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 5, background: `${actionColor}1a`, color: actionColor }}>
+                        {stock.action}{stock.grade ? ` · ${stock.grade}` : ''}
+                      </span>
+                    ) : '—'}
+                  </td>
+                  <td style={{ textAlign: 'right' }}>{stock.relVolume != null ? `${stock.relVolume.toFixed(2)}×` : '—'}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    )}
+  </section>
+);
 
 // ── Per-stock "why this rank" detail ──────────────────────────────────────────
 const RankDetail: React.FC<{ s: any; onClose: () => void }> = ({ s, onClose }) => {
@@ -145,6 +231,9 @@ const RankDetail: React.FC<{ s: any; onClose: () => void }> = ({ s, onClose }) =
 const Predictions: React.FC = () => {
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [gainers, setGainers] = useState<MarketGainersData | null>(null);
+  const [gainersLoading, setGainersLoading] = useState(true);
+  const [gainersError, setGainersError] = useState<string | null>(null);
   const [limit, setLimit] = useState<number | 'All'>(20);
   const [sel, setSel] = useState<any>(null);
 
@@ -163,12 +252,33 @@ const Predictions: React.FC = () => {
     finally { setLoading(false); }
   }, []);
 
+  const fetchGainers = useCallback(async () => {
+    try {
+      const response = await apiService.getMarketGainers(25);
+      if (!response.data) throw new Error('Market gainers response did not include data.');
+      setGainers(response.data);
+      setGainersError(null);
+    } catch (e: any) {
+      setGainersError(e?.response?.data?.detail || e?.message || 'Unable to load current market gainers.');
+    } finally {
+      setGainersLoading(false);
+    }
+  }, []);
+
   useEffect(() => { fetchRanked(limit); }, [limit, fetchRanked]);
+  useEffect(() => {
+    void fetchGainers();
+    const timer = window.setInterval(() => { void fetchGainers(); }, 60_000);
+    return () => window.clearInterval(timer);
+  }, [fetchGainers]);
 
   // When a centralized scan finishes, auto re-pull the ranked board.
   const scanning = useScanStore(s => s.scanning);
   useEffect(() => {
-    if (!scanning) fetchRanked(limit);
+    if (!scanning) {
+      fetchRanked(limit);
+      void fetchGainers();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scanning]);
 
@@ -207,8 +317,10 @@ const Predictions: React.FC = () => {
     <div>
       <div style={{ marginBottom: 16 }}>
         <h1 className="nd-page-title">AI Stock Rankings</h1>
-        <p className="nd-page-sub">Every AI-scanned stock ranked by the agentic engine — click any row to see why it earned its rank.</p>
+        <p className="nd-page-sub">View actual market movers separately from AI-ranked trading setups.</p>
       </div>
+
+      <MarketGainers data={gainers} loading={gainersLoading} error={gainersError} />
 
       {/* Controls */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 14 }}>

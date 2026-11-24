@@ -92,6 +92,15 @@ carrying its full evidence (factor confirmations, indicators, reasoning) — are
 written to `ai_engine:ranked` and served at `/api/ai-engine/ranked` for the
 **Predictions** rankings board (Top 10/20/50/100/All + per-stock "why this rank").
 
+### Actual market gainers
+
+The scanner separately records liquid stocks' observed daily percentage change,
+including names rejected by the setup-ranking gates. The movers are sorted by
+day change in `ai_engine:movers` and exposed through `/api/ai-engine/gainers`.
+Predictions displays this as a separate board: its day-change column describes
+the observed market move, while any AI action/grade is shown only as a distinct
+setup signal. Movers are not trade recommendations.
+
 ---
 
 ## Post-market signal score (self-grading)
@@ -138,6 +147,7 @@ morning picks ─▶ end-of-day grade ─▶ accuracy ─▶ calibration multipl
 |---|---|---|---|
 | `ai_engine:watchlist` | stock-scanner | backend `/watchlist`, autopilot | Live AI watchlist (`items` intraday + `delivery`) |
 | `ai_engine:ranked` | stock-scanner | backend `/ranked` | Full ranked board (top `SCAN_RANKED_MAX`) for Predictions |
+| `ai_engine:movers` | stock-scanner | backend `/gainers` | Observed positive day movers, separate from setup-ranked picks |
 | `ai_engine:scan_universe:{date}` | stock-scanner | scanner | Day-cached scan universe (NSE master) |
 | `ai_engine:watchlist:premarket:{date}` | stock-scanner | scanner (eval) | Morning snapshot graded after close |
 | `ai_engine:scan_calibration` | stock-scanner | scanner | Learned per-action confidence multipliers |

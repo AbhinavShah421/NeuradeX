@@ -55,6 +55,25 @@ _REPLAY_POLL_SECONDS = 1.0
 _SPEED_MIN    = 1
 _SPEED_MAX    = 120
 _next_paper_step_at: dict[str, float] = {}
+_PAPER_PROFIT_HALT_KEY = "ai_engine:paper_daily_profit_halt"
+_PAPER_PROFIT_HALT_MESSAGE = (
+    "Daily paper-trading profit limit reached. Paper trading is paused until the next IST day."
+)
+
+
+async def _paper_profit_halt_active(today: str | None = None) -> bool:
+    from app.utils.redis_client import get_redis
+    session_day = today or datetime.now(IST).strftime("%Y-%m-%d")
+    return await get_redis().get(_PAPER_PROFIT_HALT_KEY) == session_day
+
+
+async def _stop_paper_session_at_profit_limit(session: dict) -> None:
+    session["status"] = "stopped"
+    session["error"] = _PAPER_PROFIT_HALT_MESSAGE
+    session["updated_at"] = datetime.now(IST).isoformat()
+    await _finalize_session(session)
+    await save_session(session)
+
 
 # ── Trade gate ────────────────────────────────────────────────────────────────
 # How selective session entries are; switchable at runtime from the dashboard.
@@ -165,7 +184,7 @@ TRADE_GATES = {
                "min_buy": 2, "need_reliable": True, "min_grade": "C", "score_min": 78,
                "desc": "Needs 2+ agents voting BUY including pattern or sentiment (the proven BUY voters), a non-bearish ensemble, and a C+ pattern. Balanced."},
     "loose":  {"label": "Loose",  "require_buy": False, "min_conf": 0.0,  "max_conf": 1.01, "override_ceiling": 1.01,
-               "min_buy": 2, "need_reliable": False, "min_grade": "D", "reliable_single": True, "score_min": 30,
+               "min_buy": 2, "need_reliable": False, "min_grade": "D", "reliable_single": True, "score_min": 65,
                "desc": "Needs 2 BUY votes OR one high-precision agent; pattern grade not enforced. Most trades — for training volume (lower win-rate)."},
 }
 _gate_cache = {"mode": "", "ts": 0.0}
@@ -489,9 +508,11 @@ async def _persist_session_decision(session_id: str, symbol: str, decision: dict
             await conn.execute(text("""
                 INSERT INTO session_decisions
                     (session_id, symbol, candle_time, price, action, executed,
-                     confidence, reason, indicators, agents, trade)
+                     confidence, reason, indicators, agents, trade, fingerprint,
+                     agent_memory_shadow)
                 VALUES (:sid, :sym, :ct, :price, :action, :executed,
-                        :conf, :reason, :indicators, :agents, :trade)
+                        :conf, :reason, :indicators, :agents, :trade, :fingerprint,
+                        :agent_memory_shadow)
                 ON CONFLICT (session_id, candle_time) DO UPDATE SET
                     price      = EXCLUDED.price,
                     action     = EXCLUDED.action,
@@ -500,7 +521,10 @@ async def _persist_session_decision(session_id: str, symbol: str, decision: dict
                     reason     = EXCLUDED.reason,
                     indicators = EXCLUDED.indicators,
                     agents     = EXCLUDED.agents,
-                    trade      = COALESCE(EXCLUDED.trade, session_decisions.trade)
+                    trade      = COALESCE(EXCLUDED.trade, session_decisions.trade),
+                    fingerprint = COALESCE(EXCLUDED.fingerprint, session_decisions.fingerprint),
+                    agent_memory_shadow = COALESCE(
+                        EXCLUDED.agent_memory_shadow, session_decisions.agent_memory_shadow)
             """), {
                 "sid":        session_id,
                 "sym":        symbol,
@@ -513,6 +537,10 @@ async def _persist_session_decision(session_id: str, symbol: str, decision: dict
                 "indicators": _json.dumps(decision.get("indicators", {})),
                 "agents":     _json.dumps(decision.get("agents", [])),
                 "trade":      _json.dumps(decision["trade"]) if decision.get("trade") else None,
+                "fingerprint": _json.dumps(decision["fingerprint"])
+                if decision.get("fingerprint") else None,
+                "agent_memory_shadow": _json.dumps(decision["agent_memory_shadow"])
+                if decision.get("agent_memory_shadow") else None,
             })
     except Exception as exc:
         logger.debug("persist_session_decision failed: %s", exc)
@@ -668,6 +696,12 @@ _MARKET_CLOSE_MINUTES = 15 * 60 + 30   # 15:30 IST NSE close — after this, tod
 # a code change, because this alters live entry direction and needs to be
 # reversible in one step if the live population diverges from the CF estimate.
 _TREND_FILTER_LEGACY = os.getenv("NEURADEX_TREND_FILTER", "").lower() == "legacy"
+
+# Final entry validator (agents/validator.py). Shipped OFF (2026-11-24): the
+# entry gates were restored to the feature/agent-decision-memory behaviour,
+# which had no validator, after main's gate stack stopped paper from trading.
+# NEURADEX_ENTRY_VALIDATOR=1 re-arms it unchanged (it still fails closed).
+_ENTRY_VALIDATOR = os.getenv("NEURADEX_ENTRY_VALIDATOR", "0").strip().lower() in ("1", "true", "yes")
 
 
 def _timing_block_reason(ind: dict, candle: dict) -> str:
@@ -1261,7 +1295,8 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         # satisfies the gate it claims to have cleared. It exists because a
         # zero-priced trade and a zero-volume forming candle have both reached
         # production here without anything erroring. See agents/validator.py.
-        if enter:
+        # Off unless NEURADEX_ENTRY_VALIDATOR=1 (see _ENTRY_VALIDATOR).
+        if enter and _ENTRY_VALIDATOR:
             try:
                 from app.agents.validator import build_context, validate_entry
                 verdict = validate_entry(build_context(
@@ -1452,6 +1487,41 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
             blocked.append(f"daily loss limit — {halt_reason}")
             reason = f"Daily loss limit hit ({halt_reason}) — no new entries today."
 
+    # ── Never open a position on a closing step ──────────────────────────────
+    # Every entry cutoff above is skipped when force_close is set, so the final
+    # candle could still BUY: OMPOWER replayed for 2026-11-23 entered at 15:25
+    # and the session ended holding it. A closing step only ever exits.
+    if action == "BUY" and force_close:
+        action = "HOLD"
+        reason = "Session closing — no new entries on the final candle."
+
+    # ── Supervisor (paper only): manual force-exit + entry guards ────────────
+    # Last word before a fill. Guards can only block an entry or close a
+    # position on an explicit supervisor request — see app/services/supervisor.py.
+    if s.get("mode") == "paper" and not force_close:
+        from app.services import supervisor
+        if pos["status"] == "LONG" and action != "SELL":
+            forced = await supervisor.check_forced_exit(s)
+            if forced:
+                action, exit_trigger = "SELL", "supervisor"
+                reason = f"Supervisor exit: {forced}"
+                await supervisor.log_event("force_exit", session_id=s["id"], symbol=symbol,
+                                           reason=forced, price=candle["close"],
+                                           unrealised=pos.get("current_pnl"))
+        elif action == "BUY" and pos["status"] == "NONE":
+            veto = await supervisor.check_entry(s, candle, ind, window)
+            if veto:
+                action = "HOLD"
+                reason = f"Supervisor veto: {veto}"
+                await supervisor.log_event("veto", session_id=s["id"], symbol=symbol,
+                                           reason=veto, price=candle["close"], bar=candle.get("time"))
+            else:
+                await supervisor.log_event("entry_allowed", session_id=s["id"], symbol=symbol,
+                                           price=candle["close"], bar=candle.get("time"),
+                                           conf=round(float(conf), 3), rsi=ind.get("rsi"),
+                                           vwap=ind.get("vwap"), sma5=ind.get("sma5"),
+                                           sma20=ind.get("sma20"))
+
     trade_executed = None
 
     if action == "BUY" and pos["status"] == "NONE":
@@ -1541,6 +1611,12 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         pnl     = revenue - qty * entry            # net P&L (slippage in fills + charges)
         pnl_pct = round(pnl / (qty * entry) * 100, 2) if entry > 0 else 0.0
         s["cash"] += revenue
+        if s.get("mode") == "paper":
+            from app.services import supervisor
+            await supervisor.note_exit(symbol, pnl)
+            await supervisor.log_event("exit", session_id=s["id"], symbol=symbol,
+                                       trigger=exit_trigger or "unknown", pnl=round(pnl, 2),
+                                       pnl_pct=pnl_pct, entry=round(entry, 2), exit=round(exit_fill, 2))
         trade_executed = {"action": "SELL", "price": exit_fill, "quantity": qty, "pnl": round(pnl, 2), "time": candle["time"]}
         s["trades"].append({
             "time": candle["time"], "timestamp": candle.get("timestamp", 0),
@@ -1622,6 +1698,29 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
     # ── Live decision trace — the per-candle "why" the UI shows, and a rolling
     # log kept on the session for review + training. ──────────────────────────
     _timing_label = {1: "BUY trigger", -1: "SELL/exit trigger", 0: "no trigger"}.get(tsig, "—")
+    fingerprint = None
+    agent_memory_shadow = {"mode": "shadow_only", "agents": []}
+    try:
+        from app.agents.fingerprint import build_fingerprint
+        fingerprint = build_fingerprint(window)
+        memory_results = [
+            a.get("indicators", {}).get("decision_memory")
+            for a in agents
+            if isinstance(a.get("indicators"), dict)
+            and isinstance(a["indicators"].get("decision_memory"), dict)
+        ]
+        if memory_results:
+            agent_memory_shadow = {
+                "mode": "active" if any(item.get("applied") for item in memory_results)
+                else "shadow_only",
+                "agents": memory_results,
+            }
+    except Exception:
+        logger.warning(
+            "Agent decision-memory trace assembly failed",
+            exc_info=True,
+        )
+
     decision = {
         "time": candle.get("time"),
         "price": round(candle["close"], 2),
@@ -1643,9 +1742,22 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
             "sma20": round(ind.get("sma20", 0.0), 2),
             "atr": round(ind.get("atr", 0.0), 2),
         },
-        "agents": [{"agent": a.get("agent_name") or a.get("agent"), "action": a.get("action"),
-                    "confidence": a.get("confidence"), "weight": a.get("weight"),
-                    "reasoning": a.get("reasoning")} for a in (agents or [])],
+        "agents": [
+            {
+                "agent": a.get("agent_name") or a.get("agent"),
+                "action": a.get("action"),
+                "memory_original_action": (
+                    a.get("indicators", {}).get("decision_memory", {}).get("original_action")
+                    if isinstance(a.get("indicators"), dict) else None
+                ),
+                "confidence": a.get("confidence"),
+                "weight": a.get("weight"),
+                "reasoning": a.get("reasoning"),
+            }
+            for a in (agents or [])
+        ],
+        "fingerprint": fingerprint,
+        "agent_memory_shadow": agent_memory_shadow,
     }
     s["last_decision"] = decision
     log = s.get("decision_log") or []
@@ -1973,6 +2085,16 @@ async def session_runner_loop() -> None:
                 # Stale-check only needs created_at — slim blob has it.
                 if await _auto_stop_stale(s_slim):
                     continue
+                if (s_slim.get("mode") == "paper"
+                        and (s_slim.get("created_at") or "")[:10] == datetime.now(IST).strftime("%Y-%m-%d")
+                        and await _paper_profit_halt_active()):
+                    await _stop_paper_session_at_profit_limit(s_slim)
+                    logger.info(
+                        "Paper session stopped at daily profit limit",
+                        extra={"log_type": "session_event", "event": "daily_profit_halt",
+                               "session_id": s_slim.get("id"), "symbol": s_slim.get("symbol")},
+                    )
+                    continue
                 session_id = s_slim["id"]
                 is_replay = s_slim.get("mode") in ("replay", "backtest")
                 if is_replay:
@@ -2023,6 +2145,18 @@ async def _already_backtested(symbol: str, date: str) -> bool:
 async def start_session(req: StartSessionRequest):
     symbol = req.symbol.upper()
     mode   = req.mode if req.mode in ("replay", "paper", "backtest") else "replay"
+    if mode == "paper":
+        try:
+            if await _paper_profit_halt_active():
+                raise HTTPException(
+                    409,
+                    _PAPER_PROFIT_HALT_MESSAGE,
+                )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.warning("Unable to verify daily paper-trading limit before session start: %s", exc)
+            raise HTTPException(503, "Unable to verify the daily paper-trading limit. Please try again.")
     speed  = _normalise_speed(req.speed)
     model  = req.model or getattr(settings, "LLM_MODEL", "llama3.2")
     sid    = uuid.uuid4().hex[:12]

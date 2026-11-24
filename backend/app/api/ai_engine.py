@@ -6,7 +6,7 @@ to app.services.ai_engine_service. See that module's docstring for the list
 of names re-exported below for other modules that import internals from here.
 """
 from __future__ import annotations
-from fastapi import APIRouter
+from fastapi import APIRouter, Body
 from typing import Optional
 
 from app.utils.elk_logger import get_logger
@@ -111,6 +111,12 @@ async def get_ranked(limit: int = 100):
     each enriched with its latest LLM news-sentiment. `limit` caps how many of the
     top-ranked names to return."""
     return await service.get_ranked(limit)
+
+
+@router.get("/gainers")
+async def get_market_gainers(limit: int = 25):
+    """Observed positive day movers, separate from AI setup rankings."""
+    return await service.get_market_gainers(limit)
 
 
 @router.get("/agrade-watch")
@@ -353,6 +359,18 @@ async def add_learning_event(req: LearningEventRequest):
 async def memory_stats():
     """Size + win-rate breakdown of the Pattern Memory bank (for the UI)."""
     return await service.memory_stats()
+
+
+@router.get("/memory/agent-shadow")
+async def agent_memory_shadow_status():
+    """Report per-agent shadow evaluation and Redis promotion state."""
+    return await service.agent_memory_shadow_status()
+
+
+@router.post("/memory/agent-shadow/enabled")
+async def set_agent_memory_enabled(enabled: bool = Body(..., embed=True)):
+    """Enable or disable the active Redis agent-memory overlay."""
+    return await service.set_agent_memory_enabled(enabled)
 
 
 @router.delete("/memory/purge")

@@ -71,6 +71,12 @@ interface SessionDetail {
   priorLevels?: PriorLevels;
 }
 
+interface PaperProfitStatus {
+  dailyProfit?: number;
+  dailyProfitLimit?: number;
+  profitHalted?: boolean;
+}
+
 /**
  * Multi-session manager: start several server-side trading sessions (different
  * stocks), see a list of the running ones, and open any to watch its live chart.
@@ -144,6 +150,8 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+  const [paperProfitStatus, setPaperProfitStatus] = useState<PaperProfitStatus | null>(null);
+  const [paperProfitStatusUnavailable, setPaperProfitStatusUnavailable] = useState(false);
 
   // New-session form
   const [mode, setMode] = useState<'replay' | 'paper'>(fixedMode ?? 'replay');
@@ -183,6 +191,27 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
   }, []);
 
   useEffect(() => { loadList(); const t = setInterval(loadList, 3000); return () => clearInterval(t); }, [loadList]);
+  useEffect(() => {
+    if (fixedMode !== 'paper') return;
+    let active = true;
+    const loadPaperProfitStatus = async () => {
+      try {
+        const response = await apiService.getAutopilot();
+        if (active) {
+          const paper = (response.data as { paper?: PaperProfitStatus })?.paper ?? null;
+          setPaperProfitStatus(paper);
+          setPaperProfitStatusUnavailable(
+            !paper || paper.dailyProfit === undefined || paper.dailyProfit === null || !Number.isFinite(Number(paper.dailyProfit)),
+          );
+        }
+      } catch {
+        if (active) setPaperProfitStatusUnavailable(true);
+      }
+    };
+    loadPaperProfitStatus();
+    const timer = setInterval(loadPaperProfitStatus, 10000);
+    return () => { active = false; clearInterval(timer); };
+  }, [fixedMode]);
   useEffect(() => {
     if (!selectedId) { setDetail(null); return; }
     // Show cached data instantly, then fetch fresh in background
@@ -226,6 +255,11 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
   const ld  = detail?.lastDecision ?? null;
   const decLog: SessionTrade[] = detail?.decisionLog ?? [];
   const actColor = (a?: string) => a === 'BUY' ? 'var(--nd-green)' : a === 'SELL' ? 'var(--nd-red)' : 'var(--nd-text-2)';
+  const dailyProfit = Number(paperProfitStatus?.dailyProfit ?? 0);
+  const dailyProfitLimit = Number(paperProfitStatus?.dailyProfitLimit ?? 2000);
+  const profitProgress = Math.max(0, Math.min(100, dailyProfit / dailyProfitLimit * 100));
+  const formatRupees = (value: number) => `₹${new Intl.NumberFormat('en-IN', { maximumFractionDigits: 2 }).format(value)}`;
+  const dailyProfitLabel = paperProfitStatusUnavailable ? '—' : formatRupees(dailyProfit);
 
   return (
     <div>
@@ -237,6 +271,27 @@ const SessionManager: React.FC<Props> = ({ mode: fixedMode }) => {
         </div>
         <p style={{ margin: 0, fontSize: 13, lineHeight: 1.6, color: 'var(--nd-text-2)' }}>{header.blurb}</p>
       </div>
+
+      {fixedMode === 'paper' && (
+        <div style={{ ...card, marginBottom: 16, borderLeft: `3px solid ${paperProfitStatus?.profitHalted ? 'var(--nd-red)' : 'var(--nd-green)'}` }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12, flexWrap: 'wrap' }}>
+            <strong style={{ fontSize: 13, color: 'var(--nd-text-1)' }}>Daily paper-trading profit limit</strong>
+            <strong style={{ fontSize: 14, color: paperProfitStatus?.profitHalted ? 'var(--nd-red)' : 'var(--nd-green)' }}>
+              {dailyProfitLabel} / {formatRupees(dailyProfitLimit)}
+            </strong>
+          </div>
+          <div style={{ height: 6, marginTop: 10, overflow: 'hidden', borderRadius: 4, background: 'var(--nd-border)' }}>
+            <div style={{ width: `${profitProgress}%`, height: '100%', background: paperProfitStatus?.profitHalted ? 'var(--nd-red)' : 'var(--nd-green)', transition: 'width 0.2s' }} />
+          </div>
+          <p style={{ margin: '8px 0 0', fontSize: 12, color: 'var(--nd-text-2)' }}>
+            {paperProfitStatus?.profitHalted
+              ? 'Target reached — paper trading is paused until tomorrow.'
+              : paperProfitStatusUnavailable
+                ? 'Live P&L is unavailable right now. The daily cap still applies.'
+                : `Paper trading pauses for the day once combined P&L exceeds ${formatRupees(dailyProfitLimit)}.`}
+          </p>
+        </div>
+      )}
 
       {/* New session */}
       <div style={{ ...card, marginBottom: 16 }}>

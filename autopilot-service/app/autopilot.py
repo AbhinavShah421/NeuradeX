@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import random
 import time
@@ -49,6 +50,7 @@ def _is_trading_day(d) -> bool:
 
 BACKEND_URL   = os.getenv("BACKEND_URL", "http://backend:8000")
 WATCHLIST_KEY = "ai_engine:watchlist"
+MOVERS_KEY = "ai_engine:movers"
 LIVE_PROMOTIONS_KEY = "ai_engine:live_promotions:{}"   # dated list from the scanner's A-grade live watcher
 
 # Redis flags / state (shared with the backend so the UI toggle takes effect)
@@ -56,12 +58,14 @@ PAPER_FLAG     = "ai_engine:autopilot_enabled"
 PAPER_TIMING   = "ai_engine:autopilot_paper_timing"   # "normal" | "aggressive"
 BACKTEST_FLAG  = "ai_engine:autopilot_backtest_enabled"
 BACKTEST_STATE = "ai_engine:autopilot_backtest_state"
+PAPER_PROFIT_HALT_KEY = "ai_engine:paper_daily_profit_halt"
 
 def _paper_started_key(date_str: str) -> str:
     return f"ai_engine:autopilot:started:{date_str}"
 
 # Config
 PAPER_MAX   = int(os.getenv("AUTOPILOT_MAX_SESSIONS", "15"))
+PAPER_GAINERS_COUNT = 10
 CAPITAL     = float(os.getenv("AUTOPILOT_CAPITAL", "50000"))
 PAPER_TICK  = int(os.getenv("AUTOPILOT_TICK_SECS", "60"))
 # Per-trade hold cap (minutes): force-exit any position the autopilot's paper
@@ -339,6 +343,65 @@ async def _live_promoted_symbols() -> list[str]:
     return []
 
 
+async def _top_gainer_symbols(n: int = PAPER_GAINERS_COUNT) -> list[str]:
+    """Return the top fresh positive movers, before conviction picks in paper mode."""
+    try:
+        r = await _get_redis()
+        raw = await r.get(MOVERS_KEY)
+        if not raw:
+            return []
+
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            logger.warning("Ignoring malformed market movers payload")
+            return []
+
+        updated_at = payload.get("updated_at")
+        if not updated_at:
+            logger.warning("Ignoring market movers payload without a scan timestamp")
+            return []
+        try:
+            ts = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=IST)
+            age = (_now_ist() - ts.astimezone(IST)).total_seconds()
+        except (AttributeError, TypeError, ValueError):
+            logger.warning("Ignoring market movers payload with invalid scan timestamp")
+            return []
+        if age < -300 or age > _WATCHLIST_MAX_AGE_SECONDS:
+            logger.warning("Ignoring stale market movers payload (age %.0f seconds)", age)
+            return []
+
+        movers = payload.get("items")
+        if not isinstance(movers, list):
+            logger.warning("Ignoring market movers payload with invalid items")
+            return []
+
+        positive = []
+        for item in movers:
+            if not isinstance(item, dict):
+                continue
+            symbol = item.get("symbol")
+            change = item.get("change_pct")
+            if (
+                not isinstance(symbol, str)
+                or isinstance(change, bool)
+                or not isinstance(change, (int, float))
+                or not math.isfinite(change)
+                or change <= 0
+            ):
+                continue
+            symbol = symbol.strip().upper()
+            if symbol and all(char.isalnum() or char in "-&" for char in symbol):
+                positive.append((symbol, float(change)))
+
+        positive.sort(key=lambda mover: (-mover[1], mover[0]))
+        return list(dict.fromkeys(symbol for symbol, _ in positive))[:max(0, n)]
+    except Exception:
+        logger.warning("Failed to load market gainers for paper autopilot", exc_info=True)
+        return []
+
+
 async def _top_conviction_symbols(n: int = 1) -> list[str]:
     """The n most-convicted watchlist stocks (BUY-rated preferred, by score).
     Fallback tier: guarantees paper trading starts with the most convicted
@@ -357,6 +420,18 @@ async def _top_conviction_symbols(n: int = 1) -> list[str]:
         return [it["symbol"] for it in buys[:n]]
     except Exception:
         return []
+
+
+def _paper_candidate_symbols(gainers: list[str], committed: list[str], promoted: list[str]) -> list[str]:
+    """Order paper candidates by movers first, preserving order within each tier."""
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for symbol in gainers + committed + promoted:
+        normalized = symbol.strip().upper()
+        if normalized and normalized not in seen:
+            ordered.append(normalized)
+            seen.add(normalized)
+    return ordered
 
 
 async def _start_session(payload: dict) -> str | None:
@@ -457,6 +532,9 @@ async def _stop_backtest_queue(reason: str = "paper-trading window") -> None:
             logger.warning("Refusing to stop session %s — not owned by autopilot", sid)
             continue
         await _stop_session(sid)
+    # Leaves the day's pending symbols and batch index in place: the day was
+    # interrupted, not finished, and _do_backtest_step resumes it that evening
+    # (see c9c18c1).
     st.update({"queue": [], "queue_pending": 0, "queue_date": None})
     await _save_bt_state(st)
     logger.info("backtest queue closed (%s): %d sessions stopped", reason, len(queue))
@@ -483,6 +561,7 @@ async def reset_cursor() -> dict:
 # ── Paper autopilot ───────────────────────────────────────────────────────────
 
 _DAILY_LOSS_LIMIT_PCT = float(os.getenv("AUTOPILOT_DAILY_LOSS_LIMIT_PCT", "5.0"))
+_DAILY_PROFIT_LIMIT = 2000.0
 
 
 async def _daily_pnl_pct() -> float:
@@ -511,8 +590,48 @@ async def _daily_pnl_pct() -> float:
         return 0.0
 
 
+def _today_paper_profit(sessions: list[dict], today: str) -> float:
+    """Sum current P&L for today's paper sessions, including running positions."""
+    return sum(
+        float(s.get("pnl") or 0.0)
+        for s in sessions
+        if s.get("mode") == "paper" and (s.get("created_at") or "")[:10] == today
+    )
+
+
+async def _daily_paper_profit() -> float | None:
+    """Return today's paper-session P&L, or None when the backend cannot be checked."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as c:
+            resp = await c.get(f"{BACKEND_URL}/api/sessions", params={"limit": 200})
+        if resp.status_code != 200:
+            logger.warning("daily paper P&L check failed: sessions API returned %s", resp.status_code)
+            return None
+        sessions = resp.json().get("data", [])
+        return _today_paper_profit(sessions, _today())
+    except Exception as exc:
+        logger.warning("daily paper P&L check failed: %s", exc)
+        return None
+
+
 async def _do_paper_tick() -> None:
     if not _market_open():
+        return
+
+    today = _today()
+    r = await _get_redis()
+    if await r.get(PAPER_PROFIT_HALT_KEY) == today:
+        return
+
+    daily_profit = await _daily_paper_profit()
+    if daily_profit is None:
+        return
+    if daily_profit > _DAILY_PROFIT_LIMIT:
+        await r.set(PAPER_PROFIT_HALT_KEY, today, ex=86400 * 2)
+        logger.warning(
+            "Daily paper profit target reached (₹%.2f, limit ₹%.2f) — paper trading halted for today",
+            daily_profit, _DAILY_PROFIT_LIMIT,
+        )
         return
 
     # No new sessions once too little of the entry window remains — the backend
@@ -531,19 +650,20 @@ async def _do_paper_tick() -> None:
         )
         return
 
-    # Paper trading acts on committed high-conviction picks (precision tier),
-    # most-convicted first, plus - only when AUTOPILOT_TRADE_PROMOTIONS=1 -
-    # any A-grade names the scanner's live watcher promoted intraday. If
-    # neither tier has anything, never sit the day out: fall back to the single
-    # most-convicted watchlist stock so every trading day starts with at least
-    # one live session for the agents.
+    # Give fresh positive market movers first access to the existing paper
+    # session slots, then committed picks, then - only when
+    # AUTOPILOT_TRADE_PROMOTIONS=1 - A-grade names the scanner's live watcher
+    # promoted intraday (disarmed by default: win_probability 0.82-0.95 vs 26.1%
+    # realised). Session-level agents and risk gates still decide whether any
+    # trade is entered.
+    gainers = await _top_gainer_symbols()
     committed = await _committed_symbols()
     promoted = (await _live_promoted_symbols()) if TRADE_PROMOTIONS else []
-    syms = committed + [s for s in promoted if s not in committed]
+    syms = _paper_candidate_symbols(gainers, committed, promoted)
     if not syms:
         syms = await _top_conviction_symbols(1)
         if syms:
-            logger.info("no committed or live-promoted picks — falling back to top-conviction stock %s", syms[0])
+            logger.info("no gainers or committed/live-promoted picks — falling back to top-conviction stock %s", syms[0])
     if not syms:
         return                              # no watchlist at all — nothing to trade
     # Use Redis directly for paper session checks — avoids deserialising all
@@ -864,6 +984,14 @@ async def backtest_loop() -> None:
 async def status() -> dict:
     sessions = await _list_sessions()
     paper_running = [s for s in sessions if s.get("status") == "running" and s.get("mode") == "paper"]
+    today = _today()
+    daily_paper_profit = _today_paper_profit(sessions, today)
+    try:
+        r = await _get_redis()
+        profit_halted = await r.get(PAPER_PROFIT_HALT_KEY) == today
+    except Exception as exc:
+        logger.warning("daily paper profit halt status unavailable: %s", exc)
+        profit_halted = False
     bt_running    = [s for s in sessions if s.get("status") == "running" and s.get("mode") == "backtest"]
     st  = await _load_bt_state()
     syms = await _watchlist_symbols()
@@ -874,6 +1002,9 @@ async def status() -> dict:
         "paper": {
             "enabled": await _flag(PAPER_FLAG),
             "market_open": _market_open(),
+            "daily_profit": daily_paper_profit,
+            "daily_profit_limit": _DAILY_PROFIT_LIMIT,
+            "profit_halted": profit_halted,
             "timing_mode": await _paper_timing(),
             "running": len(paper_running),
             "max_concurrent": PAPER_MAX,

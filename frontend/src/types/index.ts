@@ -97,6 +97,24 @@ export interface ApiResponse<T> {
   message?: string;
 }
 
+export interface MarketGainer {
+  symbol: string;
+  name: string;
+  price: number;
+  changePct: number;
+  intradayPct?: number;
+  relVolume?: number;
+  action?: string;
+  grade?: string;
+}
+
+export interface MarketGainersData {
+  updatedAt?: string;
+  scanned?: number;
+  universe?: number;
+  items: MarketGainer[];
+}
+
 // ── Auth ─────────────────────────────────────────────────────────────────────
 
 export type BrokerType = 'groww' | 'zerodha' | 'angelone' | 'upstox';

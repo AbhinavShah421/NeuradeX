@@ -196,7 +196,7 @@ BEHAVIOURS: tuple[Behaviour, ...] = (
     Behaviour(
         env="NEURADEX_DAILY_LOSS_LIMIT_ABS",
         read_in="backend/app/services/risk_guard.py",
-        default="1500 (rupees) — blocks new paper entries once breached",
+        default="0 (off since 2026-11-24; set 1500 to re-arm) — blocks new paper entries once breached",
         affects_trades=True,
         status="UNMEASURED",
         measured_on=date(2026, 8, 19),
@@ -213,7 +213,7 @@ BEHAVIOURS: tuple[Behaviour, ...] = (
     Behaviour(
         env="NEURADEX_DAILY_LOSS_LIMIT_PCT",
         read_in="backend/app/services/risk_guard.py",
-        default="5.0 (percent of capital deployed today)",
+        default="0 (off since 2026-11-24; was 5.0 percent of capital deployed today)",
         affects_trades=True,
         status="UNMEASURED",
         measured_on=date(2026, 8, 19),
@@ -223,6 +223,25 @@ BEHAVIOURS: tuple[Behaviour, ...] = (
             "is the weaker leg: at 15 sessions x Rs.50k a Rs.1,600 loss is only "
             "-0.21% and would sleep through. The absolute limit is primary. "
             "Rollback: set to 0."
+        ),
+    ),
+    Behaviour(
+        env="NEURADEX_ENTRY_VALIDATOR",
+        read_in="backend/app/services/sessions_service.py",
+        default="0 — final entry validator (agents/validator.py) off; 1 re-arms it",
+        affects_trades=True,
+        status="UNMEASURED",
+        measured_on=date(2026, 11, 24),
+        evidence=(
+            "Not an edge claim either way. Shipped off when main's entry gates were "
+            "restored to the feature/agent-decision-memory behaviour, because the "
+            "full main gate stack left paper taking no trades. The paper supervisor "
+            "(services/supervisor.py) still fail-closes on the data faults the "
+            "validator was built for: bars not dated today, stale bars, price vs "
+            "live-stream mismatch, NSE closed. The 2026-11-24 veto audit found the "
+            "existing vetoes null on cf outcomes (memory t=-0.24, volatility "
+            "t=0.53), so removing a blocking layer changes trade count, not "
+            "expectancy. Re-arm: set to 1."
         ),
     ),
     Behaviour(

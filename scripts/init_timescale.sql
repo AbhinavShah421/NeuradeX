@@ -106,6 +106,8 @@ CREATE TABLE IF NOT EXISTS session_decisions (
     indicators  JSONB,
     agents      JSONB,
     trade       JSONB,           -- non-null only on BUY/SELL execution
+    fingerprint JSONB,           -- decision-time pattern fingerprint for memory retrieval
+    agent_memory_shadow JSONB,    -- per-agent similar-case comparison; never used to trade
     created_at  TIMESTAMPTZ      NOT NULL DEFAULT NOW()
 );
 

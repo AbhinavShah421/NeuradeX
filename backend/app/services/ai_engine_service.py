@@ -376,6 +376,38 @@ async def get_ranked(limit: int = 100):
     return {"status": "success", "data": {"updated_at": None, "scanned": 0, "universe": 0, "items": [], "returned": 0}}
 
 
+async def get_market_gainers(limit: int = 25):
+    """Return observed positive day movers, separate from setup-ranked picks."""
+    import json
+    from app.utils.redis_client import get_redis
+
+    try:
+        raw = await get_redis().get("ai_engine:movers")
+        payload = json.loads(raw) if raw else {}
+        items = payload.get("items") or []
+        gainers = [
+            item for item in items
+            if isinstance(item, dict)
+            and isinstance(item.get("change_pct"), (int, float))
+            and item["change_pct"] > 0
+        ]
+        return {
+            "status": "success",
+            "data": {
+                "updated_at": payload.get("updated_at"),
+                "scanned": payload.get("scanned", 0),
+                "universe": payload.get("universe", 0),
+                "items": gainers[:max(1, min(limit, 100))],
+            },
+        }
+    except Exception as exc:
+        logger.warning("market gainers read failed", exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail="Market gainers are temporarily unavailable",
+        ) from exc
+
+
 def _rank_change_reason(cur: dict, prev: dict) -> str:
     """Explain *why* a stock's rank moved between two scans, from the components
     the scanner actually ranks on (action, grade, win-prob, signal/rank score, news)."""
@@ -1718,6 +1750,19 @@ async def memory_stats():
     await _db_once()
     from app.agents import get_memory
     return await get_memory().stats()
+
+
+async def agent_memory_shadow_status():
+    """Report promotion qualification and runtime state of per-agent memory."""
+    await _db_once()
+    from app.agents.agent_decision_memory import get_agent_decision_memory
+    return await get_agent_decision_memory().status()
+
+
+async def set_agent_memory_enabled(enabled: bool):
+    """Set the Redis-backed runtime kill switch for active agent memory."""
+    from app.agents.agent_decision_memory import get_agent_decision_memory
+    return await get_agent_decision_memory().set_enabled(enabled)
 
 
 async def memory_purge(sources: str = "REPLAY"):

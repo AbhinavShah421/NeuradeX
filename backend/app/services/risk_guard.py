@@ -39,8 +39,12 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 # Rs. 1,500 is ~1.6x the measured mean loss day since 2026-08-10 (-Rs.917) and
 # ~3 full stops under 1% risk sizing. 0 disables the leg.
-_LIMIT_ABS = float(os.getenv("NEURADEX_DAILY_LOSS_LIMIT_ABS", "1500") or 0)
-_LIMIT_PCT = float(os.getenv("NEURADEX_DAILY_LOSS_LIMIT_PCT", "5.0") or 0)
+# Shipped OFF (2026-11-24): the entry gates were restored to the
+# feature/agent-decision-memory behaviour, which had no breaker on the session
+# path; paper's daily loss stop now lives in the supervisor guard
+# (app/services/supervisor.py, Rs 1,500). Set either env var to re-arm this one.
+_LIMIT_ABS = float(os.getenv("NEURADEX_DAILY_LOSS_LIMIT_ABS", "0") or 0)
+_LIMIT_PCT = float(os.getenv("NEURADEX_DAILY_LOSS_LIMIT_PCT", "0") or 0)
 
 _EVAL_EVERY_SECONDS = 30
 _CONFIRM_TICKS = 2          # consecutive trips before the flag is set

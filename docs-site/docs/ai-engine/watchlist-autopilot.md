@@ -56,6 +56,11 @@ During NSE market hours, each tick (`AUTOPILOT_TICK_SECS`, default 60s) opens a
 `AUTOPILOT_MAX_SESSIONS`, default 15 — the whole watchlist). Each runs on **real
 market data** through the full **12-agent ensemble**.
 
+Paper trading has a daily profit cap of **₹2,000** across today's paper sessions,
+including unrealised P&L. Once total P&L exceeds the cap, new paper sessions are
+blocked and running sessions are stopped for the rest of the IST day. Trading can
+resume the next day.
+
 ### Backtest mode (1× replay, continuous)
 
 Runs **outside** market hours to keep training on dense historical data. It opens
@@ -139,7 +144,7 @@ uses the same accuracy to **calibrate** its future confidence.
 |---|---|
 | `GET /api/ai-engine/watchlist` | Live ranked AI watchlist (read from Redis) |
 | `POST /api/ai-engine/watchlist/scan` | Proxy a manual full sweep to the scanner |
-| `GET /api/ai-engine/autopilot` | Combined status: `paper` (enabled, market, running, watchlist size) + `backtest` (enabled, active window, cursor day, queue progress, days trained) |
+| `GET /api/ai-engine/autopilot` | Combined status: `paper` (enabled, market, running, daily P&L/profit-cap status, watchlist size) + `backtest` (enabled, active window, cursor day, queue progress, days trained) |
 | `POST /api/ai-engine/autopilot` | Enable / disable a mode (`{ "mode": "paper"\|"backtest", "enabled": true }`) — proxied to the autopilot-service |
 | `POST /api/ai-engine/autopilot/reset-cursor` | Reset the backtest next trade date to the last trading day before today (stops the queue, keeps training history) — proxied to the autopilot-service |
 | `GET /api/ai-engine/scan-evaluation` | Latest post-market signal score + accuracy trend |
