@@ -226,6 +226,96 @@ async def _check_records(findings, now):
            f"{phantom} trade_records today with entry_price 0 (executor/feedback field mismatch)")
 
 
+_TRAINING_SANITY_SQL = """
+    SELECT trade_source,
+           count(*)                                                   AS n,
+           count(*) FILTER (WHERE outcome = 'WIN')                    AS wins,
+           avg(pnl_pct)                                               AS avg_pct,
+           sum(pnl_abs)                                               AS pnl,
+           count(*) FILTER (WHERE COALESCE(entry_price,0) <= 0
+                              OR COALESCE(exit_price,0) <= 0)         AS bad_price,
+           count(*) FILTER (WHERE abs(pnl_pct) > 0.20)                AS absurd_pnl,
+           count(*) FILTER (WHERE to_char(timestamp_open AT TIME ZONE 'Asia/Kolkata',
+                                          'HH24:MI') >= '14:45')      AS late_entry,
+           count(*) FILTER (WHERE COALESCE(market_context->>'exit_reason','unknown')
+                              = 'unknown')                            AS no_exit_reason,
+           count(*) FILTER (WHERE duration_minutes < 0)               AS negative_hold
+    FROM trade_records
+    WHERE created_at >= :since AND trade_source IN ('PAPER','REPLAY','BACKTEST')
+    GROUP BY trade_source
+"""
+
+
+async def _training_rows(since: datetime) -> list[dict]:
+    from sqlalchemy import text
+    from app.database.postgres import engine
+    async with engine.begin() as conn:
+        rows = (await conn.execute(text(_TRAINING_SANITY_SQL), {"since": since})).mappings().all()
+    return [dict(r) for r in rows]
+
+
+async def _check_training_data(findings, now):
+    """Trades the learning loops will consume must be physically possible."""
+    since = datetime.now(timezone.utc) - timedelta(hours=2)
+    for r in await _training_rows(since):
+        src = r["trade_source"]
+        for col, what in (("bad_price", "a zero/negative entry or exit price"),
+                          ("absurd_pnl", "|P&L| above 20% on an intraday trade"),
+                          ("late_entry", "an entry at or after 14:45"),
+                          ("negative_hold", "a negative holding time")):
+            if r[col]:
+                _f(findings, f"training:{col}:{src}:{now:%Y-%m-%d-%H}", "training_data", "warn",
+                   f"{r[col]} of {r['n']} {src} trades in the last 2h have {what} — "
+                   f"these feed the learning loops")
+
+
+async def activity(minutes: int = 15) -> dict:
+    """What happened in the last `minutes`, per mode — the supervisor's round view."""
+    from app.services import supervisor
+    from app.utils.session_store import list_running_sessions
+    now = datetime.now(IST)
+    cutoff = (now - timedelta(minutes=minutes)).isoformat(timespec="seconds")
+    events = [e for e in await supervisor.get_log(2000) if e.get("ts", "") >= cutoff]
+    per: dict[str, dict] = {}
+    for e in events:
+        m = e.get("mode") or "paper"
+        d = per.setdefault(m, {"entries": 0, "exits": 0, "vetoes": 0, "pnl": 0.0,
+                               "wins": 0, "exit_triggers": {}, "veto_reasons": {}})
+        ev = e.get("event")
+        if ev == "entry_allowed":
+            d["entries"] += 1
+        elif ev == "exit":
+            d["exits"] += 1
+            d["pnl"] = round(d["pnl"] + float(e.get("pnl") or 0), 2)
+            d["wins"] += 1 if float(e.get("pnl") or 0) > 0 else 0
+            t = e.get("trigger") or "unknown"
+            d["exit_triggers"][t] = d["exit_triggers"].get(t, 0) + 1
+        elif ev == "veto":
+            d["vetoes"] += 1
+            r = str(e.get("reason") or "")[:60]
+            d["veto_reasons"][r] = d["veto_reasons"].get(r, 0) + 1
+    running: dict[str, int] = {}
+    progress: dict[str, list] = {}
+    for s in await list_running_sessions():
+        m = s.get("mode") or "?"
+        running[m] = running.get(m, 0) + 1
+        progress.setdefault(m, []).append(s.get("current_time") or "")
+    since_utc = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+    try:
+        records = await _training_rows(since_utc)
+        for r in records:
+            for k in ("avg_pct", "pnl"):
+                r[k] = round(float(r[k] or 0), 4 if k == "avg_pct" else 2)
+    except Exception as exc:
+        records = [{"error": str(exc)}]
+    return {
+        "generated_at": now.isoformat(timespec="seconds"), "window_min": minutes,
+        "running": running,
+        "progress": {m: {"min": min(v), "max": max(v)} for m, v in progress.items() if v},
+        "supervisor": per, "trade_records": records,
+    }
+
+
 async def run_audit() -> dict:
     from app.utils.redis_client import get_redis
     from app.utils.session_store import list_running_sessions
@@ -247,6 +337,7 @@ async def run_audit() -> dict:
         ("scanner", _check_scanner(findings, r, now, trading_day, open_now)),
         ("decisions", _check_decisions(findings, now, paper, open_now)),
         ("records", _check_records(findings, now)),
+        ("training_data", _check_training_data(findings, now)),
     ):
         try:
             await coro

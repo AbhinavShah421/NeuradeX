@@ -47,6 +47,13 @@ async def audit():
     return {"status": "success", "data": await run_audit()}
 
 
+@router.get("/activity")
+async def activity(minutes: int = 15):
+    """Per-mode entries/exits/vetoes and trade-record sanity over the last N minutes."""
+    from app.services.component_audit import activity as _activity
+    return {"status": "success", "data": await _activity(min(max(minutes, 1), 720))}
+
+
 class AskBody(BaseModel):
     question: str = Field(..., min_length=3, max_length=2000)
     context: Optional[dict] = None

@@ -163,6 +163,38 @@ def test_holiday_calendar_knows_2026_11_24():
     assert is_trading_day("2026-11-25")
 
 
+def _sim(day="2026-11-23", bar_day_ts=None, close=100.0):
+    ts = bar_day_ts if bar_day_ts is not None else \
+        datetime(2026, 11, 23, 10, 0, tzinfo=sv.IST).timestamp()
+    return {"id": "b1", "symbol": "abc", "mode": "backtest", "date": day}, \
+           {"time": "10:00", "close": close, "high": close, "timestamp": ts}
+
+
+def test_sim_clean_bar_passes(r):
+    s, c = _sim()
+    assert run(sv.check_entry_sim(s, c, [c])) is None
+
+
+def test_sim_wrong_day_tape_is_vetoed(r):
+    s, c = _sim(bar_day_ts=datetime(2026, 11, 20, 10, 0, tzinfo=sv.IST).timestamp())
+    assert "wrong tape" in run(sv.check_entry_sim(s, c, [c]))
+
+
+def test_sim_zero_price_is_vetoed(r):
+    s, c = _sim(close=0.0)
+    assert "non-positive price" in run(sv.check_entry_sim(s, c, [c]))
+
+
+def test_sim_ignores_strategy_guards(r, monkeypatch):
+    # Training data must not be filtered by strategy opinion: a "buying strength"
+    # bar near the day high on a closed-market day still passes in a backtest.
+    from app.utils import market_calendar
+    monkeypatch.setattr(market_calendar, "is_trading_day", lambda d: False)
+    run(sv.note_exit("ABC", -5000))
+    s, c = _sim()
+    assert run(sv.check_entry_sim(s, c, [c])) is None
+
+
 def test_unknown_config_key_rejected(r):
     with pytest.raises(ValueError):
         run(sv.update_config({"nope": 1}))

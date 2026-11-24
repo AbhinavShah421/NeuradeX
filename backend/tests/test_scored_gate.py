@@ -100,6 +100,19 @@ def _run(monkeypatch, agents, ind, ens_action="HOLD", conf=0.60, veto="", bars=3
     # test-isolation bug rather than a behaviour regression. Most scenarios
     # here exercise the inverted branch's scoring, hence the default.
     monkeypatch.setattr(svc, "_TREND_FILTER_LEGACY", legacy_filter)
+    # The supervisor (tested in test_supervisor.py) needs Redis and fails
+    # closed without it; this harness scores the gate, so stub it to "allow".
+    from app.services import supervisor as _sv
+
+    async def _allow(*a, **k):
+        return None
+
+    async def _noop(*a, **k):
+        return None
+    monkeypatch.setattr(_sv, "check_entry_sim", _allow)
+    monkeypatch.setattr(_sv, "check_entry", _allow)
+    monkeypatch.setattr(_sv, "check_forced_exit", _allow)
+    monkeypatch.setattr(_sv, "log_event", _noop)
     monkeypatch.setattr(svc, "_intraday_indicators", lambda w, i: dict(ind))
     monkeypatch.setattr(svc, "_tech_signal", lambda *a, **k: 0)
     # Pattern-quality gate: raise inside its try → skipped (not under test here).

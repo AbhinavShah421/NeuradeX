@@ -1495,28 +1495,35 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         action = "HOLD"
         reason = "Session closing — no new entries on the final candle."
 
-    # ── Supervisor (paper only): manual force-exit + entry guards ────────────
+    # ── Supervisor: manual force-exit + entry guards (every mode) ────────────
     # Last word before a fill. Guards can only block an entry or close a
     # position on an explicit supervisor request — see app/services/supervisor.py.
-    if s.get("mode") == "paper" and not force_close:
+    # Paper gets the full guard set; replay/backtest get integrity checks only,
+    # so training data is never filtered by strategy opinion.
+    if not force_close:
         from app.services import supervisor
+        mode = s.get("mode") or "paper"
         if pos["status"] == "LONG" and action != "SELL":
             forced = await supervisor.check_forced_exit(s)
             if forced:
                 action, exit_trigger = "SELL", "supervisor"
                 reason = f"Supervisor exit: {forced}"
                 await supervisor.log_event("force_exit", session_id=s["id"], symbol=symbol,
-                                           reason=forced, price=candle["close"],
+                                           mode=mode, reason=forced, price=candle["close"],
                                            unrealised=pos.get("current_pnl"))
         elif action == "BUY" and pos["status"] == "NONE":
-            veto = await supervisor.check_entry(s, candle, ind, window)
+            if mode == "paper":
+                veto = await supervisor.check_entry(s, candle, ind, window)
+            else:
+                veto = await supervisor.check_entry_sim(s, candle, window)
             if veto:
                 action = "HOLD"
                 reason = f"Supervisor veto: {veto}"
-                await supervisor.log_event("veto", session_id=s["id"], symbol=symbol,
+                await supervisor.log_event("veto", session_id=s["id"], symbol=symbol, mode=mode,
                                            reason=veto, price=candle["close"], bar=candle.get("time"))
             else:
                 await supervisor.log_event("entry_allowed", session_id=s["id"], symbol=symbol,
+                                           mode=mode, date=s.get("date"),
                                            price=candle["close"], bar=candle.get("time"),
                                            conf=round(float(conf), 3), rsi=ind.get("rsi"),
                                            vwap=ind.get("vwap"), sma5=ind.get("sma5"),
@@ -1611,12 +1618,15 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         pnl     = revenue - qty * entry            # net P&L (slippage in fills + charges)
         pnl_pct = round(pnl / (qty * entry) * 100, 2) if entry > 0 else 0.0
         s["cash"] += revenue
+        from app.services import supervisor
         if s.get("mode") == "paper":
-            from app.services import supervisor
+            # Daily-loss / no-re-entry guards count real paper P&L only.
             await supervisor.note_exit(symbol, pnl)
-            await supervisor.log_event("exit", session_id=s["id"], symbol=symbol,
-                                       trigger=exit_trigger or "unknown", pnl=round(pnl, 2),
-                                       pnl_pct=pnl_pct, entry=round(entry, 2), exit=round(exit_fill, 2))
+        await supervisor.log_event("exit", session_id=s["id"], symbol=symbol,
+                                   mode=s.get("mode") or "paper", date=s.get("date"),
+                                   trigger=exit_trigger or "unknown", pnl=round(pnl, 2),
+                                   pnl_pct=pnl_pct, entry=round(entry, 2), exit=round(exit_fill, 2),
+                                   held=pos.get("entry_time"), at=candle.get("time"))
         trade_executed = {"action": "SELL", "price": exit_fill, "quantity": qty, "pnl": round(pnl, 2), "time": candle["time"]}
         s["trades"].append({
             "time": candle["time"], "timestamp": candle.get("timestamp", 0),

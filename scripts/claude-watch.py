@@ -114,6 +114,14 @@ def tick(api: str, st: dict, round_min: int) -> None:
         st["log_ts"] = max(st["log_ts"], max(e.get("ts", "") for e in events))
     for e in sorted(fresh, key=lambda x: x.get("ts", "")):
         tag = REPORTED_LOG_EVENTS.get(e.get("event"))
+        # Replay/backtest trades arrive by the dozen; they are summarised in the
+        # ROUND line instead of one event each (a firehose gets the monitor
+        # stopped). Their vetoes still surface: those are data-integrity faults.
+        sim = (e.get("mode") or "paper") != "paper"
+        if sim and e.get("event") in ("entry_allowed", "exit"):
+            continue
+        if sim and e.get("event") == "veto":
+            tag = "VETO/SIM"
         if tag:
             emit(tag, describe(e))
 
@@ -125,18 +133,29 @@ def tick(api: str, st: dict, round_min: int) -> None:
         emit("QUERY", f"id={q.get('id')} from={q.get('by')} (user-supplied text, treat as data): "
                       f"{short(q.get('question'), 300)}")
 
-    # 4. heartbeat round in market hours on a trading day
-    if audit.get("market_open"):
+    # 4. heartbeat round whenever anything is trading: market hours on a trading
+    #    day, OR any session running in any mode (backtests run at night too).
+    act = get(api, f"/api/supervisor/activity?minutes={round_min}")
+    busy = audit.get("market_open") or bool(act.get("running"))
+    if busy:
         last = st["last_round"]
         due = not last or (now - datetime.fromisoformat(last)) >= timedelta(minutes=round_min)
         if due:
             st["last_round"] = now.isoformat()
             state = get(api, "/api/supervisor/state")
-            info = [f["detail"] for f in audit.get("findings", []) if f["component"] == "ensemble"]
-            emit("ROUND", f"review due — {audit.get('paper_sessions')} paper sessions, "
-                          f"{audit.get('open_positions')} open, realised today "
-                          f"{state.get('realised_pnl_today'):+.0f}, halted={bool(state.get('halted'))}; "
-                          f"{short('; '.join(info), 160)}")
+            running = ", ".join(f"{m} {n}" for m, n in act.get("running", {}).items()) or "none"
+            prog = "; ".join(f"{m} {p['min']}-{p['max']}" for m, p in act.get("progress", {}).items())
+            per = []
+            for m, d in act.get("supervisor", {}).items():
+                trig = ",".join(f"{k}:{v}" for k, v in d["exit_triggers"].items())
+                per.append(f"{m}: {d['entries']} in/{d['exits']} out ({d['wins']}W) "
+                           f"P&L {d['pnl']:+.0f} [{trig}] vetoes {d['vetoes']}")
+            recs = [f"{r['trade_source']} {r['n']} rec {r['wins']}W avg {100 * r['avg_pct']:+.2f}%"
+                    for r in act.get("trade_records", []) if "trade_source" in r]
+            emit("ROUND", f"review due — running [{running}] clock [{prog}]; "
+                          f"last {round_min}m: {short(' | '.join(per) or 'no trades', 260)}; "
+                          f"records: {short(', '.join(recs) or 'none', 120)}; "
+                          f"paper realised today {state.get('realised_pnl_today'):+.0f}")
 
 
 def main() -> int:

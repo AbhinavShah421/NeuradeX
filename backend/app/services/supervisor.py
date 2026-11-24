@@ -230,6 +230,39 @@ async def check_entry(s: dict, candle: dict, ind: dict, window: list[dict]) -> O
         return f"supervisor error (fail closed): {exc}"
 
 
+async def check_entry_sim(s: dict, candle: dict, window: list[dict]) -> Optional[str]:
+    """Veto reason for a REPLAY/BACKTEST entry, or None.
+
+    Integrity only. Backtests exist to generate training data for the learning
+    loops, so strategy guards (buying strength, near day high, max open, daily
+    loss) deliberately do NOT run here: vetoing "bad" setups would delete
+    exactly the outcomes the models need to learn from. What is blocked is data
+    that would teach the models something false: bars from a different day than
+    the session claims, or a non-positive price. Manual symbol vetoes apply.
+    """
+    symbol = str(s.get("symbol", "")).upper()
+    try:
+        cfg = await get_config()
+        if not cfg.get("enabled", True):
+            return None
+        veto = await _redis().hget(_veto_key(_today()), symbol)
+        if veto:
+            return f"symbol vetoed by supervisor: {veto}"
+        close = float(candle.get("close") or 0)
+        if close <= 0:
+            return f"non-positive price {close} — corrupt bar"
+        ts = candle.get("timestamp")
+        day = s.get("date")
+        if ts and day:
+            bar_day = datetime.fromtimestamp(float(ts), IST).strftime("%Y-%m-%d")
+            if bar_day != day:
+                return f"bar is dated {bar_day} but the session replays {day} — wrong tape"
+        return None
+    except Exception as exc:
+        logger.error("supervisor check_entry_sim failed for %s — vetoing", symbol, exc_info=True)
+        return f"supervisor error (fail closed): {exc}"
+
+
 # ── Exit override ─────────────────────────────────────────────────────────────
 
 async def check_forced_exit(s: dict) -> Optional[str]:
