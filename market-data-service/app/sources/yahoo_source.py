@@ -1,11 +1,24 @@
 """Yahoo Finance fallback data source — sync yfinance wrapped in thread executor."""
 
 import asyncio
+import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Optional
 
 _executor = ThreadPoolExecutor(max_workers=4)
+logger = logging.getLogger(__name__)
+
+# yfinance logs "$TCS.NS: possibly delisted; no price data found" at ERROR for
+# ANY empty response — a throttled request, a DNS blip right after a restart, a
+# Yahoo hiccup. On 2026-11-24 that pinned the System Map's Market Data node to
+# "errors in recent logs" permanently (TCS and RELIANCE are not delisted), and
+# a warning that can never clear trains everyone to ignore it. Empty results
+# are handled here: one retry, then the caller logs its own WARNING.
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+
+_EMPTY_RETRY_DELAY_S = 2.0
 
 
 def _fetch_history_sync(symbol: str, period: str, interval: str) -> list[dict]:
@@ -14,6 +27,11 @@ def _fetch_history_sync(symbol: str, period: str, interval: str) -> list[dict]:
         nse_symbol = f"{symbol}.NS"
         ticker = yf.Ticker(nse_symbol)
         df = ticker.history(period=period, interval=interval)
+        if df.empty:
+            # Almost always a one-request blip; a genuinely delisted symbol
+            # stays empty and costs one extra call.
+            time.sleep(_EMPTY_RETRY_DELAY_S)
+            df = ticker.history(period=period, interval=interval)
         if df.empty:
             return []
         df = df.reset_index()
@@ -31,7 +49,9 @@ def _fetch_history_sync(symbol: str, period: str, interval: str) -> list[dict]:
                 "volume": int(row["Volume"]),
             })
         return records
-    except Exception:
+    except Exception as exc:
+        logger.warning("Yahoo history fetch failed for %s (%s/%s): %s: %s",
+                       symbol, period, interval, type(exc).__name__, exc)
         return []
 
 
