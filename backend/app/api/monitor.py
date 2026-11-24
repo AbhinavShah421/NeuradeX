@@ -524,6 +524,14 @@ async def _learning_loops() -> list[dict]:
     except Exception as exc:
         logger.debug("nightly state probe failed: %s", exc)
         ns = {}
+    # last_error is never cleared on success, so a failure from weeks ago kept
+    # reading as "last attempt failed" beside a run that succeeded today
+    # (llm_rejection_review 2026-11-24: QueuePool error from 2026-10-18). An
+    # error only counts if it is newer than the last successful run.
+    for st in ns.values():
+        err_at, run_at = st.get("last_error_at"), st.get("last_run_at")
+        if st.get("last_error") and err_at and run_at and err_at <= run_at:
+            st["last_error"] = None
 
     def _driver_note(key: str, endpoint: str) -> list[str]:
         """What to do about a model whose persisted state has not advanced.
@@ -827,7 +835,9 @@ def _faults(nodes: list[dict], edges: list[dict], loops: list[dict]) -> list[dic
         return acts
 
     for n in nodes:
-        if n.get("container") and not n.get("running"):
+        # `is False`, not falsy: None means the container sweep could not say,
+        # which is reported once as a sweep fault, not once per container.
+        if n.get("container") and n.get("running") is False:
             ct = n["container"]
             faults.append({"severity": "critical", "target": n["label"],
                            "kind": "container",
@@ -934,13 +944,32 @@ async def snapshot(force: bool = False):
 
     # Containers (Docker) — reuse the system panel's sweep rather than a second
     # implementation, so both surfaces always agree.
+    # A failed sweep must read as UNKNOWN, never as DOWN: on 2026-11-24 one
+    # timed-out sweep right after a backend restart painted all 26 running
+    # containers critical "not running (None)". Fall back to the last good
+    # sweep first; only with nothing at all are container states unknown.
     containers: dict[str, dict] = {}
+    sweep_error: str | None = None
+    sweep_stale_s: float | None = None
     try:
         from app.api.system import _compute_services
         snap = await _compute_services(stats=True)
-        containers = {s["name"]: s for s in snap.get("data", [])}
+        containers = {s["name"]: s for s in (snap or {}).get("data") or []}
+        if not containers:
+            sweep_error = "Docker returned no containers"
     except Exception as exc:
-        logger.warning("container sweep failed: %s", exc)
+        sweep_error = f"{type(exc).__name__}: {exc}"
+        logger.warning("container sweep failed: %s", sweep_error)
+    if sweep_error:
+        try:
+            from app.api.system import _svc_cache
+            cached = _svc_cache.get("data") or {}
+            if cached.get("data"):
+                containers = {s["name"]: s for s in cached["data"]}
+                sweep_stale_s = round(time.time() - float(_svc_cache.get("ts") or 0), 1)
+        except Exception:
+            logger.debug("no cached container sweep to fall back on", exc_info=True)
+    states_known = bool(containers)
 
     # Probes — all concurrent, each individually bounded.
     async def _run_probe(node: dict) -> tuple[str, dict]:
@@ -1045,8 +1074,10 @@ async def snapshot(force: bool = False):
         nodes.append({
             **{k: spec[k] for k in ("id", "label", "layer")},
             "container": spec.get("container"),
-            "state": ct.get("state"),
-            "running": ct.get("running", False) if ct else None,
+            # Absent from a sweep that worked = genuinely missing (down);
+            # absent because the sweep itself failed = unknown (None).
+            "state": ct.get("state") if ct else ("missing" if states_known else "unknown"),
+            "running": ct.get("running", False) if ct else (False if states_known else None),
             "health": ct.get("health"),
             "status_text": ct.get("status"),
             "cpu_pct": ct.get("cpu_pct"),
@@ -1096,6 +1127,26 @@ async def snapshot(force: bool = False):
     )
 
     faults = _faults(nodes, edges, loops)
+
+    if sweep_error:
+        if states_known:
+            msg = (f"Live container sweep failed ({sweep_error}); showing the last good "
+                   f"sweep from {sweep_stale_s:.0f}s ago.")
+        else:
+            msg = (f"Container sweep failed ({sweep_error}) and no earlier sweep is "
+                   f"cached — every container's state is UNKNOWN, not down.")
+        faults.append({
+            "severity": "warning", "target": "Docker", "kind": "container-sweep",
+            "message": msg,
+            "actions": [
+                "Usually transient: the sweep times out for a few seconds after a "
+                "backend restart or under heavy CPU. Re-read the panel in a minute.",
+                "Check the socket from the backend: docker exec stock-prediction-backend "
+                "ls -l /var/run/docker.sock",
+                "If it persists: docker logs --tail 50 stock-prediction-backend | "
+                "grep 'services revalidate'",
+            ]})
+        faults.sort(key=lambda f: {"critical": 0, "warning": 1}.get(f["severity"], 2))
 
     if ens_health and ens_health["inert"]:
         faults.append({
