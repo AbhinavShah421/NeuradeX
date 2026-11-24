@@ -473,6 +473,21 @@ def _bar_index_for_time(bars: list[dict], hhmm: str) -> Optional[int]:
 
 # ── Labeling ──────────────────────────────────────────────────────────────────
 
+_MIN_PROVIDER_BARS = 300   # of ~360-375 one-minute bars in a session
+
+
+async def _provider_bars(symbol: str, day: str) -> list[dict]:
+    try:
+        from app.data.providers import fetch_intraday
+        candles, source = await fetch_intraday(symbol, day, 1)
+    except Exception:
+        logger.debug("provider bars failed for %s %s", symbol, day, exc_info=True)
+        return []
+    if source in ("simulated", "none") or len(candles) < _MIN_PROVIDER_BARS:
+        return []
+    return candles
+
+
 async def label_pending(max_days: int = _LABEL_BATCH_DAYS) -> dict:
     """Label every unlabeled, completed-day decision with its counterfactual pnl%.
     Groups by (symbol, day) so each day's bars are read once. Days with thin tick
@@ -514,6 +529,12 @@ async def label_pending(max_days: int = _LABEL_BATCH_DAYS) -> dict:
         cov = await asyncio.to_thread(day_coverage, symbol, day)
         bars = (await asyncio.to_thread(read_bars, symbol, day, 60)) \
             if cov.get("ticks", 0) >= _MIN_DAY_TICKS else []
+        if not bars:
+            # No live capture for that day (the system was off): label against
+            # the same provider bars the backtest itself traded on. Without this,
+            # every backtest of an uncaptured day (Nov 6-23 2026) produced zero
+            # training labels. A near-complete day only — a partial one mislabels.
+            bars = await _provider_bars(symbol, day)
         # Indicators once per symbol-day, shared by every decision's simulation.
         inds = (await asyncio.to_thread(_day_indicators, bars)) if bars else []
 
