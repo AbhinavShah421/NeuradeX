@@ -215,7 +215,9 @@ async def _check_decisions(findings, now, paper, open_now):
 async def _check_records(findings, now):
     from sqlalchemy import text
     from app.database.postgres import engine
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    # A rolling 2 h window, not the whole day: a fault fixed at noon must stop
+    # reading as current by the afternoon.
+    start = datetime.now(timezone.utc) - timedelta(hours=2)
     async with engine.begin() as conn:
         phantom = (await conn.execute(text("""
             SELECT count(*) FROM trade_records
@@ -223,7 +225,7 @@ async def _check_records(findings, now):
         """), {"s": start})).scalar()
     if phantom:
         _f(findings, f"records:phantom:{now:%Y-%m-%d}", "records", "warn",
-           f"{phantom} trade_records today with entry_price 0 (executor/feedback field mismatch)")
+           f"{phantom} trade_records in the last 2h with entry_price 0 (executor/feedback field mismatch)")
 
 
 _TRAINING_SANITY_SQL = """
@@ -316,7 +318,198 @@ async def activity(minutes: int = 15) -> dict:
     }
 
 
-async def run_audit() -> dict:
+async def _check_infra(findings, now):
+    """Containers, databases and nightly learning loops — the System Map's own
+    probes, so this checklist and that page never disagree."""
+    from app.api.monitor import snapshot
+    snap = await snapshot(force=True)
+    if not snap.get("faults") and not snap.get("loops"):
+        _f(findings, f"infra:no-snapshot:{now:%Y-%m-%d-%H}", "infra", "warn",
+           "System Map snapshot returned nothing")
+        return
+    for f in snap.get("faults") or []:
+        sev = {"critical": "critical", "warning": "warn"}.get(f.get("severity"), "info")
+        _f(findings, f"infra:{f.get('kind')}:{f.get('target')}:{now:%Y-%m-%d}", "infra", sev,
+           f"{f.get('target')}: {f.get('message')}")
+    for lp in snap.get("loops") or []:
+        if lp.get("status") not in ("ok", None):
+            _f(findings, f"loops:{lp.get('id')}:{lp.get('status')}:{now:%Y-%m-%d}", "learning_loops",
+               "warn", f"learning loop {lp.get('id')} is {lp.get('status')}"
+                       + (f": {lp.get('last_error')}" if lp.get("last_error") else ""))
+
+
+async def _check_autopilot(findings, r, now, trading_day):
+    """Autopilot disarmed itself once via a 30-day Redis TTL; check it is armed."""
+    paper_on = await r.get("ai_engine:autopilot_enabled")
+    m = now.hour * 60 + now.minute
+    if trading_day and 8 * 60 + 30 <= m <= 15 * 60 and str(paper_on) not in ("1", "true", "True"):
+        _f(findings, f"autopilot:paper-off:{now:%Y-%m-%d}", "autopilot", "warn",
+           "paper autopilot is OFF on a trading day — no paper sessions will start")
+    ttl = await r.ttl("ai_engine:autopilot_enabled")
+    if paper_on and ttl is not None and 0 < ttl < 3 * 86400:
+        _f(findings, f"autopilot:ttl:{now:%Y-%m-%d}", "autopilot", "warn",
+           f"paper autopilot flag expires in {ttl / 3600:.0f} h (Redis TTL)")
+
+
+async def _check_runners(findings, now):
+    """Every running session, any mode, must keep producing decisions."""
+    from sqlalchemy import text
+    from app.database.postgres import engine
+    from app.utils.session_store import list_running_sessions
+    by_mode: dict[str, list[str]] = {}
+    for s in await list_running_sessions():
+        # A session that started moments ago has not decided yet — not a stall.
+        age = _age_min(s.get("created_at"), now)
+        if age is not None and age < 10:
+            continue
+        by_mode.setdefault(s.get("mode") or "?", []).append(s["id"])
+    open_now = _market_open(now)
+    for mode, ids in by_mode.items():
+        if mode == "paper" and not open_now:
+            continue
+        async with engine.begin() as conn:
+            last = (await conn.execute(text(
+                "SELECT max(created_at) FROM session_decisions WHERE session_id = ANY(:ids)"),
+                {"ids": ids})).scalar()
+        age = None if last is None else (datetime.now(timezone.utc) - last).total_seconds() / 60
+        if age is None or age > 10:
+            _f(findings, f"runner:{mode}-stalled:{now:%Y-%m-%d-%H}", "runner", "critical",
+               f"{len(ids)} {mode} sessions running but the newest decision is "
+               + ("missing" if age is None else f"{age:.0f} min old"))
+
+
+async def _check_labels(findings, now):
+    """Counterfactual labels are what every learning loop trains on. On
+    2026-11-24 they had been NULL for 20 days while the loop reported ok."""
+    from sqlalchemy import text
+    from app.database.postgres import engine
+    async with engine.begin() as conn:
+        r = (await conn.execute(text("""
+            SELECT count(*) FILTER (WHERE cf_labeled_at > now() - interval '24 hours')        AS lab,
+                   count(*) FILTER (WHERE cf_labeled_at > now() - interval '24 hours'
+                                      AND cf_pnl_pct IS NOT NULL)                           AS good,
+                   count(*) FILTER (WHERE cf_labeled_at IS NULL
+                                      AND created_at < now() - interval '30 hours'
+                                      AND created_at > now() - interval '6 days')           AS stuck
+            FROM session_decisions WHERE created_at > now() - interval '7 days'
+               OR cf_labeled_at > now() - interval '24 hours'
+        """))).mappings().one()
+    if r["lab"] >= 200 and r["good"] / r["lab"] < 0.5:
+        _f(findings, f"labels:mostly-null:{now:%Y-%m-%d}", "labels", "critical",
+           f"only {r['good']}/{r['lab']} decisions labelled in 24h got a usable label — "
+           f"the learning loops are training on nothing")
+    if r["stuck"] > 500:
+        _f(findings, f"labels:backlog:{now:%Y-%m-%d}", "labels", "warn",
+           f"{r['stuck']} decisions older than 30h still unlabelled — is the labelling loop running?")
+
+
+MISSED_RUNUP = 0.015   # a no-trade session whose price later rose >= 1.5% from some entry bar
+
+
+async def missed_uptrends(hours: int = 3) -> dict:
+    """No-trade sessions whose chart went up: which gate stood in the way at the
+    start of the rise, and would that entry have paid under the live exits?
+
+    A rise visible in hindsight is not by itself a missed trade: on 2026-11-24,
+    over 68 days, the blocked entries of every gate lost money on average, and
+    on up-days the live exits captured +0.10% of a +1.8% move. So each miss is
+    judged by its counterfactual label (live exits, net of costs), not the chart.
+    """
+    from sqlalchemy import text
+    from app.database.postgres import engine
+    async with engine.begin() as conn:
+        rows = (await conn.execute(text("""
+            SELECT m.session_id, m.symbol, m.mode, m.date, d.candle_time, d.price, d.reason, d.cf_pnl_pct
+            FROM session_metadata m JOIN session_decisions d ON d.session_id = m.session_id
+            WHERE m.completed_at > now() - make_interval(hours => :h)
+              AND COALESCE(m.trade_count, 0) = 0 AND d.price > 0
+            ORDER BY m.session_id, d.candle_time
+        """), {"h": hours})).fetchall()
+    sess: dict[str, list] = {}
+    for r in rows:
+        sess.setdefault(r[0], []).append(r)
+    misses, blockers = [], {}
+    for sid, rs in sess.items():
+        prices = [float(r[5]) for r in rs]
+        best, best_i = 0.0, None
+        run_max = 0.0
+        for i in range(len(rs) - 1, -1, -1):           # max future price, right to left
+            if "09:30" <= rs[i][4] < "13:00" and run_max:
+                up = run_max / prices[i] - 1
+                if up > best:
+                    best, best_i = up, i
+            run_max = max(run_max, prices[i])
+        if best_i is None or best < MISSED_RUNUP:
+            continue
+        r = rs[best_i]
+        body = (r[6] or "").split("— ", 1)[-1]
+        gate = body.split("; ")[0].split("(")[0].strip()[:70] or "?"
+        blockers[gate] = blockers.get(gate, 0) + 1
+        misses.append({"session_id": sid, "symbol": r[1], "mode": r[2], "date": r[3],
+                       "from": r[4], "runup_pct": round(best * 100, 2),
+                       "first_blocker": gate, "cf_pnl_pct": r[7]})
+    # The fair test: EVERY blocked tradeable entry in EVERY no-trade session, up
+    # or down. The best bar of an up-session is hindsight and always pays.
+    all_cf = [float(r[7]) for rs in sess.values() for r in rs
+              if r[7] is not None and "09:30" <= r[4] < "13:00"]
+    labelled = [m for m in misses if m["cf_pnl_pct"] is not None]
+    paying = [m for m in labelled if float(m["cf_pnl_pct"]) > 0]
+    return {"hours": hours, "no_trade_sessions": len(sess), "missed": len(misses),
+            "labelled": len(labelled), "would_have_paid": len(paying),
+            "avg_cf_pct": round(sum(float(m["cf_pnl_pct"]) for m in labelled) / len(labelled), 3)
+                          if labelled else None,
+            "blocked_entries_labelled": len(all_cf),
+            "blocked_entries_avg_cf_pct": round(sum(all_cf) / len(all_cf), 3) if all_cf else None,
+            "top_blockers": sorted(blockers.items(), key=lambda kv: -kv[1])[:5],
+            "sessions": sorted(misses, key=lambda m: -m["runup_pct"])[:20]}
+
+
+async def _check_missed(findings, now):
+    m = await missed_uptrends(hours=24)
+    avg = m["blocked_entries_avg_cf_pct"]
+    if m["blocked_entries_labelled"] >= 300 and avg is not None and avg > 0:
+        _f(findings, f"missed:paying:{now:%Y-%m-%d}", "missed", "warn",
+           f"the gate's blocked entries in {m['no_trade_sessions']} no-trade sessions would have "
+           f"averaged {avg:+.3f}% net under live exits ({m['blocked_entries_labelled']} entries) — "
+           f"it is refusing paying trades; {m['missed']} sessions rose >= 1.5%, "
+           f"top first blockers {m['top_blockers'][:3]}")
+
+
+# The end-to-end checklist, in pipeline order. Each item is the worst finding
+# raised against its components this run, or ok.
+CHECKLIST = [
+    ("infra",          "containers, databases, queues up",          ("infra", "audit")),
+    ("calendar",       "trading day known; nothing trades a holiday", ("calendar",)),
+    ("autopilot",      "autopilot armed, flag not about to expire",  ("autopilot",)),
+    ("market_data",    "bars are today's, fresh, quotes sane",       ("market_data",)),
+    ("scanner",        "watchlist fresh, full universe",             ("scanner",)),
+    ("runner",         "every running session is deciding",          ("runner",)),
+    ("agents",         "all agents voting, none erroring/frozen",    ("agents",)),
+    ("gate",           "ensemble/gate not in a veto storm",          ("ensemble",)),
+    ("records",        "trade records well-formed",                  ("records",)),
+    ("training_data",  "trades fed to learning are physically possible", ("training_data",)),
+    ("labels",         "decisions get counterfactual labels",        ("labels",)),
+    ("learning_loops", "nightly learners ran without error",         ("learning_loops",)),
+    ("missed_uptrends", "no-trade sessions that rose did not skip paying entries", ("missed",)),
+]
+
+
+def _checklist(findings: list[dict], ran: set[str]) -> list[dict]:
+    order = {"critical": 0, "warn": 1}
+    out = []
+    for item, what, comps in CHECKLIST:
+        hits = [f for f in findings if f["component"] in comps and f["severity"] in order]
+        if hits:
+            worst = min(hits, key=lambda f: order[f["severity"]])
+            out.append({"item": item, "what": what, "status": worst["severity"],
+                        "detail": worst["detail"], "n": len(hits)})
+        else:
+            out.append({"item": item, "what": what,
+                        "status": "ok" if item in ran or item in ("calendar", "gate") else "not_run"})
+    return out
+
+
+async def run_audit(full: bool = False) -> dict:
     from app.utils.redis_client import get_redis
     from app.utils.session_store import list_running_sessions
     now = datetime.now(IST)
@@ -331,24 +524,32 @@ async def run_audit() -> dict:
     except Exception as exc:
         _f(findings, "audit:calendar-error", "audit", "warn", f"calendar check failed: {exc}")
     open_now = open_now and trading_day
-    for name, coro in (
-        ("market_data", _check_market_data(findings, now, paper, open_now)),
-        ("groww", _check_groww_stream(findings, r, open_now)),
-        ("scanner", _check_scanner(findings, r, now, trading_day, open_now)),
-        ("decisions", _check_decisions(findings, now, paper, open_now)),
-        ("records", _check_records(findings, now)),
-        ("training_data", _check_training_data(findings, now)),
-    ):
+    steps = [
+        ("market_data", lambda: _check_market_data(findings, now, paper, open_now)),
+        ("groww", lambda: _check_groww_stream(findings, r, open_now)),
+        ("scanner", lambda: _check_scanner(findings, r, now, trading_day, open_now)),
+        ("agents", lambda: _check_decisions(findings, now, paper, open_now)),
+        ("records", lambda: _check_records(findings, now)),
+        ("training_data", lambda: _check_training_data(findings, now)),
+        ("autopilot", lambda: _check_autopilot(findings, r, now, trading_day)),
+        ("runner", lambda: _check_runners(findings, now)),
+    ]
+    if full:   # the slow ones (~4 s): only on a supervisor round, not every poll
+        steps += [("labels", lambda: _check_labels(findings, now)),
+                  ("missed_uptrends", lambda: _check_missed(findings, now)),
+                  ("infra", lambda: _check_infra(findings, now))]
+    for name, fn in steps:
         try:
-            await coro
+            await fn()
             checks.append(name)
         except Exception as exc:
             logger.warning("component audit %s failed", name, exc_info=True)
             _f(findings, f"audit:{name}-error:{now:%Y-%m-%d-%H}", "audit", "warn",
                f"{name} check failed: {exc}")
+    ran = set(checks) | ({"learning_loops"} if "infra" in checks else set())
     order = {"critical": 0, "warn": 1, "info": 2}
     findings.sort(key=lambda x: order.get(x["severity"], 3))
     return {"generated_at": now.isoformat(timespec="seconds"), "trading_day": trading_day,
             "market_open": open_now, "paper_sessions": len(paper),
             "open_positions": sum(1 for s in paper if (s.get("position") or {}).get("status") == "LONG"),
-            "checks": checks, "findings": findings}
+            "checks": checks, "checklist": _checklist(findings, ran), "findings": findings}

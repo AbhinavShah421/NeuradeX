@@ -41,10 +41,20 @@ async def state():
 
 
 @router.get("/audit")
-async def audit():
-    """Verify the output of every component on the paper decision path (read-only)."""
+async def audit(full: bool = False):
+    """Verify the output of every component on the decision path (read-only).
+    `full=true` adds the slow end-to-end items (infra sweep, labels) and is what
+    the watcher's checklist round uses."""
     from app.services.component_audit import run_audit
-    return {"status": "success", "data": await run_audit()}
+    return {"status": "success", "data": await run_audit(full=full)}
+
+
+@router.get("/missed")
+async def missed(hours: int = 3):
+    """No-trade sessions whose price rose >= 1.5%: the gate that blocked the start
+    of the rise, and the entry's counterfactual P&L under the live exits."""
+    from app.services.component_audit import missed_uptrends
+    return {"status": "success", "data": await missed_uptrends(max(1, min(hours, 72)))}
 
 
 @router.get("/activity")
