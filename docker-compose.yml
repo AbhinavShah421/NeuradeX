@@ -6,6 +6,11 @@ services:
     image: timescale/timescaledb:latest-pg15
     container_name: stock-prediction-postgres
     restart: unless-stopped
+    # Docker's default /dev/shm is 64M; parallel hash joins over session_decisions
+    # failed with "could not resize shared memory segment" (2026-11-24, the
+    # action-rate weight sync). max_parallel_workers_per_gather is also pinned
+    # to 2 via ALTER SYSTEM — on 0.5 CPU, more workers only cost shared memory.
+    shm_size: 256m
     environment:
       POSTGRES_USER: stock_user
       POSTGRES_PASSWORD: stock_password
