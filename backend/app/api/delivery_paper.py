@@ -30,7 +30,13 @@ _LAST_TICK = "delivery_paper:last_tick"
 # used as the fallback when no explicit capital is supplied.
 DEFAULT_PAPER_CAPITAL = 200000.0
 
-DEFAULT_CONFIG = {"max_positions": 5, "target_pct": 12.0, "stop_pct": 6.0, "max_hold_days": 25}
+# min_hold_days: the scanner grades delivery picks on a 5-day forward return
+# (SCAN_DELIVERY_HORIZON). Until 2026-11-24 the "AI downgrade" exit sold a
+# position the day after it dropped off the daily A/B list — 68 of 71 closed
+# trades held ~1 day, so the paper book never ran the horizon it was graded on.
+DEFAULT_CONFIG = {"max_positions": 5, "target_pct": 12.0, "stop_pct": 6.0, "max_hold_days": 25,
+                  "min_hold_days": 5}
+_TICK_AFTER_MIN = 15 * 60 + 35      # close-to-close, like the scanner's grading
 _GRADE_OK = ("A", "B")
 
 
@@ -89,6 +95,22 @@ async def _prices(symbols: list[str]) -> dict:
     from app.api.portfolio import _yahoo_quote_map   # takes BARE symbols (adds .NS itself)
     qm = await _yahoo_quote_map(list(symbols))
     return {s: float(qm[s]["ltp"]) for s in symbols if qm.get(s, {}).get("ltp")}
+
+
+async def _nifty() -> float | None:
+    """Nifty 50 last price — the benchmark every delivery trade is judged against.
+    The Jun-Oct 2026 delivery picks returned +0.64% per 5 days, but the Nifty did
+    +0.46% over the same windows: after costs the picks trailed the index."""
+    try:
+        async with httpx.AsyncClient(timeout=12) as c:
+            r = await c.get("https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEI",
+                            params={"range": "5d", "interval": "1d"},
+                            headers={"User-Agent": "Mozilla/5.0"})
+            closes = [x for x in r.json()["chart"]["result"][0]["indicators"]["quote"][0]["close"] if x]
+            return float(closes[-1]) if closes else None
+    except Exception as exc:
+        logger.debug("nifty fetch failed: %s", exc)
+        return None
 
 
 async def _daily_candles(symbol: str, rng: str = "8mo") -> list[dict]:
@@ -175,6 +197,8 @@ class DeliveryAgent:
             return True, f"Stop hit (-{sp:.1f}%) — cut the loss."
         if held_days >= mh:
             return True, f"Time stop — held {held_days}d without the move playing out."
+        if held_days < int(cfg.get("min_hold_days", 0)):
+            return False, f"Holding — inside the {cfg.get('min_hold_days')}-day graded horizon."
         if not still_picked or (grade_now not in _GRADE_OK):
             return True, "AI downgrade — no longer a high-grade delivery setup (thesis weakened)."
         return False, "Holding — delivery thesis intact."
@@ -198,6 +222,7 @@ async def tick(reason: str = "manual") -> dict:
     pick_map = {p["symbol"]: p for p in picks}
     held_syms = {pos["symbol"] for pf in pfs.values() for pos in pf["positions"]}
     prices = await _prices(sorted(held_syms | set(pick_map)))
+    nifty = await _nifty()
     today = _today()
     summary = {"opened": 0, "closed": 0, "portfolios": len(pfs)}
 
@@ -220,7 +245,13 @@ async def tick(reason: str = "manual") -> dict:
         survivors = []
         for pos in pf["positions"]:
             sym = pos["symbol"]
-            price = prices.get(sym, pos.get("current", pos["entry_price"]))
+            if sym not in prices:
+                # No quote this tick: hold and retry. Falling back to the stored
+                # price closed positions held 18 days at exactly 0.0% (2026-11-23).
+                pos["status_reason"] = "Holding — no live quote this tick; exit decision deferred."
+                survivors.append(pos)
+                continue
+            price = prices[sym]
             held_days = (datetime.fromisoformat(today) - datetime.fromisoformat(pos["entry_date"])).days
             exit_now, why = _AGENT.decide_exit(pos, price, held_days, cfg,
                                                sym in pick_map, pick_map.get(sym, {}).get("grade"))
@@ -228,9 +259,14 @@ async def tick(reason: str = "manual") -> dict:
                 pnl_pct = (price - pos["entry_price"]) / pos["entry_price"] * 100
                 pnl = round((price - pos["entry_price"]) * pos["qty"], 2)
                 pf["cash"] = round(pf["cash"] + price * pos["qty"], 2)
+                bench = None
+                if nifty and pos.get("nifty_entry"):
+                    bench = round((nifty / pos["nifty_entry"] - 1) * 100, 2)
                 pf["closed"].append({**pos, "exit_date": today, "exit_price": round(price, 2),
                                      "pnl_pct": round(pnl_pct, 2), "pnl": pnl,
-                                     "days_held": held_days, "reason": why})
+                                     "days_held": held_days, "reason": why,
+                                     "nifty_exit": nifty, "nifty_pct": bench,
+                                     "excess_pct": round(pnl_pct - bench, 2) if bench is not None else None})
                 await _record_delivery_outcome(today, sym, pnl_pct)
                 summary["closed"] += 1
             else:
@@ -246,7 +282,9 @@ async def tick(reason: str = "manual") -> dict:
             entries = _AGENT.select_entries(picks, {p["symbol"] for p in pf["positions"]}, slots)
             alloc = pf["cash"] / max(1, slots)
             for e in entries:
-                price = prices.get(e["symbol"], e["price"])
+                if e["symbol"] not in prices:
+                    continue                      # never open on the scan's stale price
+                price = prices[e["symbol"]]
                 qty = int(alloc // price)
                 if qty < 1:
                     continue
@@ -268,6 +306,7 @@ async def tick(reason: str = "manual") -> dict:
                     "p_target_before_stop": fc.get("p_target_before_stop"),
                     "rr": fc.get("rr"),
                     "grade": e.get("grade"), "current": round(price, 2), "pnl_pct": 0.0,
+                    "nifty_entry": nifty,
                     "status_reason": reason,
                 })
                 summary["opened"] += 1
@@ -466,7 +505,11 @@ async def delivery_autopilot_loop():
     await asyncio.sleep(40)
     while True:
         try:
-            if (await _rget(_FLAG)) == "1" and (await _rget(_LAST_TICK)) != _today():
+            from app.utils.market_calendar import is_trading_day
+            now = datetime.now(IST)
+            due = (is_trading_day(now.date())
+                   and now.hour * 60 + now.minute >= _TICK_AFTER_MIN)
+            if due and (await _rget(_FLAG)) == "1" and (await _rget(_LAST_TICK)) != _today():
                 await tick(reason="autopilot")
         except asyncio.CancelledError:
             break
