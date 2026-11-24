@@ -50,6 +50,25 @@ logger = get_logger(__name__)
 
 _TICK_SECONDS = 10         # background loop cadence (was 5 — doubled to halve runner CPU)
 SPEEDS        = (1, 2, 5, 10)
+_PAPER_PROFIT_HALT_KEY = "ai_engine:paper_daily_profit_halt"
+_PAPER_PROFIT_HALT_MESSAGE = (
+    "Daily paper-trading profit limit reached. Paper trading is paused until the next IST day."
+)
+
+
+async def _paper_profit_halt_active(today: str | None = None) -> bool:
+    from app.utils.redis_client import get_redis
+    session_day = today or datetime.now(IST).strftime("%Y-%m-%d")
+    return await get_redis().get(_PAPER_PROFIT_HALT_KEY) == session_day
+
+
+async def _stop_paper_session_at_profit_limit(session: dict) -> None:
+    session["status"] = "stopped"
+    session["error"] = _PAPER_PROFIT_HALT_MESSAGE
+    session["updated_at"] = datetime.now(IST).isoformat()
+    await _finalize_session(session)
+    await save_session(session)
+
 
 # ── Trade gate ────────────────────────────────────────────────────────────────
 # How selective session entries are; switchable at runtime from the dashboard.
@@ -1224,6 +1243,41 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         action = "HOLD"
         reason = "Session trade complete — running for agent learning only."
 
+    # ── Never open a position on a closing step ──────────────────────────────
+    # Every entry cutoff above is skipped when force_close is set, so the final
+    # candle could still BUY: OMPOWER replayed for 2026-11-23 entered at 15:25
+    # and the session ended holding it. A closing step only ever exits.
+    if action == "BUY" and force_close:
+        action = "HOLD"
+        reason = "Session closing — no new entries on the final candle."
+
+    # ── Supervisor (paper only): manual force-exit + entry guards ────────────
+    # Last word before a fill. Guards can only block an entry or close a
+    # position on an explicit supervisor request — see app/services/supervisor.py.
+    if s.get("mode") == "paper" and not force_close:
+        from app.services import supervisor
+        if pos["status"] == "LONG" and action != "SELL":
+            forced = await supervisor.check_forced_exit(s)
+            if forced:
+                action, exit_trigger = "SELL", "supervisor"
+                reason = f"Supervisor exit: {forced}"
+                await supervisor.log_event("force_exit", session_id=s["id"], symbol=symbol,
+                                           reason=forced, price=candle["close"],
+                                           unrealised=pos.get("current_pnl"))
+        elif action == "BUY" and pos["status"] == "NONE":
+            veto = await supervisor.check_entry(s, candle, ind, window)
+            if veto:
+                action = "HOLD"
+                reason = f"Supervisor veto: {veto}"
+                await supervisor.log_event("veto", session_id=s["id"], symbol=symbol,
+                                           reason=veto, price=candle["close"], bar=candle.get("time"))
+            else:
+                await supervisor.log_event("entry_allowed", session_id=s["id"], symbol=symbol,
+                                           price=candle["close"], bar=candle.get("time"),
+                                           conf=round(float(conf), 3), rsi=ind.get("rsi"),
+                                           vwap=ind.get("vwap"), sma5=ind.get("sma5"),
+                                           sma20=ind.get("sma20"))
+
     trade_executed = None
 
     if action == "BUY" and pos["status"] == "NONE":
@@ -1295,6 +1349,12 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
         pnl     = revenue - qty * entry            # net P&L (slippage in fills + charges)
         pnl_pct = round(pnl / (qty * entry) * 100, 2) if entry > 0 else 0.0
         s["cash"] += revenue
+        if s.get("mode") == "paper":
+            from app.services import supervisor
+            await supervisor.note_exit(symbol, pnl)
+            await supervisor.log_event("exit", session_id=s["id"], symbol=symbol,
+                                       trigger=exit_trigger or "unknown", pnl=round(pnl, 2),
+                                       pnl_pct=pnl_pct, entry=round(entry, 2), exit=round(exit_fill, 2))
         trade_executed = {"action": "SELL", "price": exit_fill, "quantity": qty, "pnl": round(pnl, 2), "time": candle["time"]}
         s["trades"].append({
             "time": candle["time"], "timestamp": candle.get("timestamp", 0),
@@ -1747,6 +1807,16 @@ async def session_runner_loop() -> None:
                 # Stale-check only needs created_at — slim blob has it.
                 if await _auto_stop_stale(s_slim):
                     continue
+                if (s_slim.get("mode") == "paper"
+                        and (s_slim.get("created_at") or "")[:10] == datetime.now(IST).strftime("%Y-%m-%d")
+                        and await _paper_profit_halt_active()):
+                    await _stop_paper_session_at_profit_limit(s_slim)
+                    logger.info(
+                        "Paper session stopped at daily profit limit",
+                        extra={"log_type": "session_event", "event": "daily_profit_halt",
+                               "session_id": s_slim.get("id"), "symbol": s_slim.get("symbol")},
+                    )
+                    continue
                 # Replay/backtest sessions need all_candles to advance; load the
                 # full blob (slim + candles) only for the session being processed.
                 # Paper sessions don't use all_candles so the slim blob suffices.
@@ -1783,6 +1853,18 @@ async def _already_backtested(symbol: str, date: str) -> bool:
 async def start_session(req: StartSessionRequest):
     symbol = req.symbol.upper()
     mode   = req.mode if req.mode in ("replay", "paper", "backtest") else "replay"
+    if mode == "paper":
+        try:
+            if await _paper_profit_halt_active():
+                raise HTTPException(
+                    409,
+                    _PAPER_PROFIT_HALT_MESSAGE,
+                )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.warning("Unable to verify daily paper-trading limit before session start: %s", exc)
+            raise HTTPException(503, "Unable to verify the daily paper-trading limit. Please try again.")
     speed  = req.speed if req.speed in SPEEDS else 1
     model  = req.model or getattr(settings, "LLM_MODEL", "llama3.2")
     sid    = uuid.uuid4().hex[:12]

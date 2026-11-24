@@ -75,7 +75,8 @@ THIN_NET = [  # 2 BUY - 1 non-structural SELL = net 1 → consensus 15
 ]
 
 
-def _run(monkeypatch, agents, ind, ens_action="HOLD", conf=0.60, veto="", bars=30):
+def _run(monkeypatch, agents, ind, ens_action="HOLD", conf=0.60, veto="", bars=30,
+         force_close=False):
     decision = SimpleNamespace(action=ens_action, confidence=conf, reasoning="test",
                                veto=veto, vote_mode="directional",
                                prediction_id="pid-test")
@@ -100,8 +101,20 @@ def _run(monkeypatch, agents, ind, ens_action="HOLD", conf=0.60, veto="", bars=3
                         lambda: (_ for _ in ()).throw(RuntimeError("no pattern engine")))
 
     s = _session()
-    asyncio.run(svc._step(s, _window(bars), force_close=False))
+    asyncio.run(svc._step(s, _window(bars), force_close=force_close))
     return s
+
+
+def test_closing_step_never_opens_a_position(monkeypatch):
+    # The same textbook setup that enters mid-session must not enter on the
+    # final (force_close) candle — OMPOWER 2026-11-23 bought at 15:25.
+    # Pick whichever tape this branch's trend filter admits, so the test does
+    # not depend on the filter's direction.
+    ind = next(i for i in (WEAK_IND, STRENGTH_IND)
+               if _run(monkeypatch, BUY3, i)["position"]["status"] == "LONG")
+    s = _run(monkeypatch, BUY3, ind, force_close=True)
+    assert s["position"]["status"] == "NONE"
+    assert "no new entries on the final candle" in s["last_decision"]["reason"]
 
 
 # ── The relaxations: marginal shortfalls score, they don't zero ──────────────

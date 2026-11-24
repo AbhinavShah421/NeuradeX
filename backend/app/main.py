@@ -13,7 +13,7 @@ import socketio
 from app.config import settings
 from app.database.postgres import init_postgres, close_postgres
 from app.utils.redis_client import init_redis, close_redis
-from app.api import stocks, predictions, portfolio, risk, orders, agent, backtest, auth, paper_trading, ai_engine, mlflow_proxy, sessions, user_settings, mutual_funds, delivery_paper, live_trading, system, recordings, monitor
+from app.api import stocks, predictions, portfolio, risk, orders, agent, backtest, auth, paper_trading, ai_engine, mlflow_proxy, sessions, user_settings, mutual_funds, delivery_paper, live_trading, system, recordings, monitor, supervisor
 from app.websocket.socket_manager import sio
 from app.ml_core.initializer import initialize_ml_models
 from app.utils.groww_client import init_groww_client
@@ -322,6 +322,7 @@ app.include_router(delivery_paper.router, prefix="/api/delivery-paper", tags=["d
 app.include_router(live_trading.router, prefix="/api/live-trading", tags=["live-trading"])
 app.include_router(system.router, prefix="/api/system", tags=["system"])
 app.include_router(monitor.router, prefix="/api/monitor", tags=["monitor"])
+app.include_router(supervisor.router, prefix="/api/supervisor", tags=["supervisor"])
 
 # Socket.IO ASGI app
 app_sio = socketio.ASGIApp(sio, app)
