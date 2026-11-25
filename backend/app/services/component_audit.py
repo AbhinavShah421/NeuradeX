@@ -713,6 +713,78 @@ async def _check_losses(findings, now):
            f"{lr['agents_flagged_corpus_wide']}")
 
 
+_SELECTION_KEY = "supervisor:selection_review"
+_SELECTION_WARN_PP = -0.3
+_SELECTION_MIN_DAYS = 5
+
+
+async def selection_review(days: int = 10) -> dict:
+    """How paper's stock picks did from session start to the close against every
+    NSE stock's open->close, per day, from the bhavcopy.
+
+    Why: the scanner's "gainers first" picks drifted -1.4 to -1.7%/day vs the
+    market for 23 months and nobody saw it, because every check looked at
+    trades, never at the stocks offered to the gate. Universe: EQ, price >= 30,
+    as the movers board. Lift = picks' mean O2C minus the universe mean, same day.
+    Cached 6 h: the bhavcopy only changes once a day."""
+    import json as _json
+    from datetime import date as _date, timedelta as _td
+    from sqlalchemy import text
+    from app.database.postgres import engine
+    from app.research.open_movers import bhavcopy
+    from app.utils.redis_client import get_redis
+    r = get_redis()
+    cached = await r.get(_SELECTION_KEY)
+    if cached:
+        return _json.loads(cached)
+    out_days = []
+    d = _date.today()
+    tries = 0
+    while len(out_days) < days and tries < days * 3:
+        tries += 1
+        d -= _td(days=1) if tries > 1 else _td(days=0)
+        if d.weekday() >= 5:
+            continue
+        day = d.isoformat()
+        bc = await bhavcopy(day)
+        if not bc:
+            continue
+        # Measured from the FIRST decision price of each session, not the official
+        # open: the autopilot picks at ~09:15-09:30 by the move so far, so
+        # open->close would credit the picks with the move that selected them
+        # (first version read +1.9 pp/day; from session start it was ~0).
+        async with engine.begin() as conn:
+            rows = (await conn.execute(text("""
+                SELECT upper(sm.symbol),
+                       (SELECT d.price FROM session_decisions d WHERE d.session_id = sm.session_id
+                        ORDER BY d.candle_time LIMIT 1)
+                FROM session_metadata sm WHERE sm.mode = 'paper' AND sm.date = :d"""),
+                {"d": day})).fetchall()
+        starts = {sym: float(p0) for sym, p0 in rows if p0}
+        if not starts:
+            continue
+        uni = [(v["close"] / v["open"] - 1) * 100 for v in bc.values() if v["open"] >= 30 and v["open"] > 0]
+        picks = [(bc[x]["close"] / p0 - 1) * 100 for x, p0 in starts.items() if x in bc and p0 > 0]
+        if not uni or not picks:
+            continue
+        u = sum(uni) / len(uni); pk = sum(picks) / len(picks)
+        out_days.append({"date": day, "picks": len(picks), "picks_o2c": round(pk, 3),
+                         "market_o2c": round(u, 3), "lift": round(pk - u, 3)})
+    lifts = [x["lift"] for x in out_days]
+    res = {"days": out_days, "n_days": len(lifts),
+           "mean_lift": round(sum(lifts) / len(lifts), 3) if lifts else None}
+    await r.set(_SELECTION_KEY, _json.dumps(res), ex=6 * 3600)
+    return res
+
+
+async def _check_selection(findings, now):
+    sr = await selection_review()
+    if sr["n_days"] >= _SELECTION_MIN_DAYS and sr["mean_lift"] is not None             and sr["mean_lift"] <= _SELECTION_WARN_PP:
+        _f(findings, f"selection:lag:{now:%Y-%m-%d}", "selection", "warn",
+           f"paper's picks trail the market open->close by {sr['mean_lift']:+.2f} pp/day over "
+           f"{sr['n_days']} days — the stocks offered to the gate are drifting down")
+
+
 async def _check_missed(findings, now):
     # 24 h of decisions takes ~11 s to scan (2026-11-24) — too slow for a
     # 2-minute round on a single-worker backend. The fair-test average moves
@@ -752,6 +824,7 @@ CHECKLIST = [
     ("learning_loops", "nightly learners ran without error",         ("learning_loops",)),
     ("missed_uptrends", "no-trade sessions that rose did not skip paying entries", ("missed",)),
     ("loss_review",    "every loss post-mortemed; no trait recurs vs winners", ("losses",)),
+    ("selection",      "paper's picks are not worse than the market, open to close", ("selection",)),
 ]
 
 
@@ -799,6 +872,7 @@ async def run_audit(full: bool = False) -> dict:
         steps += [("labels", lambda: _check_labels(findings, now)),
                   ("missed_uptrends", lambda: _check_missed(findings, now)),
                   ("loss_review", lambda: _check_losses(findings, now)),
+                  ("selection", lambda: _check_selection(findings, now)),
                   ("infra", lambda: _check_infra(findings, now))]
     for name, fn in steps:
         try:

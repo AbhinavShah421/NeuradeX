@@ -560,6 +560,12 @@ services:
       # 0.82-0.95 advertised win_probability (scanner's own evaluator).
       # Set "1" to resume trading them; the watch UI keeps working either way.
       AUTOPILOT_TRADE_PROMOTIONS: "0"
+      # Paper stock selection. "low_gap" was made the code default on
+      # 2026-11-25 from the gap-UP board's measured down-drift, but paper's real
+      # picks measured from session start show no drift (26 days: -0.004%/day,
+      # t -0.01), so the evidence did not transfer. Kept on "gainers" (the prior
+      # behaviour) until another selection is shown to be better.
+      AUTOPILOT_PAPER_SELECTION: "gainers"
       AUTOPILOT_BACKTEST_SPEED: "1"
       AUTOPILOT_BACKTEST_BATCH_SIZE: "7"
       AUTOPILOT_BACKTEST_POLL: "15"

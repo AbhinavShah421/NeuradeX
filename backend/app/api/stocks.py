@@ -153,7 +153,26 @@ async def get_stock(symbol: str):
             )
 
     meta = SYMBOL_META.get(symbol, {"symbol": symbol, "name": symbol, "sector": "Unknown", "base_price": 1000.0})
-    return {"status": "success", "data": _sim_stock(meta)}
+    # The Groww quote is refused on this account (403 entitlement), and the old
+    # fallback returned a fabricated price with nothing saying so: SBIN showed
+    # Rs822 while trading near Rs1,141 (2026-11-25). The live stream's LTP is
+    # real and does not need the quote entitlement, so prefer it, and mark any
+    # simulated answer as such.
+    try:
+        from app.utils import groww_feed
+        ltp = await groww_feed.get_ltp(symbol)
+    except Exception:
+        ltp = 0.0
+    if ltp and ltp > 0:
+        data = {"symbol": symbol, "name": meta.get("name", symbol),
+                "sector": meta.get("sector", "Unknown"), "price": round(float(ltp), 2),
+                "source": "live_ltp", "simulated": False,
+                "timestamp": datetime.now().isoformat()}
+        return {"status": "success", "data": data}
+    data = _sim_stock(meta)
+    data["source"] = "simulated"
+    data["simulated"] = True
+    return {"status": "success", "data": data}
 
 
 @router.get("/{symbol}/candlesticks")

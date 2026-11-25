@@ -64,6 +64,13 @@ async def rallies():
     return {"status": "success", "data": await live_rallies()}
 
 
+@router.get("/selection")
+async def selection():
+    """Paper's stock picks vs the whole market, open to close, last 10 sessions."""
+    from app.services.component_audit import selection_review
+    return {"status": "success", "data": await selection_review()}
+
+
 @router.get("/open-movers")
 async def open_movers(date: str, n: int = 15):
     """The opening gainers board for a past trading day (open / previous close,

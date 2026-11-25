@@ -45,9 +45,16 @@ public class PositionMonitor {
 
     /** Containers run UTC; every clock decision here is made in IST explicitly. */
     private static final LocalTime MARKET_OPEN  = LocalTime.of(9, 15);
-    private static final LocalTime SQUARE_OFF   = LocalTime.of(15, 20);
     /** Keep polling a little past the bell so a failed square-off gets retries. */
     private static final LocalTime MONITOR_STOP = LocalTime.of(15, 45);
+
+    /**
+     * Square-off time. Matches the session runner's 14:45 (counterfactual
+     * _SQUAREOFF_MIN). It used to be 15:20, so an executor leg could outlive the
+     * session decision it mirrors by 35 minutes (found 2026-11-25).
+     */
+    @Value("${trade.monitor.square-off:14:45}")
+    private String squareOffHhmm = "14:45";
 
     private final OpenPositionStore store;
     private final PriceFeed priceFeed;
@@ -74,7 +81,7 @@ public class PositionMonitor {
         // one quote, and the price endpoint caps at 100 symbols.
         Map<String, Double> prices = priceFeed.ltp(store.symbols());
         Instant now = Instant.now();
-        boolean squareOff = !t.isBefore(SQUARE_OFF);
+        boolean squareOff = !t.isBefore(LocalTime.parse(squareOffHhmm));
 
         for (OpenPosition p : held) {
             Double fresh = prices.get(p.getSymbol());
