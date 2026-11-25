@@ -488,6 +488,24 @@ def _bar_index_for_time(bars: list[dict], hhmm: str) -> Optional[int]:
 # ── Labeling ──────────────────────────────────────────────────────────────────
 
 _MIN_PROVIDER_BARS = 300   # of ~360-375 one-minute bars in a session
+# A thinly traded stock has minutes with no trade, so a FULL day can have
+# fewer than 300 bars: OMPOWER 2026-11-23 had 264, was backtested on them, and
+# then got no labels and an "unknown" post-mortem. What the bar count was
+# guarding against is a TRUNCATED day, so a day that spans the session is
+# accepted down to _MIN_SPANNING_BARS. This matters now that backtests replay
+# the opening gainers, which are often small caps.
+_MIN_SPANNING_BARS = 200
+_SPAN_FIRST_BY = "09:30"
+_SPAN_LAST_FROM = "15:15"
+
+
+def _provider_day_ok(candles: list[dict]) -> bool:
+    if len(candles) >= _MIN_PROVIDER_BARS:
+        return True
+    if len(candles) < _MIN_SPANNING_BARS:
+        return False
+    first, last = candles[0].get("time", ""), candles[-1].get("time", "")
+    return first <= _SPAN_FIRST_BY and last >= _SPAN_LAST_FROM
 
 
 async def _provider_bars(symbol: str, day: str) -> list[dict]:
@@ -497,7 +515,7 @@ async def _provider_bars(symbol: str, day: str) -> list[dict]:
     except Exception:
         logger.debug("provider bars failed for %s %s", symbol, day, exc_info=True)
         return []
-    if source in ("simulated", "none") or len(candles) < _MIN_PROVIDER_BARS:
+    if source in ("simulated", "none") or not _provider_day_ok(candles):
         return []
     return candles
 

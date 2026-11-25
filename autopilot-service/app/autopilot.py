@@ -66,6 +66,17 @@ def _paper_started_key(date_str: str) -> str:
 # Config
 PAPER_MAX   = int(os.getenv("AUTOPILOT_MAX_SESSIONS", "15"))
 PAPER_GAINERS_COUNT = 10
+# Which movers get first access to paper slots.
+#   low_gap (default since 2026-11-25): liquid movers that opened within
+#     +/-LOW_GAP_MAX_PCT of the previous close, most volatile first.
+#   gainers: the top positive movers (the previous behaviour).
+# Why: the gainers board drifts DOWN after the open, so a long-only gate starts
+# every trade against it. Top-10 gap-ups lose -0.61%/day bought at 09:20
+# (t -2.74) and -0.45% at 09:30 (35 days with 5-minute bars), and -1.4% to
+# -1.7%/day at the open across 23 months, negative in every half-year. Flat
+# openers carry no such drift. This cuts losses; it is not a proven edge.
+PAPER_SELECTION = os.getenv("AUTOPILOT_PAPER_SELECTION", "low_gap").lower()
+LOW_GAP_MAX_PCT = float(os.getenv("AUTOPILOT_LOW_GAP_MAX_PCT", "0.5"))
 CAPITAL     = float(os.getenv("AUTOPILOT_CAPITAL", "50000"))
 PAPER_TICK  = int(os.getenv("AUTOPILOT_TICK_SECS", "60"))
 # Per-trade hold cap (minutes): force-exit any position the autopilot's paper
@@ -416,6 +427,56 @@ async def _top_gainer_symbols(n: int = PAPER_GAINERS_COUNT) -> list[str]:
         return []
 
 
+async def _low_gap_symbols(n: int = PAPER_GAINERS_COUNT) -> list[str]:
+    """Fresh movers that opened within +/-LOW_GAP_MAX_PCT, most volatile first
+    (a flat stock with no daily range cannot clear the round-trip cost). The
+    movers board is already filtered to avg volume >= 300k and price >= 30."""
+    try:
+        r = await _get_redis()
+        raw = await r.get(MOVERS_KEY)
+        if not raw:
+            return []
+        payload = json.loads(raw)
+        if not isinstance(payload, dict) or not payload.get("updated_at"):
+            return []
+        try:
+            ts = datetime.fromisoformat(payload["updated_at"].replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=IST)
+            age = (_now_ist() - ts.astimezone(IST)).total_seconds()
+        except (AttributeError, TypeError, ValueError):
+            return []
+        if age < -300 or age > _WATCHLIST_MAX_AGE_SECONDS:
+            return []
+        picks = []
+        for item in payload.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            symbol, change = item.get("symbol"), item.get("change_pct")
+            if (not isinstance(symbol, str) or isinstance(change, bool)
+                    or not isinstance(change, (int, float)) or not math.isfinite(change)
+                    or abs(change) > LOW_GAP_MAX_PCT):
+                continue
+            symbol = symbol.strip().upper()
+            if not symbol or not all(ch.isalnum() or ch in "-&" for ch in symbol):
+                continue
+            atr = item.get("atr_pct")
+            atr = float(atr) if isinstance(atr, (int, float)) and not isinstance(atr, bool) and math.isfinite(atr) else 0.0
+            picks.append((symbol, atr))
+        picks.sort(key=lambda p: (-p[1], p[0]))
+        return list(dict.fromkeys(sym for sym, _ in picks))[:max(0, n)]
+    except Exception:
+        logger.warning("Failed to load low-gap movers for paper autopilot", exc_info=True)
+        return []
+
+
+async def _paper_mover_symbols() -> list[str]:
+    """First-access paper symbols under the configured PAPER_SELECTION."""
+    if PAPER_SELECTION == "gainers":
+        return await _top_gainer_symbols()
+    return await _low_gap_symbols()
+
+
 async def _top_conviction_symbols(n: int = 1) -> list[str]:
     """The n most-convicted watchlist stocks (BUY-rated preferred, by score).
     Fallback tier: guarantees paper trading starts with the most convicted
@@ -674,7 +735,7 @@ async def _do_paper_tick() -> None:
     # promoted intraday (disarmed by default: win_probability 0.82-0.95 vs 26.1%
     # realised). Session-level agents and risk gates still decide whether any
     # trade is entered.
-    gainers = await _top_gainer_symbols()
+    gainers = await _paper_mover_symbols()          # low-gap movers by default
     committed = await _committed_symbols()
     promoted = (await _live_promoted_symbols()) if TRADE_PROMOTIONS else []
     syms = _paper_candidate_symbols(gainers, committed, promoted)
@@ -904,26 +965,31 @@ async def _do_backtest_step() -> None:
         ids = await _start_batch(syms_remaining, day)
         remaining = syms_remaining[bs:]
         if not ids:
-            # Nothing would start (no data for these symbols on this date).
-            # Drop them rather than spin — the day-complete branch takes over.
+            # Nothing would start (no data for these symbols on this date, or
+            # the backend was briefly down). Drop them and FALL THROUGH to the
+            # day-complete branch. Returning here left queue and
+            # symbols_remaining both empty, which the next tick read as a
+            # fresh day on the unchanged cursor: the whole day re-ran
+            # (2026-11-23 was backtested twice after a backend restart).
             logger.warning("backtest %s — no sessions started for %d symbols, dropping",
                            day, len(syms_remaining))
             st["symbols_remaining"] = []
+            st["queue_date"] = day
+            syms_remaining = []
+        else:
+            batch_idx += 1
+            total = st.get("queue_total", len(_BT_UNIVERSE))
+            n_batches = -(-total // bs)
+            st.update({
+                "queue": ids, "queue_date": day, "queue_pending": len(ids),
+                "symbols_remaining": remaining, "batch_idx": batch_idx,
+            })
             await _save_bt_state(st)
+            logger.info(
+                "backtest %s — batch %d/%d started (%d sessions, %d remaining)",
+                day, batch_idx, n_batches, len(ids), len(remaining),
+            )
             return
-        batch_idx += 1
-        total = st.get("queue_total", len(_BT_UNIVERSE))
-        n_batches = -(-total // bs)
-        st.update({
-            "queue": ids, "queue_date": day, "queue_pending": len(ids),
-            "symbols_remaining": remaining, "batch_idx": batch_idx,
-        })
-        await _save_bt_state(st)
-        logger.info(
-            "backtest %s — batch %d/%d started (%d sessions, %d remaining)",
-            day, batch_idx, n_batches, len(ids), len(remaining),
-        )
-        return
 
     # ── All batches complete → step back to previous trading day ──────────────
     # `.get(key, default)` is not enough: _stop_backtest_queue writes an explicit

@@ -28,7 +28,7 @@ _URL = ("https://nsearchives.nseindia.com/content/cm/"
         "BhavCopy_NSE_CM_0_0_0_{ymd}_F_0000.csv.zip")
 _HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "*/*",
             "Referer": "https://www.nseindia.com/"}
-_CACHE_KEY = "research:bhavcopy:{d}"
+_CACHE_KEY = "research:bhavcopy:v2:{d}"     # v2 adds high/low
 _CACHE_TTL = 120 * 86400
 _MISS_TTL = 6 * 3600                 # holiday / not yet published
 
@@ -91,6 +91,7 @@ def parse_rows(rows) -> dict[str, dict]:
         try:
             out[row["TckrSymb"].upper()] = {
                 "open": float(row["OpnPric"]), "prev_close": float(row["PrvsClsgPric"]),
+                "high": float(row["HghPric"]), "low": float(row["LwPric"]),
                 "close": float(row["ClsPric"]), "volume": float(row["TtlTradgVol"]),
             }
         except (KeyError, TypeError, ValueError):

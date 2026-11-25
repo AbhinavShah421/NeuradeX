@@ -20,6 +20,10 @@ control live here:
                          halves; 815k decisions, Nov 25). Catches strength the
                          SMA test misses by a hair (STYLEBAAZA 12:19, SMA5
                          0.05 under SMA20 at +1.9% from open, 90% of range).
+    - laggard_green_nifty  Nifty up >= 0.3% from its open and the stock >= 1 pt
+                         weaker than it: -0.35%/trade, -0.231 pp vs same day
+                         (t=-3.44, both halves, Nov 25). Fails open when no
+                         Nifty bars are available.
     - max_open           cap on simultaneous open paper positions (cost/correlation)
     - daily_loss         halt entries once today's realised paper P&L <= -limit
     - symbol_lost_today  no re-entry into a symbol that already lost today
@@ -74,6 +78,7 @@ DEFAULT_CONFIG: dict = {
         "near_day_high": True,
         "buying_strength": True,
         "up_from_open": True,
+        "laggard_green_nifty": True,
         "max_open": True,
         "daily_loss": True,
         "symbol_lost_today": True,
@@ -82,6 +87,10 @@ DEFAULT_CONFIG: dict = {
 
 
 _UP_FROM_OPEN_PCT = 0.5
+# laggard_green_nifty: the Nifty up this much from its open, and the stock at
+# least this many points weaker (both measured from the open).
+_GREEN_NIFTY_PCT = 0.3
+_LAGGARD_PTS = 1.0
 
 
 def _today() -> str:
@@ -237,6 +246,23 @@ async def check_entry(s: dict, candle: dict, ind: dict, window: list[dict]) -> O
                 if up >= _UP_FROM_OPEN_PCT:
                     return (f"up {up:.1f}% from open and above VWAP — measured loser "
                             f"(-0.27%/trade, t=-2.10)")
+
+        if g.get("laggard_green_nifty") and window:
+            # Buying a stock that is falling behind a rising market: lift -0.231 pp
+            # vs the same day (t=-3.44, both halves; 23 days with Nifty data,
+            # 2026-11-25). On ordinary days laggards are no worse (t=-0.34). Nov
+            # 25's MFSL, BRIGADE and ALEMBICLTD (Nifty +0.8-1.0%, stock 1.6-3.0 pts
+            # weaker) were in this cell. No Nifty data = no veto (cannot judge).
+            from app.services.market_context import nifty_candles
+            nifty = await nifty_candles(s.get("date") or _today())
+            seen = [c for c in nifty if c.get("time") and c["time"] <= candle.get("time", "")]
+            day_open = float(window[0].get("open") or window[0]["close"])
+            if seen and day_open > 0:
+                n_pct = (float(seen[-1]["close"]) / float(seen[0]["open"]) - 1) * 100
+                s_pct = (close / day_open - 1) * 100
+                if n_pct >= _GREEN_NIFTY_PCT and s_pct - n_pct <= -_LAGGARD_PTS:
+                    return (f"laggard on a green day: stock {s_pct:+.1f}% vs Nifty {n_pct:+.1f}% "
+                            f"from open — measured loser (-0.35%/trade, t=-3.44)")
 
         if g.get("max_open"):
             n = await _open_paper_positions(s.get("id"))

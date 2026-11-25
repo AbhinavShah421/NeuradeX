@@ -32,9 +32,9 @@ def test_volume_filter_uses_history_not_the_day_itself():
 
 def test_parse_keeps_eq_series_only():
     rows = [{"SctySrs": "EQ", "TckrSymb": "abc", "OpnPric": "10", "PrvsClsgPric": "9",
-             "ClsPric": "11", "TtlTradgVol": "5"},
+             "HghPric": "12", "LwPric": "9.5", "ClsPric": "11", "TtlTradgVol": "5"},
             {"SctySrs": "BE", "TckrSymb": "XYZ", "OpnPric": "10", "PrvsClsgPric": "9",
-             "ClsPric": "11", "TtlTradgVol": "5"}]
+             "HghPric": "12", "LwPric": "9.5", "ClsPric": "11", "TtlTradgVol": "5"}]
     assert list(parse_rows(rows)) == ["ABC"]
 
 

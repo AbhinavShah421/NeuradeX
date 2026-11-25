@@ -46,6 +46,10 @@ def r(monkeypatch):
     monkeypatch.setattr(sv, "_open_paper_positions", no_open)
     from app.utils import market_calendar
     monkeypatch.setattr(market_calendar, "is_trading_day", lambda d: True)
+    from app.services import market_context
+    async def no_nifty(date):
+        return []                         # no network in tests; guard fails open
+    monkeypatch.setattr(market_context, "nifty_candles", no_nifty)
     return fake
 
 
@@ -124,6 +128,32 @@ def test_up_from_open_allows_below_vwap_or_flat_day(r):
     assert run(sv.check_entry(s, candle, ind, window)) is None
     s, candle, ind, window = _setup(close=100.5, high=105, vwap=100.0, sma5=99.95, sma20=100.0)
     window[0]["open"] = 100.3                      # above VWAP but only +0.2% on the day
+    assert run(sv.check_entry(s, candle, ind, window)) is None
+
+
+def _nifty(monkeypatch, pct_now, upto="23:59"):
+    from app.services import market_context
+    async def bars(date):
+        return [{"time": "09:15", "open": 100.0, "close": 100.0},
+                {"time": upto, "open": 100.0, "close": 100.0 * (1 + pct_now / 100)}]
+    monkeypatch.setattr(market_context, "nifty_candles", bars)
+
+
+def test_laggard_on_green_nifty_blocked(r, monkeypatch):
+    _nifty(monkeypatch, 0.9, upto="00:00")              # Nifty +0.9% from open
+    s, candle, ind, window = _setup(close=98.5)         # below VWAP 101: other guards quiet
+    window[0]["open"] = 100.0                            # stock -1.5% from open: 2.4 pts weaker
+    assert "laggard on a green day" in run(sv.check_entry(s, candle, ind, window))
+
+
+def test_laggard_guard_quiet_on_flat_nifty_or_in_step_stock(r, monkeypatch):
+    _nifty(monkeypatch, 0.1, upto="00:00")              # Nifty not green enough
+    s, candle, ind, window = _setup(close=98.5)
+    window[0]["open"] = 100.0
+    assert run(sv.check_entry(s, candle, ind, window)) is None
+    _nifty(monkeypatch, 0.9, upto="00:00")              # green Nifty, stock only 0.4 pt weaker
+    s, candle, ind, window = _setup(close=100.5)
+    window[0]["open"] = 100.0
     assert run(sv.check_entry(s, candle, ind, window)) is None
 
 

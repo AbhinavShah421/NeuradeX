@@ -593,7 +593,12 @@ async def loss_review(hours: int = 3) -> dict:
                                       # culprit (not significant)" flagged volatility at
                                       # t 1.93 / +0.002pp — the baseline's own "no".
                                       and a.get("baseline_verdict") == "culprit"]
-            await r.set(key, _json.dumps(slim, default=str), ex=7 * 86400)
+            # An "unknown" blame usually means the bars were momentarily
+            # unavailable (provider hiccup while the backend backs off Groww).
+            # Caching it for 7 days froze it: KISSHT 2026-11-20 read "unknown"
+            # with 370 bars on file. Only conclusive reports are cached.
+            if (slim.get("blame") or {}).get("target") != "unknown":
+                await r.set(key, _json.dumps(slim, default=str), ex=7 * 86400)
             return slim
         return None
 

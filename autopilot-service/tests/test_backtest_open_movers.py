@@ -49,3 +49,29 @@ def test_reset_cursor_drops_the_old_days_pending_symbols(monkeypatch):
     asyncio.run(autopilot.reset_cursor())
     assert saved["symbols_remaining"] == [] and saved["batch_idx"] == 0
     assert saved["cursor"] != "2026-09-08"
+
+
+def test_failed_batch_completes_the_day_instead_of_rerunning_it(monkeypatch):
+    state = {"cursor": "2026-11-23", "queue": [], "queue_date": "2026-11-23",
+             "symbols_remaining": ["A", "B"], "batch_idx": 2, "queue_total": 15,
+             "completed_days": 0, "days_back": 0}
+    async def load():
+        return dict(state)
+    async def save(st):
+        state.clear(); state.update(st)
+    async def no_start(syms, day):
+        return []                                   # backend down: nothing starts
+    async def bs():
+        return 5
+    async def not_running():
+        return False
+    monkeypatch.setattr(autopilot, "_backtest_allowed", lambda: True)
+    monkeypatch.setattr(autopilot, "_paper_running", not_running)
+    monkeypatch.setattr(autopilot, "_load_bt_state", load)
+    monkeypatch.setattr(autopilot, "_save_bt_state", save)
+    monkeypatch.setattr(autopilot, "_get_batch_size", bs)
+    monkeypatch.setattr(autopilot, "_start_batch", no_start)
+    asyncio.run(autopilot._do_backtest_step())
+    assert state["symbols_remaining"] == []
+    assert state["cursor"] < "2026-11-23"           # walked back, not re-run
+    assert state["last_completed"] == "2026-11-23"
