@@ -105,6 +105,20 @@ _BT_UNIVERSE: list[str] = [
     if s.strip()
 ]
 
+# Which stocks each backtest day replays.
+#   open_movers (default): that day's opening gainers board, rebuilt by the
+#     backend from NSE's bhavcopy (open / previous close, no lookahead). Paper
+#     trades the day's top gainers (median day range 3.64%, 26% of sessions up
+#     >=3%), while the fixed list below is quiet large caps (1.77%, 8%). Rules
+#     measured on the fixed list did not hold on paper stocks: momentum longs
+#     are +0.134 pp there but -0.358 pp on paper (t -2.65), 2026-11-25.
+#   fixed: the static _BT_UNIVERSE (the previous behaviour).
+# A day whose board is unavailable or thinner than BT_MOVERS_MIN falls back to
+# the fixed list, so the walk never stalls on an NSE outage.
+BT_SELECTION   = os.getenv("AUTOPILOT_BACKTEST_SELECTION", "open_movers").lower()
+BT_MOVERS_N    = int(os.getenv("AUTOPILOT_BACKTEST_MOVERS_N", "15"))
+BT_MOVERS_MIN  = 3
+
 MARKET_OPEN_MIN  = 9 * 60 + 15
 MARKET_CLOSE_MIN = 15 * 60 + 30
 # The backend blocks new paper ENTRIES after ~13:00 IST (its "auto" no-entry
@@ -552,6 +566,10 @@ async def reset_cursor() -> dict:
         "cursor": new_cursor,
         "queue": [], "queue_pending": 0, "queue_total": 0,
         "queue_date": None, "started_at": None, "days_back": 0,
+        # A reset must also drop the old day's unbatched symbols: left in place,
+        # the resume branch started them on the NEW cursor date (17 fixed-list
+        # symbols would have replaced the new day's own selection, 2026-11-25).
+        "symbols_remaining": [], "batch_idx": 0,
     })
     await _save_bt_state(st)
     logger.info("backtest autopilot cursor reset → %s", new_cursor)
@@ -760,6 +778,36 @@ async def _rank_by_historical_sentiment(symbols: list[str], date: str) -> list[s
         return symbols
 
 
+async def _open_mover_symbols(day: str, n: int = BT_MOVERS_N) -> list[str]:
+    """That day's opening gainers board from the backend, biggest gap first, or
+    [] if it is unavailable (holiday, NSE archive down, backend error)."""
+    try:
+        async with httpx.AsyncClient(timeout=90) as c:
+            resp = await c.get(f"{BACKEND_URL}/api/supervisor/open-movers",
+                               params={"date": day, "n": n})
+            resp.raise_for_status()
+            data = resp.json().get("data") or {}
+    except Exception:
+        logger.warning("open-movers board unavailable for %s", day, exc_info=True)
+        return []
+    return [m["symbol"] for m in data.get("movers") or [] if m.get("symbol")]
+
+
+async def _backtest_symbols(day: str) -> tuple[list[str], str]:
+    """(symbols, selection) for a backtest day: the opening gainers board when
+    BT_SELECTION is open_movers and the board is usable, else the fixed list
+    ranked by historical sentiment."""
+    if BT_SELECTION == "open_movers":
+        movers = await _open_mover_symbols(day)
+        if len(movers) >= BT_MOVERS_MIN:
+            return movers, "open_movers"
+        logger.warning("backtest %s — open-movers board has %d symbols, using the fixed universe",
+                       day, len(movers))
+    pool = list(_BT_UNIVERSE)
+    random.shuffle(pool)
+    return await _rank_by_historical_sentiment(pool, day), "fixed_universe"
+
+
 async def _start_batch(syms: list[str], cursor: str) -> list[str]:
     """Start up to the configured batch size of sessions for `syms` on `cursor`. Returns started IDs."""
     bs = await _get_batch_size()
@@ -800,11 +848,10 @@ async def _do_backtest_step() -> None:
 
     # ── No active batch AND no pending symbols → fresh day ────────────────────
     if not queue and not syms_remaining:
-        # Rank the full universe by historical sentiment so the most
-        # catalyst-backed stocks come first within each batch.
-        candidate_pool = list(_BT_UNIVERSE)
-        random.shuffle(candidate_pool)
-        ranked = await _rank_by_historical_sentiment(candidate_pool, cursor)
+        # The day's opening gainers (what paper trades), else the fixed
+        # universe ranked by historical sentiment.
+        ranked, selection = await _backtest_symbols(cursor)
+        st["selection"] = selection
 
         ids = await _start_batch(ranked, cursor)
         if not ids:
@@ -1031,6 +1078,6 @@ async def status() -> dict:
             "completed_days": st.get("completed_days", 0),
             "last_completed": st.get("last_completed"),
             "universe_size": len(_BT_UNIVERSE),
-            "stock_selection": "fixed_universe",
+            "stock_selection": st.get("selection") or BT_SELECTION,
         },
     }

@@ -184,10 +184,18 @@ async def _check_decisions(findings, now, paper, open_now):
 
     # agents
     per: dict[str, dict[str, Any]] = {}
-    veto_honored = 0
+    # The storm check is for a BROKEN veto (the forming-candle anomaly bug).
+    # The memory veto blocks 20-56% of paper decisions by design, and its
+    # outcome effect was measured null (Nov 24 veto audit), so it is reported
+    # but not counted: on Nov 25 it was 162 of 182 vetoes and kept this warning
+    # on every round.
+    veto_honored = veto_memory = 0
     for r in rows:
         if "veto honored" in (r[5] or ""):
-            veto_honored += 1
+            if "memory veto" in (r[5] or ""):
+                veto_memory += 1
+            else:
+                veto_honored += 1
         for a in (r[6] or []):
             name = a.get("agent")
             if not name:
@@ -213,8 +221,12 @@ async def _check_decisions(findings, now, paper, open_now):
                f"({next(iter(d['acts']))} @ {next(iter(d['confs']))}) — not contributing")
     if len(rows) >= 40 and veto_honored / len(rows) > 0.4:
         _f(findings, f"gate:veto-storm:{hour}", "ensemble", "warn",
-           f"ensemble veto forced HOLD on {veto_honored}/{len(rows)} decisions "
+           f"non-memory ensemble veto forced HOLD on {veto_honored}/{len(rows)} decisions "
            f"(the forming-candle anomaly bug looked exactly like this)")
+    if len(rows) >= 40 and veto_memory / len(rows) > 0.6:
+        _f(findings, f"gate:memory-veto-high:{hour}", "ensemble", "info",
+           f"memory veto forced HOLD on {veto_memory}/{len(rows)} decisions "
+           f"(above its measured 20-56% range)")
 
     # gate throughput — informational only
     buys = sum(1 for r in rows if r[3] == "BUY" and r[4])

@@ -64,6 +64,15 @@ async def rallies():
     return {"status": "success", "data": await live_rallies()}
 
 
+@router.get("/open-movers")
+async def open_movers(date: str, n: int = 15):
+    """The opening gainers board for a past trading day (open / previous close,
+    no lookahead): what the backtest autopilot replays so research trades the
+    same kind of stock paper does."""
+    from app.research.open_movers import open_movers as _om
+    return {"status": "success", "data": await _om(date, max(1, min(n, 50)))}
+
+
 @router.get("/missed")
 async def missed(hours: int = 3):
     """No-trade sessions whose price rose >= 1.5%: the gate that blocked the start
