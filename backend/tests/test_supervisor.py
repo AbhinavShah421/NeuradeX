@@ -111,8 +111,24 @@ def test_buying_strength(r):
     assert "buying strength" in run(sv.check_entry(*_setup(close=101.5, high=105, vwap=101.0, sma5=101, sma20=100)))
 
 
+def test_up_from_open_blocks_strength_the_sma_test_misses(r):
+    # SMA5 just under SMA20 (buying_strength passes) but +1.5% from open, above VWAP
+    s, candle, ind, window = _setup(close=100.5, high=105, vwap=100.0, sma5=99.95, sma20=100.0)
+    window[0]["open"] = 99.0
+    assert "from open" in run(sv.check_entry(s, candle, ind, window))
+
+
+def test_up_from_open_allows_below_vwap_or_flat_day(r):
+    s, candle, ind, window = _setup(close=100.5, high=105, vwap=101.0, sma5=99.95, sma20=100.0)
+    window[0]["open"] = 99.0                       # up from open but below VWAP
+    assert run(sv.check_entry(s, candle, ind, window)) is None
+    s, candle, ind, window = _setup(close=100.5, high=105, vwap=100.0, sma5=99.95, sma20=100.0)
+    window[0]["open"] = 100.3                      # above VWAP but only +0.2% on the day
+    assert run(sv.check_entry(s, candle, ind, window)) is None
+
+
 def test_guard_can_be_disabled(r):
-    run(sv.update_config({"guards": {"buying_strength": False}}))
+    run(sv.update_config({"guards": {"buying_strength": False, "up_from_open": False}}))
     assert run(sv.check_entry(*_setup(close=101.5, high=105, vwap=101.0, sma5=101, sma20=100))) is None
 
 

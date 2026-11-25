@@ -14,6 +14,12 @@ control live here:
                          worst setup measured (-0.265%/trade, t=-3.16, Aug 6 study)
     - buying_strength    price > VWAP AND SMA5 > SMA20 — the one entry effect that
                          survived day-clustering (t=-3.18, Sep 3 study)
+    - up_from_open       price > VWAP AND >= 0.5% above the day's open. The same
+                         loser measured on the open instead of the averages:
+                         -0.265% net, -0.108 pp vs same day (t=-2.10, both
+                         halves; 815k decisions, Nov 25). Catches strength the
+                         SMA test misses by a hair (STYLEBAAZA 12:19, SMA5
+                         0.05 under SMA20 at +1.9% from open, 90% of range).
     - max_open           cap on simultaneous open paper positions (cost/correlation)
     - daily_loss         halt entries once today's realised paper P&L <= -limit
     - symbol_lost_today  no re-entry into a symbol that already lost today
@@ -67,11 +73,15 @@ DEFAULT_CONFIG: dict = {
         "price_mismatch": True,
         "near_day_high": True,
         "buying_strength": True,
+        "up_from_open": True,
         "max_open": True,
         "daily_loss": True,
         "symbol_lost_today": True,
     },
 }
+
+
+_UP_FROM_OPEN_PCT = 0.5
 
 
 def _today() -> str:
@@ -218,6 +228,15 @@ async def check_entry(s: dict, candle: dict, ind: dict, window: list[dict]) -> O
             vwap, sma5, sma20 = ind.get("vwap"), ind.get("sma5"), ind.get("sma20")
             if vwap and sma5 and sma20 and close > float(vwap) and float(sma5) > float(sma20):
                 return "buying strength (price>VWAP and SMA5>SMA20) — measured loser, t=-3.18"
+
+        if g.get("up_from_open"):
+            vwap = ind.get("vwap")
+            day_open = float(window[0].get("open") or window[0]["close"]) if window else 0.0
+            if vwap and day_open > 0 and close > float(vwap):
+                up = (close / day_open - 1) * 100
+                if up >= _UP_FROM_OPEN_PCT:
+                    return (f"up {up:.1f}% from open and above VWAP — measured loser "
+                            f"(-0.27%/trade, t=-2.10)")
 
         if g.get("max_open"):
             n = await _open_paper_positions(s.get("id"))
