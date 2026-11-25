@@ -1249,6 +1249,13 @@ async def counterfactual_loop() -> None:
                 # Fresh CF labels change the per-action correctness rates —
                 # republish so the next session runs on current weights.
                 await _sync_learning_rates("cf_sweep")
+                # Research: keep 5-minute bars of the opening gap boards before
+                # Yahoo's 60-day window drops them (lead B: short gap-ups at 09:20).
+                try:
+                    from app.research.gap_bar_collector import collect_missing
+                    await collect_missing()
+                except Exception:
+                    logger.warning("gap-bar collector failed", exc_info=True)
         except Exception as exc:
             logger.warning("counterfactual sweep failed: %s", exc)
         await asyncio.sleep(60)
