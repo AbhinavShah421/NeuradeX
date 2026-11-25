@@ -95,6 +95,17 @@ async def _check_market_data(findings, now, paper, open_now):
         if prev_close > 0 and live > 0 and not forming.get("volume"):
             gap = abs(live / prev_close - 1) * 100
             if gap > 1.5:
+                # A gap is only suspicious if the independent Groww stream
+                # disagrees: on 2026-11-25 JWL's quote was 2.0% above its last
+                # bar because the stock was climbing (Groww 203.11 vs session
+                # 201.81) — a gainers-first board moves like that all day.
+                try:
+                    from app.utils import groww_feed
+                    g = await groww_feed.get_ltp(sym)
+                except Exception:
+                    g = 0.0
+                if g and abs(live / g - 1) * 100 < 1.0:
+                    continue
                 _f(findings, f"data:quote-gap:{sid}:{now:%H}", "market_data", "warn",
                    f"{sym}: live quote {live} is {gap:.1f}% off the last bar {prev_close} — "
                    f"stale or frozen quote?", session_id=sid, source=s.get("data_source"))
@@ -235,7 +246,8 @@ _TRAINING_SANITY_SQL = """
            avg(pnl_pct)                                               AS avg_pct,
            sum(pnl_abs)                                               AS pnl,
            count(*) FILTER (WHERE COALESCE(entry_price,0) <= 0
-                              OR COALESCE(exit_price,0) <= 0)         AS bad_price,
+                              OR (timestamp_close IS NOT NULL
+                                  AND COALESCE(exit_price,0) <= 0))   AS bad_price,
            count(*) FILTER (WHERE abs(pnl_pct) > 0.20)                AS absurd_pnl,
            count(*) FILTER (WHERE to_char(timestamp_open AT TIME ZONE 'Asia/Kolkata',
                                           'HH24:MI') >= '14:45')      AS late_entry,
@@ -406,6 +418,48 @@ async def _check_labels(findings, now):
 MISSED_RUNUP = 0.015   # a no-trade session whose price later rose >= 1.5% from some entry bar
 
 
+LIVE_RALLY_PCT = 1.5
+
+
+async def live_rallies() -> list[dict]:
+    """Paper stocks rallying RIGHT NOW with no position held: up >= 1.5% from
+    the open or from the day's low. Each comes with the gate's latest reason
+    for holding off, so a rally is reviewed while it happens — not discovered
+    afterwards. Read-only: it never enters a trade (catching every rally also
+    buys every false start; the blocked-entry fair test decides the gate)."""
+    from sqlalchemy import text
+    from app.database.postgres import engine
+    from app.utils.session_store import list_running_sessions, get_session
+    out = []
+    for slim in await list_running_sessions():
+        if slim.get("mode") != "paper":
+            continue
+        s = await get_session(slim["id"]) or {}
+        if ((s.get("position") or {}).get("status") or "NONE") == "LONG":
+            continue
+        c = [x for x in (s.get("candles") or []) if float(x.get("close") or 0) > 0]
+        if len(c) < 5:
+            continue
+        first, last = float(c[0]["open"] or c[0]["close"]), float(c[-1]["close"])
+        low = min(float(x.get("low") or x["close"]) for x in c)
+        from_open = (last / first - 1) * 100 if first else 0
+        from_low = (last / low - 1) * 100 if low else 0
+        if max(from_open, from_low) < LIVE_RALLY_PCT:
+            continue
+        async with engine.begin() as conn:
+            r = (await conn.execute(text(
+                "SELECT candle_time, action, reason FROM session_decisions "
+                "WHERE session_id = :sid ORDER BY created_at DESC LIMIT 1"),
+                {"sid": slim["id"]})).first()
+        reason = ((r[2] or "") if r else "").split("— ", 1)[-1][:160]
+        out.append({"symbol": slim.get("symbol"), "session_id": slim["id"],
+                    "price": last, "from_open_pct": round(from_open, 2),
+                    "from_low_pct": round(from_low, 2),
+                    "last_decision": r[1] if r else None, "bar": r[0] if r else None,
+                    "gate_reason": reason})
+    return sorted(out, key=lambda x: -max(x["from_open_pct"], x["from_low_pct"]))
+
+
 async def missed_uptrends(hours: int = 3) -> dict:
     """No-trade sessions whose chart went up: which gate stood in the way at the
     start of the rise, and would that entry have paid under the live exits?
@@ -464,8 +518,197 @@ async def missed_uptrends(hours: int = 3) -> dict:
             "sessions": sorted(misses, key=lambda m: -m["runup_pct"])[:20]}
 
 
+_LOSS_REVIEW_KEY = "supervisor:loss_review:{}"     # per-trade post-mortem cache
+_LOSS_REVIEW_MAX = 60                              # trades post-mortemed per call
+
+
+def _vwap_side(ind: dict | None, price: float | None) -> str:
+    try:
+        v = float((ind or {}).get("vwap") or 0)
+        return "above_vwap" if price and v and price > v else "below_vwap" if v else "vwap_unknown"
+    except (TypeError, ValueError):
+        return "vwap_unknown"
+
+
+async def loss_review(hours: int = 3) -> dict:
+    """Deep-dive EVERY losing trade closed in the window (all modes), via the
+    existing session_postmortem.trade_postmortem: price path, entry-vs-exit
+    blame, setup, every agent's vote. Then aggregate the causes AGAINST A
+    WINNERS CONTROL — a trait common among losers means nothing if winners
+    share it (loss lessons were once ranked on losers alone and ranked noise).
+
+    Agent blame is NOT computed from these trades: executed trades are gate-
+    selected (a split from them once read gbm +0.31 vs sentiment -0.40 and
+    collapsed to t=-0.44). Agent verdicts come from the corpus-wide,
+    day-clustered culpability baseline the post-mortem already carries.
+    """
+    import json as _json
+    from sqlalchemy import text
+    from app.database.postgres import engine
+    from app.utils.redis_client import get_redis
+    from app.services.session_postmortem import trade_postmortem
+    r = get_redis()
+    async with engine.begin() as conn:
+        rows = (await conn.execute(text("""
+            SELECT trade_id, outcome, pnl_pct, trade_source
+            FROM trade_records
+            WHERE created_at > now() - make_interval(hours => :h)
+              AND trade_source IN ('PAPER','REPLAY','BACKTEST') AND pnl_pct IS NOT NULL
+              -- the executor's mirror leg of a session entry (own size, own stop,
+              -- no session_id) would count one decision twice
+              AND COALESCE(market_context->>'source', '') <> 'trade-executor'
+            ORDER BY created_at DESC
+        """), {"h": hours})).fetchall()
+    losers = [x for x in rows if float(x[2]) < 0]
+    winners = [x for x in rows if float(x[2]) >= 0]
+
+    async def report(tid):
+        key = _LOSS_REVIEW_KEY.format(tid)
+        cached = await r.get(key)
+        if cached:
+            return _json.loads(cached)
+        rep = await trade_postmortem(tid)
+        if "error" not in rep:
+            slim = {k: rep.get(k) for k in ("trade_id", "symbol", "source", "session_id", "pnl_pct",
+                                            "held_minutes", "exit_reason", "loss_reason", "setup",
+                                            "causes", "blame", "voted_buy", "entry_price")}
+            slim["path"] = {k: (rep.get("price_path") or {}).get(k)
+                            for k in ("best_pct", "worst_pct", "ever_green", "best_after_exit_pct")}
+            slim["vwap_side"] = _vwap_side(rep.get("indicators"), rep.get("entry_price"))
+            slim["agents_flagged"] = [a["agent"] for a in rep.get("agents") or []
+                                      if (a.get("action") or "").upper() == "BUY"
+                                      # only an established (Bonferroni) culprit: "leans
+                                      # culprit (not significant)" flagged volatility at
+                                      # t 1.93 / +0.002pp — the baseline's own "no".
+                                      and a.get("baseline_verdict") == "culprit"]
+            await r.set(key, _json.dumps(slim, default=str), ex=7 * 86400)
+            return slim
+        return None
+
+    reviewed_l = [x for x in [await report(t[0]) for t in losers[:_LOSS_REVIEW_MAX]] if x]
+    reviewed_w = [x for x in [await report(t[0]) for t in winners[:_LOSS_REVIEW_MAX]] if x]
+
+    def tags(rep, loss: bool):
+        out = {f"exit:{rep.get('exit_reason')}", f"setup:{rep.get('setup')}", rep.get("vwap_side")}
+        if loss:
+            out.add(f"blame:{(rep.get('blame') or {}).get('target')}")
+        p = rep.get("path") or {}
+        if p.get("ever_green") is False:
+            out.add("never_green")
+        return out
+
+    nl, nw = len(reviewed_l), len(reviewed_w)
+    lc: dict[str, int] = {}
+    wc: dict[str, int] = {}
+    for rep in reviewed_l:
+        for t in tags(rep, True):
+            lc[t] = lc.get(t, 0) + 1
+    for rep in reviewed_w:
+        for t in tags(rep, False):
+            wc[t] = wc.get(t, 0) + 1
+    causes = []
+    for t, n in lc.items():
+        l_rate = n / nl if nl else 0
+        w_rate = wc.get(t, 0) / nw if nw else None
+        causes.append({"tag": t, "losers": n, "loser_rate": round(l_rate, 2),
+                       "winner_rate": round(w_rate, 2) if w_rate is not None else None,
+                       "ratio": round(l_rate / w_rate, 2) if w_rate else None})
+    causes.sort(key=lambda c: -c["losers"])
+    flagged_agents: dict[str, int] = {}
+    for rep in reviewed_l:
+        for a in rep.get("agents_flagged") or []:
+            flagged_agents[a] = flagged_agents.get(a, 0) + 1
+    return {"hours": hours, "trades": len(rows), "losers": len(losers), "winners": len(winners),
+            "reviewed_losers": nl, "reviewed_winners": nw,
+            "blame": {k: v for k, v in lc.items() if k.startswith("blame:")},
+            "causes": causes[:12],
+            "agents_flagged_corpus_wide": flagged_agents,
+            "losses": sorted(reviewed_l, key=lambda x: float(x.get("pnl_pct") or 0))[:25]}
+
+
+_TRAIT_BASELINE_KEY = "supervisor:loss_trait_baseline"
+
+
+async def trait_baseline(force: bool = False) -> dict:
+    """Corpus-wide check for loss traits: each setup / VWAP side's cf vs the
+    same day's other entries, over ALL labelled decisions, day-clustered.
+    Cached 12 h (~30 s to compute). On 2026-11-24 the first two loss-trait
+    warnings ('below_vwap' 57% of losers vs 30% of winners; 'pullback_in_trend'
+    55% vs 30%) were both the BETTER side corpus-wide — a day's losers are too
+    few to name a cause on their own."""
+    import json as _json
+    import statistics as st
+    from collections import defaultdict
+    from sqlalchemy import text
+    from app.database.postgres import engine
+    from app.utils.redis_client import get_redis
+    from app.agents.counterfactual import _TRADEABLE_ENTRY_SQL
+    from app.services.session_postmortem import classify_setup
+    r = get_redis()
+    if not force:
+        cached = await r.get(_TRAIT_BASELINE_KEY)
+        if cached:
+            return _json.loads(cached)
+    async with engine.begin() as conn:
+        rows = (await conn.execute(text("""
+            SELECT COALESCE(sm.date,(d.created_at AT TIME ZONE 'Asia/Kolkata')::date::text) AS mday,
+                   d.cf_pnl_pct, d.indicators, d.price
+            FROM session_decisions d LEFT JOIN session_metadata sm ON sm.session_id = d.session_id
+            WHERE d.cf_pnl_pct IS NOT NULL AND d.indicators ? 'vwap' AND d.price > 0
+              AND d.created_at > now() - interval '120 days' """ + _TRADEABLE_ENTRY_SQL))).fetchall()
+    by: dict = defaultdict(lambda: defaultdict(list))
+    alld: dict = defaultdict(list)
+    for d, cf, ind, p in rows:
+        v = float(cf)
+        alld[d].append(v)
+        by[f"setup:{classify_setup(ind, float(p))}"][d].append(v)
+        by[_vwap_side(ind, float(p))][d].append(v)
+    out = {}
+    for tag, dd in by.items():
+        diffs = [st.mean(dd[x]) - st.mean(alld[x]) for x in dd if len(dd[x]) >= 10]
+        if len(diffs) >= 5 and st.stdev(diffs):
+            out[tag] = {"lift_pp": round(st.mean(diffs), 4),
+                        "t": round(st.mean(diffs) / (st.stdev(diffs) / len(diffs) ** 0.5), 2),
+                        "days": len(diffs)}
+    res = {"rows": len(rows), "traits": out}
+    await r.set(_TRAIT_BASELINE_KEY, _json.dumps(res), ex=12 * 3600)
+    return res
+
+
+async def _check_losses(findings, now):
+    lr = await loss_review(hours=24)
+    base = (await trait_baseline())["traits"]
+    # A recurring loss trait: common among losers AND clearly rarer among winners.
+    for c in lr["causes"]:
+        if (c["tag"].startswith(("blame:", "exit:")) or c["losers"] < 10 or c["loser_rate"] < 0.4
+                or c["ratio"] is None or c["ratio"] < 1.5 or lr["reviewed_winners"] < 10):
+            continue
+        b = base.get(c["tag"])
+        if not b or b["t"] > -2.0:
+            continue        # not worse corpus-wide: a small-sample coincidence
+        _f(findings, f"losses:trait:{c['tag']}:{now:%Y-%m-%d}", "losses", "warn",
+           f"loss trait '{c['tag']}' on {c['losers']}/{lr['reviewed_losers']} losers in 24h "
+           f"({c['loser_rate']:.0%}) vs {c['winner_rate']:.0%} of winners, and corpus-wide "
+           f"{b['lift_pp']:+.3f} pp vs same-day entries (t {b['t']}, {b['days']} days) — act on it")
+    if lr["agents_flagged_corpus_wide"]:
+        _f(findings, f"losses:agent-culprit:{now:%Y-%m-%d}", "losses", "warn",
+           f"losing entries had BUY votes from agents the corpus-wide baseline marks culpable: "
+           f"{lr['agents_flagged_corpus_wide']}")
+
+
 async def _check_missed(findings, now):
-    m = await missed_uptrends(hours=24)
+    # 24 h of decisions takes ~11 s to scan (2026-11-24) — too slow for a
+    # 2-minute round on a single-worker backend. The fair-test average moves
+    # slowly, so a 10-minute cache costs nothing in detection.
+    import json as _json
+    from app.utils.redis_client import get_redis
+    r = get_redis()
+    cached = await r.get("supervisor:missed_24h")
+    if cached:
+        m = _json.loads(cached)
+    else:
+        m = await missed_uptrends(hours=24)
+        await r.set("supervisor:missed_24h", _json.dumps(m, default=str), ex=600)
     avg = m["blocked_entries_avg_cf_pct"]
     if m["blocked_entries_labelled"] >= 300 and avg is not None and avg > 0:
         _f(findings, f"missed:paying:{now:%Y-%m-%d}", "missed", "warn",
@@ -491,6 +734,7 @@ CHECKLIST = [
     ("labels",         "decisions get counterfactual labels",        ("labels",)),
     ("learning_loops", "nightly learners ran without error",         ("learning_loops",)),
     ("missed_uptrends", "no-trade sessions that rose did not skip paying entries", ("missed",)),
+    ("loss_review",    "every loss post-mortemed; no trait recurs vs winners", ("losses",)),
 ]
 
 
@@ -537,6 +781,7 @@ async def run_audit(full: bool = False) -> dict:
     if full:   # the slow ones (~4 s): only on a supervisor round, not every poll
         steps += [("labels", lambda: _check_labels(findings, now)),
                   ("missed_uptrends", lambda: _check_missed(findings, now)),
+                  ("loss_review", lambda: _check_losses(findings, now)),
                   ("infra", lambda: _check_infra(findings, now))]
     for name, fn in steps:
         try:

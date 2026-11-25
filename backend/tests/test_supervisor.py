@@ -198,3 +198,15 @@ def test_sim_ignores_strategy_guards(r, monkeypatch):
 def test_unknown_config_key_rejected(r):
     with pytest.raises(ValueError):
         run(sv.update_config({"nope": 1}))
+
+
+def test_sim_accepts_millisecond_timestamps(r):
+    ms = datetime(2026, 11, 23, 10, 0, tzinfo=sv.IST).timestamp() * 1000
+    s, c = _sim(bar_day_ts=ms)
+    assert run(sv.check_entry_sim(s, c, [c])) is None
+
+
+def test_live_accepts_millisecond_timestamps(r):
+    now_ms = datetime.now(sv.IST).timestamp() * 1000
+    s, candle, ind, window = _setup(bar_ts=now_ms - 60_000)
+    assert run(sv.check_entry(s, candle, ind, window)) is None

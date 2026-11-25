@@ -182,7 +182,7 @@ async def check_entry(s: dict, candle: dict, ind: dict, window: list[dict]) -> O
             ts = completed.get("timestamp")
             if not ts:
                 return "bar has no timestamp — cannot verify it is today's data"
-            bar_day = datetime.fromtimestamp(float(ts), IST).strftime("%Y-%m-%d")
+            bar_day = _bar_day(ts)
             if bar_day != day:
                 return f"market data is from {bar_day}, not today ({day}) — stale tape"
 
@@ -230,6 +230,16 @@ async def check_entry(s: dict, candle: dict, ind: dict, window: list[dict]) -> O
         return f"supervisor error (fail closed): {exc}"
 
 
+def _bar_day(ts) -> str:
+    """IST date of a bar timestamp. Some feeds give epoch MILLISECONDS — read as
+    seconds that is year ~58,000 and fromtimestamp raises, which failed closed
+    and vetoed a clean JKTYRE backtest entry (2026-11-24 18:00)."""
+    t = float(ts)
+    if t > 1e11:
+        t /= 1000.0
+    return datetime.fromtimestamp(t, IST).strftime("%Y-%m-%d")
+
+
 async def check_entry_sim(s: dict, candle: dict, window: list[dict]) -> Optional[str]:
     """Veto reason for a REPLAY/BACKTEST entry, or None.
 
@@ -254,7 +264,7 @@ async def check_entry_sim(s: dict, candle: dict, window: list[dict]) -> Optional
         ts = candle.get("timestamp")
         day = s.get("date")
         if ts and day:
-            bar_day = datetime.fromtimestamp(float(ts), IST).strftime("%Y-%m-%d")
+            bar_day = _bar_day(ts)
             if bar_day != day:
                 return f"bar is dated {bar_day} but the session replays {day} — wrong tape"
         return None

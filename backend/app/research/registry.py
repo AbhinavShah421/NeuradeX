@@ -245,6 +245,23 @@ BEHAVIOURS: tuple[Behaviour, ...] = (
         ),
     ),
     Behaviour(
+        env="NEURADEX_TECH_TREND",
+        read_in="backend/app/agents/technical.py",
+        default="0 — technical agent scores RSI + Bollinger only; 1 adds back the VWAP/MACD/SMA trend terms",
+        affects_trades=True,
+        status="INCONCLUSIVE",
+        measured_on=date(2026, 11, 24),
+        evidence=(
+            "Agent-level, not P&L. Recomputed the technical score from real bars on "
+            "101,623 labelled decisions, 58 days (recomputed votes match recorded "
+            "95.7%). Shipped score: BUY-vote lift -0.036 pp, t -2.14 — its BUYs were "
+            "worse than its non-BUYs. RSI+Bollinger only: +0.072 pp, t +3.77, better "
+            "on 42/58 days; early half t +4.47, late half t +1.40 (22/33) — same "
+            "sign, weaker. Every subset still loses after costs, so this corrects a "
+            "wrong-signed voter; it is not an edge. Rollback: set to 1."
+        ),
+    ),
+    Behaviour(
         env="NEURADEX_RISK_SIZING",
         read_in="backend/app/services/sessions_service.py:575",
         default="1 — risk-budget sizing; 0 restores flat 95%-of-cash",

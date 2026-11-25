@@ -519,6 +519,43 @@ def _decision_path(entry_reason: Optional[str], agents: list[dict]) -> dict:
     return out
 
 
+_REBOUND_WINDOW_BARS = 30
+
+
+def _lock_gain_pct() -> float:
+    """The live profit-lock threshold — a gain above it that still ends in a
+    loss means the trail failed, which IS an exit fault."""
+    try:
+        from app.agents.counterfactual import LIVE_POLICY
+        return float(LIVE_POLICY.get("lock_gain", 1.2))
+    except Exception:
+        return 1.2
+
+
+def _recovered_soon(bars: list[dict], exit_hhmm: str | None, entry_price: float) -> bool:
+    """Did a bar CLOSE above entry + round-trip cost within 30 minutes of the
+    exit? A close, not a wick, and soon — the only rebound a wider stop could
+    plausibly have captured."""
+    if not exit_hhmm or not entry_price:
+        return False
+    after = [b for b in bars if str(b.get("time", ""))[:5] > exit_hhmm][:_REBOUND_WINDOW_BARS]
+    hurdle = entry_price * (1 + _ROUND_TRIP_COST_PCT / 100.0)
+    return any(float(b.get("close") or 0) > hurdle for b in after)
+
+
+
+def _sig_agent(name: str, v) -> dict:
+    """One agent from trade_records.agent_signals. Older rows store the bare
+    action ("BUY"); live rows since the paper supervisor store
+    {"signal", "weight", "confidence"} — reading that as the action crashed the
+    loss review on the first live loss of Nov 25."""
+    if isinstance(v, dict):
+        return {"agent": name, "action": v.get("signal") or v.get("action"),
+                "weight": v.get("weight"), "confidence": v.get("confidence"),
+                "reasoning": None}
+    return {"agent": name, "action": v, "weight": None,
+            "confidence": None, "reasoning": None}
+
 async def trade_postmortem(trade_id: str) -> dict:
     """Everything known about why ONE trade ended the way it did.
 
@@ -584,19 +621,25 @@ async def trade_postmortem(trade_id: str) -> dict:
     if not agents and sig:
         # Session detail pruned — fall back to the flat gate-time map, with the
         # reasoning fields absent rather than invented.
-        agents = [{"agent": k, "action": v, "weight": None,
-                   "confidence": None, "reasoning": None}
-                  for k, v in sorted(sig.items())]
+        agents = [_sig_agent(k, v) for k, v in sorted(sig.items())]
 
     setup = classify_setup(indicators, entry_price) if indicators else None
 
     # ── Price path between entry and exit ────────────────────────────────────
     path: dict = {}
+    bars: list[dict] = []
+    c_hhmm: str | None = None
     try:
         from app.data.candle_store import read_bars
         day = opened.astimezone(IST).date().isoformat() if opened else None
         if day and entry_price:
             bars = await asyncio.to_thread(read_bars, symbol, day, 60)
+            if len(bars) < 200:
+                # No live capture for that day (the system was off Nov 6-23
+                # 2026): use the provider bars the backtest itself traded on,
+                # or every such loss is blamed "unknown".
+                from app.agents.counterfactual import _provider_bars
+                bars = await _provider_bars(symbol, day) or bars
             o_hhmm = entry_hhmm
             c_hhmm = closed.astimezone(IST).strftime("%H:%M") if closed else None
             window = [b for b in bars
@@ -661,6 +704,14 @@ async def trade_postmortem(trade_id: str) -> dict:
                     "round-trip cost, so there was never a gain that could have been "
                     "banked. This is an entry that did not work, not an exit that let "
                     f"one go; it then ran to {path['worst_pct']}%.")
+            elif (path.get("gave_back_pct") and path["gave_back_pct"] > 0.3
+                  and best < _lock_gain_pct()):
+                # Same split as the blame below: a peak under the live
+                # profit-lock is a move too small to keep, not an exit fault.
+                causes.append(
+                    f"It peaked at {best}%, below the {_lock_gain_pct()}% profit-lock, "
+                    f"and ran to {path['worst_pct']}% — the entry found too small a "
+                    "move to keep.")
             elif path.get("gave_back_pct") and path["gave_back_pct"] > 0.3:
                 causes.append(
                     f"It was up {best}% at best and gave back "
@@ -691,7 +742,15 @@ async def trade_postmortem(trade_id: str) -> dict:
             blame = {"target": "unknown", "headline": "Not enough price history to attribute this loss",
                      "detail": "The 1-minute bars for this day are not in the store, so how far the "
                                "trade went in each direction cannot be reconstructed."}
-        elif path.get("recovered_after_exit"):
+        elif path.get("recovered_after_exit") and "stop" in (exit_reason or "").lower() \
+                and path.get("bars_after_exit", 0) and path["best_after_exit_pct"] is not None \
+                and _recovered_soon(bars, c_hhmm, entry_price):
+            # Only a STOP that the price reversed through soon after is an exit
+            # fault. "It traded above the round trip at some point in the rest
+            # of the day" is true of ~3/4 of losers (2026-11-24: 31/41 blamed
+            # on the exit), yet holding to the close was measured null vs the
+            # live exits (43k entries, 53 days, t -0.50). Blaming the exit on
+            # that hindsight pointed every fix at the wrong half.
             # Checked BEFORE the entry test, and for every exit rule rather than
             # just stops. If the name went on to clear the round trip while we
             # were out, the direction was right and the exit was early — calling
@@ -724,6 +783,22 @@ async def trade_postmortem(trade_id: str) -> dict:
                            "never a profit here to protect, so no exit rule could have rescued it."),
                 "agents_implicated": voted_buy_names,
             }
+        elif (path.get("gave_back_pct") and path["gave_back_pct"] > 0.3
+              and best is not None and best < _lock_gain_pct()):
+            # Peaked above the round trip but below the live profit-lock, then
+            # faded. No live exit rule arms below the lock, and arming it
+            # earlier (lock 0.5%) was measured no better than live on 907k
+            # entries — so this is a move too small to keep, i.e. the ENTRY.
+            # 2026-11-24: this branch used to say "exit" and blamed the exit
+            # for 26 of 43 losses on peaks as small as +0.30%.
+            blame = {
+                "target": "entry",
+                "headline": "The move was too small to keep",
+                "detail": (f"It peaked at {best}%, below the {_lock_gain_pct()}% level where the "
+                           f"profit-lock engages, and closed at {pnl_pct:.2f}%. Locking earlier was "
+                           "measured no better, so the entry simply did not find a big enough move."),
+                "agents_implicated": voted_buy_names,
+            }
         elif path.get("gave_back_pct") and path["gave_back_pct"] > 0.3:
             blame = {
                 "target": "exit",
@@ -740,6 +815,11 @@ async def trade_postmortem(trade_id: str) -> dict:
                            "then closed near the middle. Small enough that this is the cost floor "
                            "rather than a mistake."),
             }
+        if path.get("recovered_after_exit") and blame.get("target") != "exit":
+            blame["hindsight_note"] = (
+                f"Later in the day the price reached {path['best_after_exit_pct']}% above the "
+                "entry. Hindsight only: holding to the close was measured no better than the "
+                "live exits (2026-11-24, t -0.50), so this is not counted against the exit.")
         if setup and SETUP_EDGE_PP.get(setup, 0) < 0 and setup in SETUP_ESTABLISHED:
             blame["contributing"] = (
                 f"The setup was '{setup}', which is measured at {SETUP_EDGE_PP[setup]}pp against "
@@ -1064,9 +1144,7 @@ async def session_postmortem(session_id: str, narrative: bool = False,
             mc, sig = _asdict(tr[3]), _asdict(tr[7])
             entry, exit_p, pnl = tr[4], tr[5], tr[1]
             pnl_pct = float(pnl) * 100.0 if pnl is not None else None
-            agents = [{"agent": k, "action": v, "weight": None,
-                       "confidence": None, "reasoning": None}
-                      for k, v in sorted(sig.items())]
+            agents = [_sig_agent(k, v) for k, v in sorted(sig.items())]
             trades.append({
                 "source": "trade_records",
                 "entry_time": str(tr[0]), "entry_price": entry,
@@ -1083,9 +1161,10 @@ async def session_postmortem(session_id: str, narrative: bool = False,
                 "exit_reason": (mc or {}).get("exit_reason"),
                 "loss_reason": _loss_reason((mc or {}).get("exit_reason"), pnl_pct, tr[2]),
                 "agents": agents,
-                "voted_buy": sorted(k for k, v in sig.items() if str(v).upper() == "BUY"),
-                "voted_against": sorted(k for k, v in sig.items()
-                                        if str(v).upper() in ("SELL", "HOLD")),
+                "voted_buy": sorted(a["agent"] for a in agents
+                                    if str(a["action"] or "").upper() == "BUY"),
+                "voted_against": sorted(a["agent"] for a in agents
+                                        if str(a["action"] or "").upper() in ("SELL", "HOLD")),
             })
 
     baseline = await baseline_if_warm()

@@ -152,12 +152,32 @@ def _scan_severity(text: str) -> str:
 # query pinned PostgreSQL to "error" indefinitely. A warning that cannot clear
 # itself trains you to ignore the panel.
 _SEVERITY_WINDOW_S = 6 * 3600
+# Errors in the first minutes after a container starts are the boot race (its
+# broker/DB not up yet: "Connection refused — retry in 5s") and clear on their
+# own; counting them flagged a healthy Sentiment Agent for 6 h every morning.
+# A dependency that stays down keeps logging after the grace and still shows.
+_BOOT_GRACE_S = 120
+
+
+async def _started_at(client: httpx.AsyncClient, name: str) -> int:
+    """Container start time (epoch s), 0 if unknown."""
+    try:
+        r = await client.get(f"/containers/{name}/json", timeout=4.0)
+        r.raise_for_status()
+        ts = (r.json().get("State") or {}).get("StartedAt") or ""
+        return int(datetime.fromisoformat(ts[:19] + "+00:00").timestamp())
+    except Exception:
+        return 0
 
 
 async def _severity_for(client: httpx.AsyncClient, name: str, tail: int = 200) -> str:
-    """Worst severity in the last `tail` lines, restricted to the recent window."""
+    """Worst severity in the last `tail` lines, restricted to the recent window
+    and excluding the boot grace after the container's last start."""
     try:
         since = int(time.time()) - _SEVERITY_WINDOW_S
+        started = await _started_at(client, name)
+        if started:
+            since = max(since, started + _BOOT_GRACE_S)
         r = await client.get(
             f"/containers/{name}/logs",
             params={"stdout": 1, "stderr": 1, "tail": tail,

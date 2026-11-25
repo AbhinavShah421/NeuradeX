@@ -95,6 +95,8 @@ _DDL = [
     # Label columns on the existing decisions table.
     "ALTER TABLE session_decisions ADD COLUMN IF NOT EXISTS cf_pnl_pct DOUBLE PRECISION",
     "ALTER TABLE session_decisions ADD COLUMN IF NOT EXISTS cf_labeled_at TIMESTAMPTZ",
+    # Mirrored short label (research only): see agents/short_counterfactual.
+    "ALTER TABLE session_decisions ADD COLUMN IF NOT EXISTS cf_short_pnl_pct DOUBLE PRECISION",
     # Persist decision-time fingerprints and the non-operative per-agent memory
     # comparison so the shadow result can be evaluated against the later label.
     "ALTER TABLE session_decisions ADD COLUMN IF NOT EXISTS fingerprint JSONB",
@@ -314,6 +316,12 @@ EXIT_VARIANTS: dict[str, dict] = {
     # ARMING RATE is the signal — it fired on 14 of 77 trades.
     "atr_live_lock05_run": {**LIVE_POLICY, "atr_scale": 7.75, "atr_floor": 0.3,
                             "lock_gain": 0.5},
+    # Paper's drop-pattern exit (sessions_service: 6 consecutive lower closes,
+    # held >= 6 min, only when nothing else fired). It runs in PAPER ONLY, so
+    # neither replay/backtest nor the CF label models it, and it had never been
+    # measured. Found 2026-11-25: it closed MFSL at -0.74% (before the -1.5%
+    # stop) and HMAAGRO at -0.17% (after a +0.94% peak).
+    "live_drop6": {**LIVE_POLICY, "drop_candles": 6},
 }
 
 
@@ -442,6 +450,12 @@ def _simulate_policy(bars: list[dict], inds: list[dict], entry_idx: int,
                 and ind.get("rsi", 50.0) > 75 and mom5 < 0):
             exit_price = sell_fill(price)
             break
+        dn = int(policy.get("drop_candles") or 0)
+        if dn and held >= dn and i - dn >= entry_idx:
+            closes = [bars[j]["close"] for j in range(i - dn, i + 1)]
+            if all(closes[k] > closes[k + 1] for k in range(dn)):
+                exit_price = sell_fill(price)
+                break
     if exit_price is None:                      # ran off the end of the day's bars
         exit_price = sell_fill(bars[last_i]["close"])
 
@@ -540,14 +554,17 @@ async def label_pending(max_days: int = _LABEL_BATCH_DAYS) -> dict:
 
         updates = []
         for r in day_rows:
-            cf = None
+            cf = cf_short = None
             if bars:
                 idx = _bar_index_for_time(bars, r[3])
                 if idx is not None and idx + 1 < len(bars):
                     # Enter at the NEXT bar's open — the decision is made on the
                     # closed candle, exactly like the live entry path.
                     cf = _simulate_policy(bars, inds, idx + 1, LIVE_POLICY)
-            updates.append({"id": r[0], "cf": cf})
+                    # The mirrored short, research only (NeuradeX is long-only).
+                    from app.agents.short_counterfactual import simulate_short
+                    cf_short = simulate_short(bars, inds, idx + 1)
+            updates.append({"id": r[0], "cf": cf, "cfs": cf_short})
             if cf is None:
                 skipped += 1
             else:
@@ -558,7 +575,7 @@ async def label_pending(max_days: int = _LABEL_BATCH_DAYS) -> dict:
             for u in updates:
                 await conn.execute(_t("""
                     UPDATE session_decisions
-                    SET cf_pnl_pct = :cf, cf_labeled_at = NOW()
+                    SET cf_pnl_pct = :cf, cf_short_pnl_pct = :cfs, cf_labeled_at = NOW()
                     WHERE id = :id
                 """), u)
 

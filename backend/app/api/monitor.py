@@ -296,14 +296,24 @@ async def session_state():
 # ── Probes ───────────────────────────────────────────────────────────────────
 
 async def _probe_http(url: str) -> dict:
-    try:
-        async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT) as c:
-            r = await c.get(url)
-        # Any answer proves reachability; 4xx still means the process is serving.
-        ok = r.status_code < 500
-        return {"ok": ok, "detail": f"HTTP {r.status_code}"}
-    except Exception as exc:
-        return {"ok": False, "detail": type(exc).__name__}
+    # One retry on a transport failure: a single slow reply is not an outage.
+    # 2026-11-24 the Docs Site (4.9 s) and Sentiment Agent (2.2 s) each answered
+    # one probe late and were painted CRITICAL, then served in <15 ms. A service
+    # that is really down fails both attempts and still reports critical.
+    last = "unknown"
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT) as c:
+                r = await c.get(url)
+            # Any answer proves reachability; 4xx still means the process is serving.
+            ok = r.status_code < 500
+            detail = f"HTTP {r.status_code}" + (" (2nd try)" if attempt else "")
+            return {"ok": ok, "detail": detail}
+        except Exception as exc:
+            last = type(exc).__name__
+            if attempt == 0:
+                await asyncio.sleep(1.0)
+    return {"ok": False, "detail": f"{last} (twice)"}
 
 
 async def _probe_postgres() -> dict:

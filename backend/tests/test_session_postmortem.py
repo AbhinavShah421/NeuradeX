@@ -153,3 +153,29 @@ def test_loss_reason_reports_the_mechanism_not_a_theory():
     assert _loss_reason("unknown", -0.2, 10) == "exit reason not recorded"
     # An unrecognised reason is passed through, not swallowed.
     assert _loss_reason("ensemble_sell", -0.2, 10) == "ensemble_sell"
+
+
+# ── 2026-11-24: hindsight must not blame the exit ─────────────────────────────
+
+def test_recovered_soon_needs_a_close_within_window():
+    from app.services import session_postmortem as pm
+    bars = [{"time": f"11:{i:02d}", "close": 100.0} for i in range(60)]
+    assert not pm._recovered_soon(bars, "11:00", 100.0)
+    bars[45]["close"] = 101.0                       # 45 min after exit: too late
+    assert not pm._recovered_soon(bars, "11:00", 100.0)
+    bars[10]["close"] = 101.0                       # 10 min after exit: counts
+    assert pm._recovered_soon(bars, "11:00", 100.0)
+
+
+def test_lock_gain_matches_live_policy():
+    from app.services import session_postmortem as pm
+    from app.agents.counterfactual import LIVE_POLICY
+    assert pm._lock_gain_pct() == float(LIVE_POLICY["lock_gain"])
+
+
+def test_sig_agent_reads_both_agent_signal_shapes():
+    from app.services.session_postmortem import _sig_agent
+    assert _sig_agent("rl", "BUY")["action"] == "BUY"
+    a = _sig_agent("meanrev", {"signal": "BUY", "weight": 2.01, "confidence": 0.84})
+    assert a == {"agent": "meanrev", "action": "BUY", "weight": 2.01,
+                 "confidence": 0.84, "reasoning": None}

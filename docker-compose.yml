@@ -9,7 +9,8 @@ services:
     # Docker's default /dev/shm is 64M; parallel hash joins over session_decisions
     # failed with "could not resize shared memory segment" (2026-11-24, the
     # action-rate weight sync). max_parallel_workers_per_gather is also pinned
-    # to 2 via ALTER SYSTEM — on 0.5 CPU, more workers only cost shared memory.
+    # to 0 via ALTER SYSTEM (2 still overflowed): on 0.5 CPU, parallel workers
+    # only cost shared memory. The sync then completes in ~23 s.
     shm_size: 256m
     environment:
       POSTGRES_USER: stock_user

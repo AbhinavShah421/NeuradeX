@@ -49,6 +49,21 @@ async def audit(full: bool = False):
     return {"status": "success", "data": await run_audit(full=full)}
 
 
+@router.get("/losses")
+async def losses(hours: int = 3):
+    """Deep-dive of every losing trade closed in the window: per-trade post-mortem
+    (price path, entry-vs-exit blame, setup, votes) plus causes vs a winners control."""
+    from app.services.component_audit import loss_review
+    return {"status": "success", "data": await loss_review(max(1, min(hours, 72)))}
+
+
+@router.get("/rallies")
+async def rallies():
+    """Paper stocks up >= 1.5% (from open or day low) with no position, and why the gate holds off."""
+    from app.services.component_audit import live_rallies
+    return {"status": "success", "data": await live_rallies()}
+
+
 @router.get("/missed")
 async def missed(hours: int = 3):
     """No-trade sessions whose price rose >= 1.5%: the gate that blocked the start

@@ -1731,6 +1731,11 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
             exc_info=True,
         )
 
+    # Market context (position vs open, gap, prior-day levels, opening range,
+    # Nifty): recorded for research, gates nothing. See services/market_context.
+    from app.services.market_context import decision_context
+    ctx = await decision_context(s.get("date"), window, s.get("prior_levels"))
+
     decision = {
         "time": candle.get("time"),
         "price": round(candle["close"], 2),
@@ -1751,6 +1756,7 @@ async def _step(s: dict, window: list[dict], force_close: bool) -> None:
             "sma5": round(ind.get("sma5", 0.0), 2),
             "sma20": round(ind.get("sma20", 0.0), 2),
             "atr": round(ind.get("atr", 0.0), 2),
+            **{f"ctx_{k}": v for k, v in ctx.items()},
         },
         "agents": [
             {

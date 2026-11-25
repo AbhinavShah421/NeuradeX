@@ -87,3 +87,16 @@ def test_entry_past_end_of_day_is_unlabelable():
     bars = _flat_day(n=5)
     assert _simulate_long(bars, entry_idx=5) is None
     assert _simulate_long(bars, entry_idx=99) is None
+
+
+def test_drop_candles_exit_fires_on_six_lower_closes_only_when_set():
+    from app.agents.counterfactual import _simulate_policy, LIVE_POLICY
+    # six lower closes, then a full recovery: only the drop exit sells the low
+    closes = [100.0] * 12 + [99.9, 99.8, 99.7, 99.6, 99.5, 99.4] + [100.5] * 60
+    bars = [{"time": f"{10 + (i + 15) // 60:02d}:{(i + 15) % 60:02d}", "open": c, "high": c,
+             "low": c, "close": c} for i, c in enumerate(closes)]
+    inds = [{"atr": 0.0, "rsi": 50.0, "mom5": 0.0, "sma5": 200.0, "sma20": 100.0} for _ in bars]
+    live = _simulate_policy(bars, inds, 0, LIVE_POLICY)
+    drop = _simulate_policy(bars, inds, 0, {**LIVE_POLICY, "drop_candles": 6})
+    assert live is not None and drop is not None
+    assert drop < live           # the drop exit closed it at the 6th lower close

@@ -1,7 +1,19 @@
 """Technical Analysis Agent — RSI, MACD, Bollinger Bands, VWAP, SMA crossover."""
 from __future__ import annotations
 import math
+import os
 from .base import AgentSignal, BaseAgent
+
+# Trend terms (price above VWAP, MACD bullish, SMA5 > SMA20) pointed the wrong way
+# on this universe. Recomputed from real bars on 101,623 labelled decisions over
+# 58 days (2026-11-24, matching recorded votes 95.7%): the shipped score's BUY
+# votes did WORSE than its non-BUY votes (lift -0.036 pp, t -2.14); scoring on
+# the mean-reversion terms alone (RSI + Bollinger) gave +0.072 pp, t +3.77,
+# better on 42/58 days, positive in both halves (early t +4.47, late t +1.40).
+# Independently, entries far above VWAP average -0.263% vs -0.117% far below
+# (t -2.82). The trend terms are still computed and reported, just not scored.
+# NEURADEX_TECH_TREND=1 restores the old score.
+_TREND_SCORED = os.getenv("NEURADEX_TECH_TREND", "0").strip().lower() in ("1", "true", "on")
 
 
 class TechnicalAgent(BaseAgent):
@@ -44,15 +56,16 @@ class TechnicalAgent(BaseAgent):
         else:
             signals["rsi"] = "neutral"
 
-        # MACD
+        # MACD (trend term — reported; scored only with NEURADEX_TECH_TREND=1)
+        trend = 0.0
         if macd_line > sig_line and hist > 0:
-            score += 0.25; signals["macd"] = "bullish_cross"
+            trend += 0.25; signals["macd"] = "bullish_cross"
         elif macd_line < sig_line and hist < 0:
-            score -= 0.25; signals["macd"] = "bearish_cross"
+            trend -= 0.25; signals["macd"] = "bearish_cross"
         elif hist > 0:
-            score += 0.10; signals["macd"] = "rising"
+            trend += 0.10; signals["macd"] = "rising"
         else:
-            score -= 0.10; signals["macd"] = "falling"
+            trend -= 0.10; signals["macd"] = "falling"
 
         # Bollinger Bands
         if bb_pct < 0.20:
@@ -64,19 +77,22 @@ class TechnicalAgent(BaseAgent):
         else:
             score -= 0.05
 
-        # VWAP
+        # VWAP (trend term)
         if vwap and price > vwap:
-            score += 0.15; signals["vwap"] = "above"
+            trend += 0.15; signals["vwap"] = "above"
         elif vwap and price < vwap:
-            score -= 0.15; signals["vwap"] = "below"
+            trend -= 0.15; signals["vwap"] = "below"
         else:
             signals["vwap"] = "at"
 
-        # SMA crossover
+        # SMA crossover (trend term)
         if sma5 > sma20:
-            score += 0.10; signals["sma"] = "golden_cross"
+            trend += 0.10; signals["sma"] = "golden_cross"
         else:
-            score -= 0.10; signals["sma"] = "death_cross"
+            trend -= 0.10; signals["sma"] = "death_cross"
+
+        if _TREND_SCORED:
+            score += trend
 
         score = max(-1.0, min(1.0, score))
 
